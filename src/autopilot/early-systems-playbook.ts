@@ -47,6 +47,8 @@ export interface PlaybookProgress {
   /** Actions that should be force-allowed even when gatherBusy (interrupt path). */
   interruptActions: AutopilotAction[];
   counts: PlaybookCounts;
+  /** True after a successful Cheap Bait purchase (inventory scrape is often empty/icon-only). */
+  baitOwned: boolean;
   targets: {
     coalMin: number;
     coalMax: number;
@@ -61,6 +63,9 @@ interface PersistedPlaybook {
   version: 1;
   stage: EarlyStageId;
   counts: PlaybookCounts;
+  /** Sticky trust that bait was purchased; cleared only on fishing missing_requirement. */
+  baitOwned?: boolean;
+  lastBaitPurchaseAt?: string;
   completedAt?: string;
 }
 
@@ -132,6 +137,8 @@ function loadPersisted(): PersistedPlaybook {
       version: 1,
       stage: parsed.stage,
       counts: { ...emptyCounts(), ...parsed.counts },
+      baitOwned: Boolean(parsed.baitOwned),
+      lastBaitPurchaseAt: parsed.lastBaitPurchaseAt,
       completedAt: parsed.completedAt,
     };
   } catch {
@@ -172,6 +179,18 @@ function invCount(snapshot: GameSnapshot, names: string[]): number {
   return max;
 }
 
+
+/** Inventory is icon-heavy; trust merchant purchase + stage progression as bait presence. */
+function trustHasBait(snapshot: GameSnapshot, baitOwned: boolean, stage: EarlyStageId): boolean {
+  if (snapshot.flags.hasBait) return true;
+  if (invCount(snapshot, ['Cheap Bait', 'Bait']) > 0) return true;
+  if (baitOwned) return true;
+  // Once past buy_bait, assume bait was obtained (recovers from pre-baitOwned runs).
+  const idx = STAGE_ORDER.indexOf(stage);
+  if (idx > STAGE_ORDER.indexOf('buy_bait')) return true;
+  return false;
+}
+
 function syncCountsFromSnapshot(counts: PlaybookCounts, snapshot: GameSnapshot): PlaybookCounts {
   const next = { ...counts };
   const coal = invCount(snapshot, ['Coal Ore', 'Coal']);
@@ -202,13 +221,18 @@ function effectiveCod(counts: PlaybookCounts): number {
   return Math.max(counts.rawCod, Math.min(COD_MAX, estimate));
 }
 
-function deriveStage(counts: PlaybookCounts, snapshot: GameSnapshot, persisted: EarlyStageId): EarlyStageId {
+function deriveStage(
+  counts: PlaybookCounts,
+  snapshot: GameSnapshot,
+  persisted: EarlyStageId,
+  baitOwned: boolean,
+): EarlyStageId {
   if (persisted === 'complete') return 'complete';
 
   const coal = effectiveCoal(counts);
   const rawCod = effectiveCod(counts);
   const cooked = counts.cookedCod;
-  const hasBait = snapshot.flags.hasBait || invCount(snapshot, ['Cheap Bait', 'Bait']) > 0;
+  const hasBait = trustHasBait(snapshot, baitOwned, persisted);
 
   // Advance monotonically through STAGE_ORDER based on targets.
   const idx = STAGE_ORDER.indexOf(persisted);
@@ -247,7 +271,7 @@ function deriveStage(counts: PlaybookCounts, snapshot: GameSnapshot, persisted: 
   return persisted === 'mine_coal' && coal >= COAL_MIN ? 'sell_half' : persisted;
 }
 
-function stageMeta(stage: EarlyStageId): {
+function stageMeta(stage: EarlyStageId, baitOwned = false): {
   goal: string;
   preferred: AutopilotAction[];
   deprioritized: AutopilotAction[];
@@ -284,11 +308,15 @@ function stageMeta(stage: EarlyStageId): {
     case 'fish_cod':
       return {
         goal: `Fish ${COD_MIN}–${COD_MAX} Raw Cod`,
-        preferred: ['fish_cod', 'continue_current', 'buy_bait'],
-        deprioritized: ['gather_oak', 'gather_yew', 'mine_coal'],
+        // Once bait is trusted, never prefer buy_bait (HttpJev was looping purchases).
+        preferred: baitOwned
+          ? ['fish_cod', 'continue_current']
+          : ['fish_cod', 'buy_bait', 'continue_current'],
+        deprioritized: ['gather_oak', 'gather_yew', 'mine_coal', ...(baitOwned ? (['buy_bait'] as AutopilotAction[]) : [])],
         interrupt: ['fish_cod'],
-        hint:
-          'EARLY PLAYBOOK stage fish_cod: fish Cod. If current gather is not Cod, prefer fish_cod over continue_current. Buy bait if missing.',
+        hint: baitOwned
+          ? 'EARLY PLAYBOOK stage fish_cod: bait already owned — interrupt non-Cod gather into fish_cod. Do NOT buy more bait.'
+          : 'EARLY PLAYBOOK stage fish_cod: fish Cod. If bait missing buy once then fish. Prefer fish_cod over continue_current when not on Cod.',
       };
     case 'cook_cod':
       return {
@@ -352,6 +380,7 @@ export function evaluatePlaybook(
       deprioritizedActions: [],
       interruptActions: [],
       counts: emptyCounts(),
+      baitOwned: false,
       targets: { coalMin: COAL_MIN, coalMax: COAL_MAX, codMin: COD_MIN, codMax: COD_MAX },
       curriculumHint: 'Early playbook disabled (EARLY_PLAYBOOK=false).',
       complete: true,
@@ -360,7 +389,16 @@ export function evaluatePlaybook(
 
   const persisted = loadPersisted();
   const counts = syncCountsFromSnapshot(persisted.counts, snapshot);
-  let stage = deriveStage(counts, snapshot, persisted.stage);
+  // Recover pre-baitOwned runs that already advanced past buy_bait after purchases.
+  let baitOwned = Boolean(persisted.baitOwned);
+  if (!baitOwned && STAGE_ORDER.indexOf(persisted.stage) > STAGE_ORDER.indexOf('buy_bait')) {
+    baitOwned = true;
+  }
+  if (!baitOwned && (snapshot.flags.hasBait || invCount(snapshot, ['Cheap Bait', 'Bait']) > 0)) {
+    baitOwned = true;
+  }
+
+  let stage = deriveStage(counts, snapshot, persisted.stage, baitOwned);
 
   // Monotonic advance: never go backwards in STAGE_ORDER.
   const prevIdx = STAGE_ORDER.indexOf(persisted.stage);
@@ -372,8 +410,9 @@ export function evaluatePlaybook(
     stage = 'sell_half';
   }
   if (stage === 'sell_half' && counts.sells >= 1) stage = 'buy_bait';
-  if (stage === 'buy_bait' && (snapshot.flags.hasBait || invCount(snapshot, ['Cheap Bait']) > 0)) {
+  if (stage === 'buy_bait' && trustHasBait(snapshot, baitOwned, stage)) {
     stage = 'fish_cod';
+    baitOwned = true;
   }
   if (stage === 'fish_cod' && (effectiveCod(counts) >= COD_MIN || counts.codBusyCycles >= COD_BUSY_TARGET)) {
     stage = 'cook_cod';
@@ -383,13 +422,15 @@ export function evaluatePlaybook(
   if (stage === 'hunt_rabbits' && counts.rabbitHunts >= 2) stage = 'explore_map';
   if (stage === 'explore_map' && counts.mapPeeks >= 1) stage = 'complete';
 
-  const meta = stageMeta(stage);
+  const meta = stageMeta(stage, baitOwned);
   const complete = stage === 'complete';
 
   savePersisted({
     version: 1,
     stage,
     counts,
+    baitOwned,
+    lastBaitPurchaseAt: persisted.lastBaitPurchaseAt,
     completedAt: complete ? persisted.completedAt ?? new Date().toISOString() : undefined,
   });
 
@@ -402,6 +443,7 @@ export function evaluatePlaybook(
     deprioritizedActions: meta.deprioritized,
     interruptActions: meta.interrupt,
     counts,
+    baitOwned,
     targets: { coalMin: COAL_MIN, coalMax: COAL_MAX, codMin: COD_MIN, codMax: COD_MAX },
     curriculumHint: meta.hint,
     complete,
@@ -428,8 +470,20 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
   if (action === 'explore_map') {
     if (!/failed/i.test(outcome)) counts.mapPeeks += 1;
   }
+  let baitOwned = Boolean(persisted.baitOwned);
+  let lastBaitPurchaseAt = persisted.lastBaitPurchaseAt;
   if (action === 'buy_bait' && /purchased/i.test(outcome)) {
-    if (stage === 'buy_bait') stage = 'fish_cod';
+    baitOwned = true;
+    lastBaitPurchaseAt = new Date().toISOString();
+    if (stage === 'buy_bait' || STAGE_ORDER.indexOf(stage) <= STAGE_ORDER.indexOf('buy_bait')) {
+      stage = 'fish_cod';
+    }
+  }
+  if (action === 'fish_cod' && /missing_requirement/i.test(outcome)) {
+    baitOwned = false;
+    if (STAGE_ORDER.indexOf(stage) >= STAGE_ORDER.indexOf('fish_cod')) {
+      stage = 'buy_bait';
+    }
   }
   if (action === 'cook_cod' && /restarted|already_busy|kept_current/i.test(outcome)) {
     counts.cookedCod = Math.max(counts.cookedCod, counts.cookedCod + 1);
@@ -441,7 +495,7 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
     }
   }
 
-  savePersisted({ version: 1, stage, counts });
+  savePersisted({ version: 1, stage, counts, baitOwned, lastBaitPurchaseAt });
 }
 
 /**
@@ -457,8 +511,15 @@ export function filterAllowedByPlaybook(
 
   const resource = snapshot.currentAction?.resource ?? snapshot.currentAction?.label ?? '';
   const busy = Boolean(snapshot.currentAction?.busy || snapshot.flags.gatherBusy);
+  const baitTrusted = playbook.baitOwned || snapshot.flags.hasBait;
 
   let next = allowed.filter((a) => !playbook.deprioritizedActions.includes(a));
+
+  // Stop endless buy_bait once bait is trusted or stage is already fishing/cooking.
+  const pastBuyBait = STAGE_ORDER.indexOf(playbook.stage) > STAGE_ORDER.indexOf('buy_bait');
+  if ((baitTrusted || pastBuyBait) && playbook.stage !== 'buy_bait') {
+    next = next.filter((a) => a !== 'buy_bait');
+  }
 
   // While on a mismatched gather, drop continue_current so Jev can pick the stage action.
   const preferredGather = playbook.preferredActions.find((a) => GATHER_RESOURCE[a]);
@@ -505,8 +566,20 @@ export function attachPlaybookToSnapshot(
   snapshot: GameSnapshot,
   playbook: PlaybookProgress,
 ): GameSnapshot {
+  const hasBait =
+    snapshot.flags.hasBait ||
+    playbook.baitOwned ||
+    STAGE_ORDER.indexOf(playbook.stage) > STAGE_ORDER.indexOf('buy_bait');
   return {
     ...snapshot,
+    flags: {
+      ...snapshot.flags,
+      hasBait,
+    },
+    inventory:
+      hasBait && (snapshot.inventory['Cheap Bait'] ?? 0) <= 0
+        ? { ...snapshot.inventory, 'Cheap Bait': Math.max(1, snapshot.inventory['Cheap Bait'] ?? 0) }
+        : snapshot.inventory,
     extensions: {
       ...snapshot.extensions,
       earlySystemsPlaybook: playbook,
@@ -527,6 +600,7 @@ export function formatPlaybookLogLine(playbook: PlaybookProgress): string {
     ` coal=${c.coal}/${playbook.targets.coalMin} (busyCycles=${c.coalBusyCycles})` +
     ` cod=${c.rawCod}/${playbook.targets.codMin} cooked=${c.cookedCod}` +
     ` sells=${c.sells} rabbits=${c.rabbitHunts} map=${c.mapPeeks}` +
+    ` baitOwned=${playbook.baitOwned}` +
     ` preferred=[${playbook.preferredActions.join(',')}]`
   );
 }

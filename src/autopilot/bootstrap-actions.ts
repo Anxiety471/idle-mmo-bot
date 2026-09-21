@@ -181,10 +181,15 @@ function gatherAction(
       const playbookWantsInterrupt =
         Boolean(playbook?.enabled && !playbook.complete && playbook.interruptActions.includes(id));
       const idleOrInterrupt = gatherIdle(ctx) || playbookWantsInterrupt;
+      const baitOk =
+        id !== 'fish_cod' ||
+        ctx.snapshot.flags.hasBait ||
+        Boolean(playbook?.baitOwned) ||
+        Boolean(playbook?.enabled && !playbook.complete && playbook.stage === 'fish_cod');
       return (
         ctx.snapshot.flags.sessionValid &&
         idleOrInterrupt &&
-        (id !== 'fish_cod' || ctx.snapshot.flags.hasBait) &&
+        baitOk &&
         (extraAllowed?.(ctx) ?? true)
       );
     },
@@ -302,16 +307,26 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
       const playbook = getPlaybookFromSnapshot(ctx.snapshot);
       const playbookWantsBait =
         Boolean(playbook?.enabled && !playbook.complete && playbook.stage === 'buy_bait');
+      // Never repurchase while playbook trusts bait or has already moved to fish/cook stages.
+      const baitTrusted =
+        ctx.snapshot.flags.hasBait ||
+        Boolean(playbook?.baitOwned) ||
+        (playbook?.enabled === true &&
+          !playbook.complete &&
+          playbook.stage !== 'buy_bait' &&
+          playbook.stage !== 'mine_coal' &&
+          playbook.stage !== 'sell_half');
       return (
         ctx.snapshot.flags.sessionValid &&
-        !ctx.snapshot.flags.hasBait &&
+        !baitTrusted &&
         (ctx.snapshot.gold ?? 0) >= 2 &&
         (ctx.config.buyBait || hasKillQuest(ctx) || combatLagging || playbookWantsBait)
       );
     },
     execute: async (ctx) => ({
       action: 'buy_bait',
-      outcome: await buyCheapBait(ctx.page, ctx.config, 1),
+      // Buy a stack so one purchase covers fish_cod (inventory scrape often misses bait).
+      outcome: await buyCheapBait(ctx.page, ctx.config, 20),
     }),
   },
   {
