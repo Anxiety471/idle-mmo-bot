@@ -38,7 +38,7 @@ Shared state snapshots passed to Jev: `GatherState`, `HuntState`, `BattleState`,
 
 | Module | Route | Flow |
 |--------|-------|------|
-| `gather.ts` | `/skills/view/woodcutting` | Detect `CURRENT ACTION` → busy; else select Oak Log → Start; handle replace dialog |
+| `gather.ts` | `/skills/view/woodcutting` | Wait for `CURRENT ACTION` or `Start` button after navigation, then detect busy/idle; select Oak Log → Start; handle replace dialog |
 | `combat.ts` | `/combat/battle` | Start Hunt → wait enemies → Stop → pick card → max/stance → Battle → Hunt More / Run Away |
 | `quest.ts` | `/quests` | Open card → Talk → dialogue → Overview progress → Turn In when enabled |
 

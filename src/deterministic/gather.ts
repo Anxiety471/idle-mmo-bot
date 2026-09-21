@@ -14,10 +14,30 @@ import { navigateTo } from '../browser.js';
 const WOODCUTTING_PATH = '/skills/view/woodcutting';
 const CURRENT_ACTION_MARKER = 'CURRENT ACTION';
 const DEFAULT_RESOURCE = 'Oak Log';
+/** Max time to wait for async gather panel after navigation. */
+const GATHER_UI_SETTLE_MS = 10_000;
+
+/**
+ * Wait until the woodcutting page shows either an active action or idle controls.
+ * The CURRENT ACTION panel loads asynchronously after domcontentloaded (~2–3s).
+ */
+async function waitForGatherUiSettled(page: Page, timeoutMs = GATHER_UI_SETTLE_MS): Promise<void> {
+  const busyIndicator = page.getByText(CURRENT_ACTION_MARKER);
+  const idleIndicator = page.getByRole('button', { name: 'Start', exact: true });
+
+  await busyIndicator
+    .or(idleIndicator)
+    .first()
+    .waitFor({ state: 'visible', timeout: timeoutMs })
+    .catch(() => {
+      // Best-effort: if neither appears, read state anyway rather than hanging forever.
+    });
+}
 
 /** Read gather page state without clicking anything. */
 export async function readGatherState(page: Page, config: AppConfig): Promise<GatherState> {
   await navigateTo(page, config, WOODCUTTING_PATH);
+  await waitForGatherUiSettled(page);
   const pageText = await page.locator('body').innerText();
   const busy = pageText.includes(CURRENT_ACTION_MARKER);
 
