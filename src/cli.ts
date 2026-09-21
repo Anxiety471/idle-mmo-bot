@@ -185,6 +185,9 @@ async function runFarmHearth(verbose: boolean): Promise<void> {
     await talkQuest(session.page, "Right. I'll fetch the logs.");
 
     while (true) {
+      // Re-open quest detail after gather navigates to woodcutting
+      await openQuest(session.page, config, HEARTH_QUEST);
+
       if (await isTurnInEnabled(session.page)) {
         console.log('[farm-hearth] Quest complete — turning in');
         const result = await turnInQuest(session.page);
