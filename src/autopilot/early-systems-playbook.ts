@@ -11,6 +11,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { getLogDir } from '../logging/jsonl-writer.js';
 import type { AutopilotAction, AutopilotContext, GameSnapshot } from '../types.js';
 
 export type EarlyStageId =
@@ -83,9 +84,12 @@ const COD_MAX = 50;
 const COAL_BUSY_TARGET = 90;
 const COD_BUSY_TARGET = 90;
 
-const STATE_PATH =
-  process.env.PLAYBOOK_STATE_PATH?.trim() ||
-  join(process.cwd(), 'logs', 'playbook-state.json');
+/** Resolved at call time so AUTOPILOT_LOG_DIR is honored after env load. */
+export function resolvePlaybookStatePath(): string {
+  const override = process.env.PLAYBOOK_STATE_PATH?.trim();
+  if (override) return override;
+  return join(getLogDir(), 'playbook-state.json');
+}
 
 const GATHER_RESOURCE: Record<string, RegExp> = {
   mine_coal: /coal/i,
@@ -116,10 +120,11 @@ function playbookEnabled(): boolean {
 
 function loadPersisted(): PersistedPlaybook {
   try {
-    if (!existsSync(STATE_PATH)) {
+    const statePath = resolvePlaybookStatePath();
+    if (!existsSync(statePath)) {
       return { version: 1, stage: 'mine_coal', counts: emptyCounts() };
     }
-    const parsed = JSON.parse(readFileSync(STATE_PATH, 'utf8')) as PersistedPlaybook;
+    const parsed = JSON.parse(readFileSync(statePath, 'utf8')) as PersistedPlaybook;
     if (parsed?.version !== 1 || !parsed.stage) {
       return { version: 1, stage: 'mine_coal', counts: emptyCounts() };
     }
@@ -136,8 +141,9 @@ function loadPersisted(): PersistedPlaybook {
 
 function savePersisted(state: PersistedPlaybook): void {
   try {
-    mkdirSync(dirname(STATE_PATH), { recursive: true });
-    writeFileSync(STATE_PATH, `${JSON.stringify(state, null, 2)}\n`);
+    const statePath = resolvePlaybookStatePath();
+    mkdirSync(dirname(statePath), { recursive: true });
+    writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[playbook] failed to persist state: ${message}`);
