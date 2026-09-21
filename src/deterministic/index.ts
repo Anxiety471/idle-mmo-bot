@@ -29,6 +29,7 @@ export {
   runAway,
   huntMore,
   waitForEnemies,
+  waitForEnemyCards,
 } from './combat.js';
 
 export {

@@ -53,7 +53,7 @@ Comments in each file note that UI selectors are live-tested but may drift.
 | Method | When called | Typical StubJev behavior |
 |--------|-------------|--------------------------|
 | `shouldInterruptGather(state)` | Before gather restart if another action may be running | `false` — never interrupt |
-| `decideHuntStop(state)` | During hunt polling | `true` when at least 1 enemy card visible |
+| `decideHuntStop(state)` | During hunt polling (Stop visible) | `true` when Total Enemies Found ≥ 1 |
 | `chooseStance(enemy)` | Before Battle click | `Balanced` |
 | `chooseMaxEnemies(enemy)` | Before Battle click | `1` |
 | `shouldFlee(battleState)` | Each poll during battle | `true` only if HP &lt; 25% detectable |
