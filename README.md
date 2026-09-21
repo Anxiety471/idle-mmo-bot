@@ -115,6 +115,8 @@ npm run farm-hearth
 
 Soft goals: keep skills training, advance combat for kill quests, accept/turn-in quests, rotate gather skills, smelt when coal stocked, sell configured junk only.
 
+The **bootstrap action list** (gather, hunt, quest, …) is a starting set — not a hard cap. As the bot explores Idle MMO, unregistered UI features are logged (`[autopilot:discover]`) and new loops are added via `registerDiscoveredAction()` + snapshot enrichers. An overseer agent can supervise logs; multi-bot parties are a future extension on the same per-account hooks.
+
 ```bash
 export JEV_API_TOKEN=your-key
 export STORAGE_STATE=./storage-state.json

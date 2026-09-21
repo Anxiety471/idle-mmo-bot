@@ -7,6 +7,7 @@ import {
   switchQuestTab,
   waitForQuestTabsSettled,
 } from '../deterministic/index.js';
+import { mapEnricher } from '../autopilot/snapshot-enrichers.js';
 
 const SKILL_IDS: SkillId[] = [
   'woodcutting',
@@ -168,7 +169,7 @@ export async function readGameSnapshot(page: Page, config: AppConfig): Promise<G
 
   const sessionValid = !/Register|Sign up|session expired/i.test(text);
 
-  return {
+  let snapshot: GameSnapshot = {
     location: detectLocation(text),
     pagePath: path,
     totalLevel,
@@ -181,6 +182,12 @@ export async function readGameSnapshot(page: Page, config: AppConfig): Promise<G
     acceptedQuests,
     pendingQuests,
     combatPhase,
+    features: {
+      meditationLocked: /Meditation/i.test(text) && /Total Lv\.?\s*50|Lv\.?\s*50/i.test(text),
+      slayerMentioned: /slayer/i.test(text),
+    },
+    discovered: { features: [], unregisteredRoutes: [] },
+    extensions: {},
     flags: {
       hasBait,
       bankNearby,
@@ -189,4 +196,18 @@ export async function readGameSnapshot(page: Page, config: AppConfig): Promise<G
       sessionValid,
     },
   };
+
+  try {
+    const mapPatch = await mapEnricher.enrich(page, config, snapshot);
+    snapshot = {
+      ...snapshot,
+      ...mapPatch,
+      zones: mapPatch.zones ?? snapshot.zones,
+      features: { ...snapshot.features, ...mapPatch.features },
+    };
+  } catch {
+    // Map enricher is best-effort.
+  }
+
+  return snapshot;
 }

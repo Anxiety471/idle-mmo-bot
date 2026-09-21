@@ -22,6 +22,17 @@
 
 An external overseer agent can supervise `npm run autopilot` logs; multi-bot party coordination is out of scope but uses the same per-account `SupervisorAdvisor` hook.
 
+### Extending the autopilot (not hard-limited to bootstrap)
+
+```
+registerBootstrapActions()     ← starter pack at startup
+registerDiscoveredAction(def)  ← add when a loop is scriptable
+SNAPSHOT_ENRICHERS.push(...)   ← add snapshot fields (zones, pets, …)
+discoverFeatures(page)         ← logs unregistered nav routes for overseer
+```
+
+New actions need: `id`, `description`, `isAllowed(snapshot)`, `execute(page)`, `safety` (no real-money). HttpJev and ProgressiveStubJev read descriptions from the registry automatically.
+
 ## Layers
 
 ### `src/config.ts`
@@ -63,9 +74,26 @@ Comments in each file note that UI selectors are live-tested but may drift.
 
 #### Implementations
 
-- **`StubJev`** — CLI default when no API token is set; conservative, no network calls.
-- **`HttpJev`** — real advisor via TypeSafe System One API (`POST /v1/systemone`). Enabled when `JEV_API_TOKEN` or `TYPESAFE_API_KEY` is set. On API error, falls back to StubJev and logs.
+- **`ProgressiveStubJev`** — autopilot default when no API token; rotates gather skills, prioritizes kill quests / turn-ins / combat XP.
+- **`StubJev`** — conservative defaults for single-purpose CLI commands.
+- **`HttpJev`** — real advisor via TypeSafe System One API (`POST /v1/systemone`). `chooseNextAction` uses a choice question over allowed actions. On API error, falls back to ProgressiveStubJev.
 - **`ConsoleJev`** — wraps any inner advisor and logs every decision; enabled with `-v`.
+
+#### Autopilot allowed actions
+
+| Action | Deterministic module |
+|--------|---------------------|
+| `continue_current` | poll/backoff |
+| `gather_oak` / `gather_yew` | `gather.ts` woodcutting |
+| `mine_coal` | `gather.ts` mining |
+| `fish_cod` | `gather.ts` fishing |
+| `buy_bait` | `merchant.ts` |
+| `hunt_battle` | `combat.ts` one hunt→battle round |
+| `quest_talk_accept` | `quest.ts` pending tab |
+| `quest_turnin` | `quest.ts` turn-in when enabled |
+| `craft_if_ready` | `craft.ts` smelt coal (minimal) |
+| `sell_junk` | `inventory.ts` Sell to Vendor (configured list) |
+| `idle` | backoff on unknown UI |
 
 #### TypeSafe API mapping (`HttpJev`)
 

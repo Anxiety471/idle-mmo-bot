@@ -110,20 +110,27 @@ export type MerchantStepResult = 'purchased' | 'failed' | 'no_action';
 
 export type InventoryStepResult = 'sold' | 'no_action' | 'failed';
 
-/** Supervisor loop action — one executed per autopilot cycle. */
-export type AutopilotAction =
-  | 'continue_current'
-  | 'gather_oak'
-  | 'gather_yew'
-  | 'mine_coal'
-  | 'fish_cod'
-  | 'buy_bait'
-  | 'hunt_battle'
-  | 'quest_talk_accept'
-  | 'quest_turnin'
-  | 'craft_if_ready'
-  | 'sell_junk'
-  | 'idle';
+/**
+ * Supervisor loop action id — open-ended string.
+ * Bootstrap ids are registered at startup; new loops add ids via registerDiscoveredAction().
+ */
+export type AutopilotAction = string;
+
+/** Well-known bootstrap action ids (not exhaustive as the bot discovers more loops). */
+export const BOOTSTRAP_ACTION_IDS = {
+  continue_current: 'continue_current',
+  gather_oak: 'gather_oak',
+  gather_yew: 'gather_yew',
+  mine_coal: 'mine_coal',
+  fish_cod: 'fish_cod',
+  buy_bait: 'buy_bait',
+  hunt_battle: 'hunt_battle',
+  quest_talk_accept: 'quest_talk_accept',
+  quest_turnin: 'quest_turnin',
+  craft_if_ready: 'craft_if_ready',
+  sell_junk: 'sell_junk',
+  idle: 'idle',
+} as const;
 
 export type CombatPhase = 'hunt' | 'battle' | 'enemy_select' | 'none';
 
@@ -141,6 +148,19 @@ export interface CurrentActionInfo {
   label?: string;
 }
 
+export interface SnapshotZone {
+  name: string;
+  levelReq?: number;
+  current?: boolean;
+}
+
+export interface DiscoveredFeature {
+  label: string;
+  route: string;
+  scriptable: boolean;
+  note: string;
+}
+
 export interface GameSnapshot {
   location: string;
   pagePath: string;
@@ -154,6 +174,14 @@ export interface GameSnapshot {
   acceptedQuests: SnapshotQuest[];
   pendingQuests: SnapshotQuest[];
   combatPhase: CombatPhase;
+  zones?: SnapshotZone[];
+  features?: Record<string, boolean | string | number>;
+  discovered?: {
+    features?: DiscoveredFeature[];
+    unregisteredRoutes?: string[];
+  };
+  /** Enricher-specific payloads; safe to extend without breaking Jev. */
+  extensions?: Record<string, unknown>;
   flags: {
     hasBait: boolean;
     bankNearby: boolean;

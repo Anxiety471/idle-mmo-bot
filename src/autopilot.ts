@@ -1,8 +1,11 @@
 import { loadConfig } from './config.js';
 import { launchBrowser } from './browser.js';
 import { executeAction } from './actions/executor.js';
+import { registerBootstrapActions } from './autopilot/bootstrap-actions.js';
+import { deriveAllowedActions } from './autopilot/action-registry.js';
+import { discoverFeatures, logDiscoveries, mergeDiscoveryIntoSnapshot } from './autopilot/discovery.js';
 import { createSupervisor } from './jev/create-jev.js';
-import { deriveAllowedActions, parseJunkSellItems } from './snapshot/allowed-actions.js';
+import { parseJunkSellItems } from './snapshot/allowed-actions.js';
 import { readGameSnapshot } from './snapshot/read-snapshot.js';
 import type { AutopilotAction, AutopilotContext } from './types.js';
 
@@ -19,9 +22,15 @@ function isGatherAction(action: AutopilotAction): boolean {
   return action.startsWith('gather_') || action === 'mine_coal' || action === 'fish_cod';
 }
 
+// Register bootstrap actions once; discovered actions register via registerDiscoveredAction().
+registerBootstrapActions();
+
 /**
  * Progressive supervisor autopilot:
- * snapshot → allowed actions → Jev choice → execute one action → repeat forever.
+ * snapshot → discovery → allowed actions → Jev choice → execute one action → repeat forever.
+ *
+ * The bootstrap action list is a starting set — extend via registerDiscoveredAction() as new
+ * scriptable loops are found (zones, tavern, campaign, pets, skills, etc.).
  */
 export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<void> {
   const config = loadConfig();
@@ -35,7 +44,8 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
   console.log(
     `[autopilot] Jev: ${hasJevToken ? 'HttpJev (TypeSafe API)' : 'ProgressiveStubJev (no token)'}`,
   );
-  console.log('[autopilot] Flow: snapshot → allowed actions → Jev → execute one action');
+  console.log('[autopilot] Flow: snapshot → discover → allowed → Jev → execute one action');
+  console.log('[autopilot] Bootstrap actions registered; discovery logs unregistered UI features');
 
   const context: AutopilotContext = {
     cycle: 0,
@@ -53,6 +63,9 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
         let snapshot;
         try {
           snapshot = await readGameSnapshot(session.page, config);
+          const discovered = await discoverFeatures(session.page);
+          snapshot = mergeDiscoveryIntoSnapshot(snapshot, discovered);
+          logDiscoveries(discovered, context.cycle);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           console.error(`[autopilot] snapshot failed: ${message}`);
@@ -60,7 +73,7 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
           break;
         }
 
-        const allowed = deriveAllowedActions(snapshot, config, junkItems);
+        const allowed = deriveAllowedActions(snapshot, config, junkItems, context);
         const action = await supervisor.chooseNextAction(snapshot, allowed, context);
         context.lastAction = action;
 
@@ -73,13 +86,20 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
             ` gold=${snapshot.gold ?? '?'} combat=${snapshot.combatLevel ?? '?'}` +
             ` busy=${snapshot.currentAction?.busy ?? false}`,
         );
+        if (snapshot.discovered?.unregisteredRoutes?.length) {
+          console.log(
+            `[autopilot] unregistered routes: ${snapshot.discovered.unregisteredRoutes.join(', ')}`,
+          );
+        }
         console.log(`[autopilot] allowed=[${allowed.join(', ')}] → ${action}`);
 
         let result;
         try {
           result = await executeAction(action, session.page, config, supervisor, {
+            snapshot,
             forceInterrupt: options.forceInterrupt,
             junkItems,
+            context,
           });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -102,5 +122,4 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
   }
 }
 
-// Re-export for CLI compatibility
 export type AutopilotOptions = RunAutopilotOptions;
