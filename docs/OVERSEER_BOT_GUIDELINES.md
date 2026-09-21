@@ -35,9 +35,12 @@ GameSnapshot → allowed-actions registry → Jev (HttpJev / ProgressiveStubJev)
 | Execute | `src/actions/executor.ts` → `src/deterministic/` | Playwright click paths |
 | Supervisor loop | `src/autopilot.ts` | Forever loop until SIGINT; relaunches browser on crash |
 
-**Early-systems playbook = curriculum, not a Jev replacement.** Stage targets and allowed-action filters guide *what you register and prioritize* while the character is low-level. Jev still picks among allowed actions each tick.
+**Early-systems playbook = curriculum, not a Jev replacement.** Implemented in `src/autopilot/early-systems-playbook.ts`. It tracks stage progress, filters deprioritized actions, injects interrupt actions when the wrong gather is running, and attaches `curriculumHint` to the snapshot for HttpJev. **Jev still chooses** among the filtered allowed set each tick.
 
-There is **no `EARLY_PLAYBOOK` env flag** in this repo today. Treat the stage list in [§5](#5-early-systems-playbook-stages) as your overseer curriculum; implement stage gating via `isAllowed()` filters and action registration when you add new loops.
+| Env | Default | Behavior |
+|-----|---------|----------|
+| `EARLY_PLAYBOOK` | **on** (unset = enabled) | Set `false`, `0`, or `off` to disable filters |
+| `PLAYBOOK_STATE_PATH` | `logs/playbook-state.json` | Persisted stage + counters (gitignored under `logs/`) |
 
 Bootstrap actions register at startup via `registerBootstrapActions()` in `src/autopilot/bootstrap-actions.ts`. Extend at runtime with `registerDiscoveredAction()` — see [ARCHITECTURE.md](../ARCHITECTURE.md).
 
@@ -88,6 +91,8 @@ Key `.env` variables (see `.env.example` for full list):
 | `JEV_NOUL_THRESHOLD` | `0.6` | Noul yes threshold for interrupt / stop / flee |
 | `JUNK_SELL_ITEMS` | Burnt Cod, Burnt Fish, Burnt Salmon | Vendor trash only |
 | `AUTOPILOT_LOG_DIR` | `./logs` | Structured JSONL output directory |
+| `EARLY_PLAYBOOK` | on (enabled) | Early-systems curriculum filters; set `false` to disable |
+| `PLAYBOOK_STATE_PATH` | `logs/playbook-state.json` | Playbook stage persistence |
 
 ### 3.4 Typecheck
 
@@ -134,9 +139,10 @@ All structured logs are **gitignored** under `logs/` by default (`AUTOPILOT_LOG_
 
 | Output | Path | Contents |
 |--------|------|----------|
-| `decisions.jsonl` | `{AUTOPILOT_LOG_DIR}/decisions.jsonl` | Per tick: cycle, snapshot summary, allowed actions, chosen action, outcome, backoffMs |
+| `decisions.jsonl` | `{AUTOPILOT_LOG_DIR}/decisions.jsonl` | Per tick: cycle, snapshot summary, playbook stage, allowed actions, chosen action, outcome, backoffMs |
 | `jev.jsonl` | `{AUTOPILOT_LOG_DIR}/jev.jsonl` | Per Jev call: method, model, answer, result, `fallback` on API failure |
-| Console | stdout | `[autopilot]`, `[autopilot:discover]`, `[combat]`, `[Jev:Console]` (with `-v`) |
+| `playbook-state.json` | `PLAYBOOK_STATE_PATH` (default under `logs/`) | Persisted early-playbook stage and counters |
+| Console | stdout | `[autopilot]`, `[autopilot:discover]`, `[playbook]`, `[combat]`, `[Jev:Console]` (with `-v`) |
 
 There is **no** separate `autopilot.log` file — use console output plus JSONL files.
 
@@ -179,23 +185,24 @@ Store project conventions in **mem0** (or your persistent memory store) so futur
 
 ### 4.1 Hunt found-cap (code-enforced; Jev cannot override)
 
-From `src/jev/hunt-cap.ts`:
+From `src/jev/hunt-cap.ts` (also mirrored in `src/deterministic/hunt-cap.ts`):
 
 ```
-effectiveCombatLevel = combatLevel if > 0, else ceil(totalLevel / 10), else 1
-huntFoundCap = min(10, max(1, ceil(effectiveCombatLevel / 2)))
+level = combatLevel if > 0, else max(1, ceil(totalLevel / 10))
+huntFoundCap = min(10, max(1, ceil(level / 2)))
 ```
 
 Examples: combat 1 → stop at **1** found; combat 20 → cap **10**. `pollUntilHuntStop()` checks the hard cap **before every Jev call**. Do not add Jev logic that tries to exceed this.
 
-### 4.2 Pre-battle FOOD packing heal (operational rule)
+### 4.2 Pre-battle FOOD packing heal (not mid-fight)
 
-**Pack and eat food before battle, not mid-fight.** The repo fishes Cod for food (`fish_cod`) and may flee below 25% HP (`shouldFlee`), but there is **no dedicated FOOD packing action yet**. When you extend combat:
+Idle MMO heals via food packed **before Battle**, not mid-fight clicks. Implemented in `selectBattleFood()` (`src/deterministic/combat.ts`):
 
-- Ensure inventory has cooked/edible food before `hunt_battle`
-- Do not click FOOD mid-battle unless you add an explicit, reviewed action for it
+```
+FOOD → Add → food-for-battle modal → select item → quantity Max → Add
+```
 
-Combat UI parsing already treats `FOOD` as a UI label, not an enemy name (`src/deterministic/combat.ts`).
+`configureAndBattle()` calls `selectBattleFood()` before clicking Battle. Preferred labels include **Cooked Cod** (`BATTLE_FOOD_LABELS`). The early playbook `hunt_rabbits` stage expects Cooked Cod packed this way. Do not add mid-fight FOOD clicking unless explicitly reviewed.
 
 ### 4.3 No membership / real-money spend
 
@@ -223,21 +230,23 @@ Never print or commit: `JEV_API_TOKEN`, `TYPESAFE_API_KEY`, passwords, `storage-
 
 ## 5. Early-systems playbook stages
 
-Use this as your **curriculum** while total/combat levels are low. Align allowed actions and registration with these stages; Jev picks among what you allow.
+When `EARLY_PLAYBOOK` is enabled (default), `evaluatePlaybook()` advances through these stages (`src/autopilot/early-systems-playbook.ts`). Targets: **30–50 Coal Ore**, **30–50 Raw Cod**, cook ~half into **Cooked Cod**, then hunt and map peek.
 
-| Stage | Goal | Repo hooks today |
-|-------|------|------------------|
-| 1. Coal | Mine Coal Ore for mats / combat stats | `mine_coal` → `gather.ts` mining |
-| 2. Careful sell | Sell vendor trash only; protect quest mats | `sell_junk` — never sells Oak, ores, bait, fish (`PROTECTED_ITEMS`) |
-| 3. Bait | Buy Cheap Bait when fishing | `buy_bait` — gold 2g, opt-in via `BUY_BAIT` or kill quest |
-| 4. Fish | Fish Cod for food + fishing XP | `fish_cod` — blocked without bait |
-| 5. Cook / smelt | Process mats when stocked | `craft_if_ready` smelts when Coal Ore ≥ 1 (ProgressiveStubJev prefers ≥ 5); full **cooking** autopilot action not registered yet — add via `registerDiscoveredAction()` when labels confirmed |
-| 6. Hunt rabbits | Kill quests + combat XP with food stocked | `hunt_battle` — kill quest pattern includes `rabbit`; pack food first (§4.2) |
-| 7. Map peek | Read zones without risky clicks | `explore_map` — opens map modal, read-only |
+| Stage ID | Goal | Primary actions |
+|----------|------|-----------------|
+| `mine_coal` | Mine 30–50 Coal Ore | `mine_coal` (interrupts Oak/Yew woodcutting) |
+| `sell_half` | Careful sell ~half excess; keep cook fuel | `market_sell_half`, `sell_junk` |
+| `buy_bait` | Buy Cheap Bait (gold only, 2g) | `buy_bait` |
+| `fish_cod` | Fish 30–50 Raw Cod | `fish_cod`, `buy_bait` if missing |
+| `cook_cod` | Cook Cod → Cooked Cod with Coal | `cook_cod` (`src/deterministic/cook.ts`) |
+| `sell_extras` | Sell extras; keep battle food | `market_sell_half`, `sell_junk` |
+| `hunt_rabbits` | Hunt Rabbits with pre-battle FOOD Add | `hunt_rabbits` (calls `selectBattleFood` + combat round) |
+| `explore_map` | Map peek / zone discovery | `explore_map` |
+| `complete` | Resume full progressive loop | All bootstrap actions; filters off |
 
-Quest flow woven throughout: `quest_talk_accept` (pending) → gather/combat progress → `quest_turnin` when `canTurnIn`.
+Quest flow still runs when allowed: `quest_turnin` → `quest_talk_accept` alongside playbook stages.
 
-ProgressiveStubJev priority hints (when no API token): turn-in → continue current → hunt (kill quest or combat lagging) → accept quest → buy bait → craft (coal ≥ 5) → gather rotation → sell junk → idle.
+ProgressiveStubJev respects playbook hints when no API token. HttpJev receives `curriculumHint` and playbook metadata in the snapshot.
 
 ---
 
@@ -259,7 +268,7 @@ Each autopilot cycle runs `discoverFeatures()` (`src/autopilot/discovery.ts`):
 4. Optionally push snapshot fields via `SNAPSHOT_ENRICHERS` (`src/autopilot/snapshot-enrichers.ts`)
 5. Typecheck, run autopilot briefly, verify `decisions.jsonl`
 
-Registered bootstrap action IDs (starting set): `continue_current`, `gather_oak`, `gather_yew`, `mine_coal`, `fish_cod`, `buy_bait`, `hunt_battle`, `quest_talk_accept`, `quest_turnin`, `craft_if_ready`, `sell_junk`, `idle`, plus `explore_map`.
+Registered bootstrap action IDs (starting set): `continue_current`, `gather_oak`, `gather_yew`, `mine_coal`, `fish_cod`, `buy_bait`, `cook_cod`, `craft_if_ready`, `market_sell_half`, `hunt_battle`, `hunt_rabbits`, `quest_talk_accept`, `quest_turnin`, `sell_junk`, `idle`, plus `explore_map`.
 
 HttpJev and ProgressiveStubJev read action descriptions from the registry automatically.
 
