@@ -104,20 +104,31 @@ npm run quest
 npm run farm-hearth
 ```
 
-### Autopilot (overnight)
+### Autopilot (progressive / overnight)
 
-Forever loop rotating soft goals: **quest → combat → gather → sell junk**. Uses **HttpJev** when `JEV_API_TOKEN` is set; relaunches the browser on session errors.
+`npm run autopilot` runs a **supervisor loop** until SIGINT:
+
+1. Build structured **GameSnapshot** (location, levels, gold, inventory, quests, combat phase)
+2. Derive **allowed actions** (gather, hunt, quest, craft, sell junk, …)
+3. **Jev** chooses one action (`HttpJev` when `JEV_API_TOKEN` set, else **ProgressiveStubJev**)
+4. Execute **one** deterministic action, sleep, repeat
+
+Soft goals: keep skills training, advance combat for kill quests, accept/turn-in quests, rotate gather skills, smelt when coal stocked, sell configured junk only.
+
+The **bootstrap action list** (gather, hunt, quest, …) is a starting set — not a hard cap. As the bot explores Idle MMO, unregistered UI features are logged (`[autopilot:discover]`) and new loops are added via `registerDiscoveredAction()` + snapshot enrichers. An overseer agent can supervise logs; multi-bot parties are a future extension on the same per-account hooks.
 
 ```bash
 export JEV_API_TOKEN=your-key
 export STORAGE_STATE=./storage-state.json
 npm run autopilot
 
-# Log every Jev decision
-npm run autopilot -- -v
+# Log every Jev decision; force combat interrupt on replace dialog
+npm run autopilot -- -v --interrupt
 ```
 
-Optional: `AUTOPILOT_GATHER_SKILL` (default `woodcutting`), `AUTOPILOT_GATHER_RESOURCE` (default skill default).
+Optional: `JUNK_SELL_ITEMS=Burnt Cod,Burnt Fish` (never sells Oak Log, ores, bait).
+
+An overseer agent can supervise this loop; multi-bot parties are a future extension (hooks are per-account via `JevAdvisor`).
 
 ### Combat
 

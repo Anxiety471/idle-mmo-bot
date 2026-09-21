@@ -1,23 +1,39 @@
-import type { JevAdvisor } from './types.js';
 import type {
+  AutopilotAction,
+  AutopilotContext,
   BattleState,
   EnemyInfo,
+  GameSnapshot,
   GatherState,
   HuntState,
   QuestInfo,
   Stance,
 } from '../types.js';
-import { StubJev } from './stub-jev.js';
+import { ProgressiveStubJev } from './progressive-stub.js';
+import type { SupervisorAdvisor } from './supervisor-advisor.js';
 
 function log(method: string, detail: string): void {
   console.log(`[Jev:Console] ${method} → ${detail}`);
 }
 
 /**
- * ConsoleJev — logs every decision from an inner advisor (HttpJev or StubJev).
+ * ConsoleJev — logs every decision from an inner supervisor advisor.
  */
-export class ConsoleJev implements JevAdvisor {
-  constructor(private readonly inner: JevAdvisor = new StubJev()) {}
+export class ConsoleJev implements SupervisorAdvisor {
+  constructor(private readonly inner: SupervisorAdvisor = new ProgressiveStubJev()) {}
+
+  async chooseNextAction(
+    snapshot: GameSnapshot,
+    allowed: AutopilotAction[],
+    context: AutopilotContext,
+  ): Promise<AutopilotAction> {
+    const result = await this.inner.chooseNextAction(snapshot, allowed, context);
+    log(
+      'chooseNextAction',
+      `cycle=${context.cycle} allowed=[${allowed.join(', ')}] → ${result}`,
+    );
+    return result;
+  }
 
   async shouldInterruptGather(state: GatherState): Promise<boolean> {
     const result = await this.inner.shouldInterruptGather(state);
