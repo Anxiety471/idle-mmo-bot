@@ -103,6 +103,140 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/** Dismiss leftover modal overlays that intercept Start clicks. */
+async function dismissBlockingOverlays(page: Page): Promise<void> {
+  const overlay = page.locator('div.fixed.inset-0 div.absolute.inset-0.bg-immo');
+  const dialog = page.getByText('Start a new action?');
+  const blocking =
+    (await overlay.count()) > 0 ||
+    (await dialog.isVisible().catch(() => false));
+  if (!blocking) {
+    const close = page.getByRole('button', { name: 'Close', exact: true });
+    if ((await close.count()) > 0 && (await close.first().isVisible().catch(() => false))) {
+      await close.first().click({ force: true }).catch(() => undefined);
+      await page.waitForTimeout(200);
+    }
+    return;
+  }
+  for (let i = 0; i < 3; i++) {
+    await page.keyboard.press('Escape').catch(() => undefined);
+    await page.waitForTimeout(150);
+  }
+  for (const name of ['Close', 'Cancel'] as const) {
+    const btn = page.getByRole('button', { name, exact: true });
+    if ((await btn.count()) > 0 && (await btn.first().isVisible().catch(() => false))) {
+      await btn.first().click({ force: true }).catch(() => undefined);
+      await page.waitForTimeout(200);
+    }
+  }
+}
+
+/**
+ * Fishing defaults quantity to 1 (one catch ~6s then idle). Batch or Max so
+ * CURRENT ACTION outlives snapshot + gather grace (~30s).
+ */
+async function setGatherQuantityBatch(page: Page, batch = 8): Promise<void> {
+  const qty = page.locator('input[name="quantity"]');
+  if ((await qty.count()) === 0) return;
+  const maxBtn = page.getByRole('button', { name: 'Max', exact: true });
+  const canPerformText = await page.locator('body').innerText();
+  const m = canPerformText.match(/you can perform this action\s+(\d+)\s+times/i);
+  const available = m ? Number(m[1]) : batch;
+  if (available >= 20 && (await maxBtn.count()) > 0) {
+    await maxBtn.first().click({ force: true }).catch(() => undefined);
+    await page.waitForTimeout(300);
+    return;
+  }
+  const value = String(Math.max(1, Math.min(batch, available || batch)));
+  await qty.first().fill(value).catch(() => undefined);
+  await qty.first().dispatchEvent('input').catch(() => undefined);
+  await qty.first().dispatchEvent('change').catch(() => undefined);
+  await page.waitForTimeout(200);
+}
+
+/** Prefer the largest visible Start — a 2x2 aria-hidden submit can steal .first(). */
+async function clickStartButton(page: Page): Promise<boolean> {
+  const starts = page.getByRole('button', { name: 'Start', exact: true });
+  const count = await starts.count();
+  if (count === 0) return false;
+  let bestIdx = 0;
+  let bestArea = -1;
+  for (let i = 0; i < count; i++) {
+    const box = await starts.nth(i).boundingBox().catch(() => null);
+    const area = box ? box.width * box.height : 0;
+    const disabled = await starts.nth(i).isDisabled().catch(() => true);
+    if (disabled) continue;
+    if (area > bestArea) {
+      bestArea = area;
+      bestIdx = i;
+    }
+  }
+  await starts.nth(bestIdx).click({ force: true, timeout: 5000 });
+  return true;
+}
+
+/** Idle MMO human-check: Verify → emoji challenge → confirm. */
+async function solveHumanCaptchaIfPresent(page: Page): Promise<boolean> {
+  const human = page.getByText(/make sure you're human/i);
+  const verifyPeek = page.getByRole('button', { name: /^Verify$/i });
+  if (!(await human.isVisible().catch(() => false)) && (await verifyPeek.count()) === 0) {
+    return false;
+  }
+
+  if ((await verifyPeek.count()) > 0) {
+    await verifyPeek.first().click({ force: true }).catch(() => undefined);
+    await page.waitForTimeout(800);
+  }
+
+  const body = await page.locator('body').innerText();
+  const promptMatch = body.match(/Press the\s+(.+?)\s+emoji to continue/i);
+  const targetName = (promptMatch?.[1] || '').trim().toLowerCase();
+
+  const NAME_TO_EMOJI: Record<string, string> = {
+    sun: '☀️',
+    star: '⭐',
+    moon: '🌙',
+    cloud: '☁️',
+    fire: '🔥',
+    water: '💧',
+    tree: '🌳',
+    fish: '🐟',
+    heart: '❤️',
+    flower: '🌸',
+    rainbow: '🌈',
+  };
+  const targetEmoji =
+    NAME_TO_EMOJI[targetName] || NAME_TO_EMOJI[targetName.replace(/\s+emoji$/, '')];
+
+  const optionButtons = page.locator('button');
+  const count = await optionButtons.count();
+  let clicked = false;
+  for (let i = 0; i < count; i++) {
+    const label = ((await optionButtons.nth(i).innerText().catch(() => '')) || '').trim();
+    const aria = (await optionButtons.nth(i).getAttribute('aria-label').catch(() => '')) || '';
+    const hay = `${label} ${aria}`;
+    if (targetEmoji && hay.includes(targetEmoji)) {
+      await optionButtons.nth(i).click({ force: true }).catch(() => undefined);
+      clicked = true;
+      break;
+    }
+    if (targetName && new RegExp(targetName, 'i').test(hay) && hay.length < 40) {
+      await optionButtons.nth(i).click({ force: true }).catch(() => undefined);
+      clicked = true;
+      break;
+    }
+  }
+  if (!clicked && targetEmoji) {
+    const byText = page.getByText(targetEmoji, { exact: true });
+    if ((await byText.count()) > 0) {
+      await byText.first().click({ force: true }).catch(() => undefined);
+      clicked = true;
+    }
+  }
+  await page.waitForTimeout(1000);
+  return clicked || (await verifyPeek.count()) > 0;
+}
+
 /**
  * Probe other gather skill pages for CURRENT ACTION.
  * The game allows one gather action at a time; it only renders on the owning skill page.
@@ -264,17 +398,24 @@ export async function restartSkillGather(
     }
   }
 
+  // Clear leftover modals BEFORE selecting a resource — Escape after select
+  // can collapse the Cod panel and make Start look like missing bait.
+  await dismissBlockingOverlays(page);
+
   if (!(await clickResource(page, resourceLabel))) {
     return 'failed';
   }
+
+  await setGatherQuantityBatch(page);
 
   const startReadiness = await checkStartReadiness(page, skill);
   if (startReadiness !== 'ready') {
     return startReadiness;
   }
 
-  const startButton = page.getByRole('button', { name: 'Start', exact: true });
-  await startButton.first().click({ timeout: 5000 });
+  if (!(await clickStartButton(page))) {
+    return 'failed';
+  }
 
   await page.waitForTimeout(500);
   const afterClickText = await page.locator('body').innerText();
@@ -288,7 +429,7 @@ export async function restartSkillGather(
     if (allowInterrupt) {
       const startAnyway = page.getByRole('button', { name: 'Start anyway', exact: true });
       if (await startAnyway.count() > 0) {
-        await startAnyway.click();
+        await startAnyway.click({ force: true });
       } else {
         return 'failed';
       }
@@ -302,8 +443,43 @@ export async function restartSkillGather(
     }
   }
 
-  await waitForSkillUiSettled(page, skill);
-  const finalText = await page.locator('body').innerText();
+  // Explicit CURRENT wait (settle alone can match idle Cod/Start chrome).
+  let busyIndicator = page.getByText(CURRENT_ACTION_MARKER);
+  await busyIndicator
+    .first()
+    .waitFor({ state: 'visible', timeout: 5_000 })
+    .catch(() => undefined);
+
+  let finalText = await page.locator('body').innerText();
+  if (!finalText.includes(CURRENT_ACTION_MARKER)) {
+    if (
+      /make sure you're human|\bVerify\b/i.test(finalText) ||
+      (await page.getByRole('button', { name: /^Verify$/i }).count()) > 0
+    ) {
+      await solveHumanCaptchaIfPresent(page);
+      await setGatherQuantityBatch(page);
+      const ready = await checkStartReadiness(page, skill);
+      if (ready === 'ready') {
+        await clickStartButton(page);
+        if (allowInterrupt) {
+          const dialog2 = page.getByText('Start a new action?');
+          if (await dialog2.isVisible({ timeout: 1500 }).catch(() => false)) {
+            const startAnyway = page.getByRole('button', { name: 'Start anyway', exact: true });
+            if ((await startAnyway.count()) > 0) {
+              await startAnyway.click({ force: true });
+            }
+          }
+        }
+        busyIndicator = page.getByText(CURRENT_ACTION_MARKER);
+        await busyIndicator
+          .first()
+          .waitFor({ state: 'visible', timeout: GATHER_UI_SETTLE_MS })
+          .catch(() => undefined);
+        finalText = await page.locator('body').innerText();
+      }
+    }
+  }
+
   if (!finalText.includes(CURRENT_ACTION_MARKER)) {
     return 'failed';
   }
