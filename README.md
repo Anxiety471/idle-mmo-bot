@@ -128,6 +128,24 @@ npm run autopilot -- -v --interrupt
 
 Optional: `JUNK_SELL_ITEMS=Burnt Cod,Burnt Fish` (never sells Oak Log, ores, bait).
 
+### Overnight structured logs
+
+Each supervisor tick and Jev call appends one JSON line to gitignored files under `logs/` (override with `AUTOPILOT_LOG_DIR`):
+
+| File | Contents |
+|------|----------|
+| `decisions.jsonl` | Per tick: timestamp, cycle, snapshot fields (location, gold, levels, inventory, quests, flags, discovered routes), allowed actions, chosen action, execute outcome, backoffMs |
+| `jev.jsonl` | Per Jev call: method, model, usage, full answer (choice/noul/score + confidence/probabilities), result, fallback flag + error when API fails |
+
+`pageText` and secrets (API tokens, cookies, storage-state) are never written. Console logs are unchanged.
+
+```bash
+# Replay / grep examples
+jq -r '.chosenAction' logs/decisions.jsonl | sort | uniq -c
+jq 'select(.fallback==true)' logs/jev.jsonl
+grep '"method":"chooseNextAction"' logs/jev.jsonl | tail -5
+```
+
 An overseer agent can supervise this loop; multi-bot parties are a future extension (hooks are per-account via `JevAdvisor`).
 
 ### Combat
