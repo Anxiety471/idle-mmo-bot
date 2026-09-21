@@ -87,7 +87,7 @@ npm run fish -- --buy-bait
 
 ```bash
 # Turn in Wood for the Hearth when Oak Log 150/150 / Turn In enabled
-# (switches Accepted tab — UI shows counts like "Accepted 1")
+# (waits for quest tabs to load; switches Accepted tab — counts like "Accepted 1")
 npm run quest-turnin
 
 # Custom quest
