@@ -1,0 +1,29 @@
+{
+  "name": "idle-mmo-bot",
+  "version": "1.0.0",
+  "description": "TypeScript + Playwright automation for Idle MMO (https://web.idle-mmo.com/)",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "gather": "tsx src/cli.ts gather",
+    "skill": "tsx src/cli.ts skill",
+    "mine": "tsx src/cli.ts skill --skill mining",
+    "fish": "tsx src/cli.ts skill --skill fishing",
+    "combat": "tsx src/cli.ts combat",
+    "quest": "tsx src/cli.ts quest",
+    "farm-hearth": "tsx src/cli.ts farm-hearth"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "dotenv": "^16.4.7",
+    "playwright": "^1.49.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
