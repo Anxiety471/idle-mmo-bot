@@ -9,18 +9,33 @@ import type {
   QuestInfo,
   Stance,
 } from '../types.js';
-import { ProgressiveStubJev } from './progressive-stub.js';
+import { logJevCall, type JevMethodName } from '../logging/jev-log.js';
 import type { SupervisorAdvisor } from './supervisor-advisor.js';
 
-function log(method: string, detail: string): void {
-  console.log(`[Jev:Console] ${method} → ${detail}`);
-}
-
 /**
- * ConsoleJev — logs every decision from an inner supervisor advisor.
+ * Logs every Jev advisor method call to jev.jsonl (ProgressiveStubJev path).
+ * HttpJev logs TypeSafe API details internally.
  */
-export class ConsoleJev implements SupervisorAdvisor {
-  constructor(private readonly inner: SupervisorAdvisor = new ProgressiveStubJev()) {}
+export class LoggingJev implements SupervisorAdvisor {
+  constructor(
+    private readonly inner: SupervisorAdvisor,
+    private readonly provider: 'ProgressiveStubJev' = 'ProgressiveStubJev',
+  ) {}
+
+  private async logMethod<T>(
+    method: JevMethodName,
+    result: T,
+    fallback = false,
+    error?: string,
+  ): Promise<void> {
+    await logJevCall({
+      method,
+      provider: this.provider,
+      result,
+      fallback,
+      error,
+    });
+  }
 
   async chooseNextAction(
     snapshot: GameSnapshot,
@@ -28,52 +43,43 @@ export class ConsoleJev implements SupervisorAdvisor {
     context: AutopilotContext,
   ): Promise<AutopilotAction> {
     const result = await this.inner.chooseNextAction(snapshot, allowed, context);
-    log(
-      'chooseNextAction',
-      `cycle=${context.cycle} allowed=[${allowed.join(', ')}] → ${result}`,
-    );
+    await this.logMethod('chooseNextAction', result);
     return result;
   }
 
   async shouldInterruptGather(state: GatherState): Promise<boolean> {
     const result = await this.inner.shouldInterruptGather(state);
-    log(
-      'shouldInterruptGather',
-      `busy=${state.busy}, elsewhere=${state.busyElsewhere?.skill ?? 'none'} → ${result}`,
-    );
+    await this.logMethod('shouldInterruptGather', result);
     return result;
   }
 
   async decideHuntStop(state: HuntState): Promise<boolean> {
     const result = await this.inner.decideHuntStop(state);
-    log(
-      'decideHuntStop',
-      `found=${state.totalEnemiesFound ?? 0}, remaining=${state.enemiesRemaining ?? '?'}, cards=${state.enemies.length} → ${result}`,
-    );
+    await this.logMethod('decideHuntStop', result);
     return result;
   }
 
   async chooseStance(enemy: EnemyInfo): Promise<Stance> {
     const result = await this.inner.chooseStance(enemy);
-    log('chooseStance', `enemy="${enemy.name}" → ${result}`);
+    await this.logMethod('chooseStance', result);
     return result;
   }
 
   async chooseMaxEnemies(enemy: EnemyInfo): Promise<number> {
     const result = await this.inner.chooseMaxEnemies(enemy);
-    log('chooseMaxEnemies', `enemy="${enemy.name}" → ${result}`);
+    await this.logMethod('chooseMaxEnemies', result);
     return result;
   }
 
   async shouldFlee(battleState: BattleState): Promise<boolean> {
     const result = await this.inner.shouldFlee(battleState);
-    log('shouldFlee', `hp=${battleState.playerHpPercent ?? '?'}% → ${result}`);
+    await this.logMethod('shouldFlee', result);
     return result;
   }
 
   async pickQuestPriority(quests: QuestInfo[]): Promise<string[]> {
     const result = await this.inner.pickQuestPriority(quests);
-    log('pickQuestPriority', result.length > 0 ? result.join(', ') : '(keep gathering)');
+    await this.logMethod('pickQuestPriority', result);
     return result;
   }
 }

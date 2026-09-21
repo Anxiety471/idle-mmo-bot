@@ -30,7 +30,7 @@ function questTabPattern(tabName: string): RegExp {
  * Wait until quest tab buttons are visible after domcontentloaded.
  * Tabs load asynchronously (~2–3s); switching too early misses Accepted list.
  */
-async function waitForQuestTabsSettled(page: Page, timeoutMs = QUEST_UI_SETTLE_MS): Promise<void> {
+export async function waitForQuestTabsSettled(page: Page, timeoutMs = QUEST_UI_SETTLE_MS): Promise<void> {
   const tabs = page
     .getByRole('button', { name: questTabPattern('Accepted') })
     .or(page.getByRole('button', { name: questTabPattern('Pending Nearby') }))

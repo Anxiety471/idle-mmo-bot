@@ -50,6 +50,9 @@ export interface HuntState {
   totalEnemiesFound?: number;
   enemiesRemaining?: number;
   bonusEnemies?: number;
+  /** Account levels passed into stop decisions (from GameSnapshot or profile). */
+  combatLevel?: number;
+  totalLevel?: number;
   pageText: string;
 }
 
@@ -109,3 +112,96 @@ export type QuestStepResult =
 export type MerchantStepResult = 'purchased' | 'failed' | 'no_action';
 
 export type InventoryStepResult = 'sold' | 'no_action' | 'failed';
+
+/**
+ * Supervisor loop action id — open-ended string.
+ * Bootstrap ids are registered at startup; new loops add ids via registerDiscoveredAction().
+ */
+export type AutopilotAction = string;
+
+/** Well-known bootstrap action ids (not exhaustive as the bot discovers more loops). */
+export const BOOTSTRAP_ACTION_IDS = {
+  continue_current: 'continue_current',
+  gather_oak: 'gather_oak',
+  gather_yew: 'gather_yew',
+  mine_coal: 'mine_coal',
+  fish_cod: 'fish_cod',
+  buy_bait: 'buy_bait',
+  hunt_battle: 'hunt_battle',
+  quest_talk_accept: 'quest_talk_accept',
+  quest_turnin: 'quest_turnin',
+  craft_if_ready: 'craft_if_ready',
+  sell_junk: 'sell_junk',
+  idle: 'idle',
+} as const;
+
+export type CombatPhase = 'hunt' | 'battle' | 'enemy_select' | 'none';
+
+export interface SnapshotQuest {
+  title: string;
+  progress?: string;
+  canTurnIn: boolean;
+  tab: 'accepted' | 'pending' | 'completed';
+}
+
+export interface CurrentActionInfo {
+  busy: boolean;
+  skill?: SkillId;
+  resource?: string;
+  label?: string;
+}
+
+export interface SnapshotZone {
+  name: string;
+  levelReq?: number;
+  current?: boolean;
+}
+
+export interface DiscoveredFeature {
+  label: string;
+  route: string;
+  scriptable: boolean;
+  note: string;
+}
+
+export interface GameSnapshot {
+  location: string;
+  pagePath: string;
+  totalLevel?: number;
+  combatLevel?: number;
+  gold?: number;
+  tokens?: number;
+  currentAction?: CurrentActionInfo;
+  skillLevels: Partial<Record<SkillId, number>>;
+  inventory: Record<string, number>;
+  acceptedQuests: SnapshotQuest[];
+  pendingQuests: SnapshotQuest[];
+  combatPhase: CombatPhase;
+  zones?: SnapshotZone[];
+  features?: Record<string, boolean | string | number>;
+  discovered?: {
+    features?: DiscoveredFeature[];
+    unregisteredRoutes?: string[];
+  };
+  /** Enricher-specific payloads; safe to extend without breaking Jev. */
+  extensions?: Record<string, unknown>;
+  flags: {
+    hasBait: boolean;
+    bankNearby: boolean;
+    gatherBusy: boolean;
+    inBattle: boolean;
+    sessionValid: boolean;
+  };
+}
+
+export interface AutopilotContext {
+  cycle: number;
+  gatherRotationIndex: number;
+  lastAction?: AutopilotAction;
+}
+
+export interface ActionResult {
+  action: AutopilotAction;
+  outcome: string;
+  backoffMs?: number;
+}
