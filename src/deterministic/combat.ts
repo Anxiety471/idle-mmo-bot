@@ -249,33 +249,89 @@ async function readEnemyNameFromDetailPanel(page: Page): Promise<string | null> 
   return match?.[1]?.trim() ?? null;
 }
 
-async function setStance(page: Page, stance: Stance): Promise<void> {
-  const namedSelect = page.locator('select[name="location"]');
-  if (await namedSelect.count() > 0) {
-    await namedSelect.selectOption({ label: stance });
-    return;
+/** Match stance option labels like "Balanced (All Stats)" from short name "Balanced". */
+function stanceOptionMatches(label: string, stance: Stance): boolean {
+  const normalized = label.trim().toLowerCase();
+  const needle = stance.toLowerCase();
+  return normalized.startsWith(needle) || normalized.includes(`(${needle}`) || normalized.includes(needle);
+}
+
+async function selectStanceFromNativeSelect(select: Locator, stance: Stance): Promise<boolean> {
+  const options = select.locator('option');
+  const count = await options.count();
+
+  for (let i = 0; i < count; i++) {
+    const opt = options.nth(i);
+    const label = ((await opt.textContent()) ?? '').trim();
+    if (!label || !stanceOptionMatches(label, stance)) continue;
+
+    const value = await opt.getAttribute('value');
+    try {
+      if (value !== null && value !== '') {
+        await select.selectOption(value, { timeout: 3000 });
+      } else {
+        await select.selectOption({ label }, { timeout: 3000 });
+      }
+      return true;
+    } catch {
+      try {
+        await select.selectOption({ label }, { timeout: 3000 });
+        return true;
+      } catch {
+        // try next matching option
+      }
+    }
   }
 
-  const stanceSelect = page.locator('select').filter({ hasText: /Balanced|Offensive|Defensive|Agile|Dexterous/i });
-  if (await stanceSelect.count() > 0) {
-    const select = stanceSelect.first();
-    const options = await select.locator('option').allTextContents();
-    const match = options.find((o) => o.toLowerCase().includes(stance.toLowerCase()));
-    if (match) {
-      await select.selectOption({ label: match });
+  // Fallback: keep default / first non-empty option rather than abort Battle.
+  for (let i = 0; i < count; i++) {
+    const opt = options.nth(i);
+    const label = ((await opt.textContent()) ?? '').trim();
+    if (!label) continue;
+    const value = await opt.getAttribute('value');
+    try {
+      if (value !== null && value !== '') {
+        await select.selectOption(value, { timeout: 3000 });
+      } else {
+        await select.selectOption({ label }, { timeout: 3000 });
+      }
+      return true;
+    } catch {
+      // leave default
+    }
+  }
+
+  return false;
+}
+
+async function setStance(page: Page, stance: Stance): Promise<void> {
+  try {
+    const namedSelect = page.locator('select[name="location"]');
+    if (await namedSelect.count() > 0) {
+      await selectStanceFromNativeSelect(namedSelect.first(), stance);
       return;
     }
-  }
 
-  const combobox = page.getByRole('combobox').filter({
-    hasText: /Balanced|Offensive|Defensive|Agile|Dexterous/i,
-  });
-  if (await combobox.count() > 0) {
-    await combobox.first().click();
-    const option = page.getByRole('option', { name: new RegExp(stance, 'i') });
-    if (await option.count() > 0) {
-      await option.first().click();
+    const stanceSelect = page.locator('select').filter({
+      hasText: /Balanced|Offensive|Defensive|Agile|Dexterous/i,
+    });
+    if (await stanceSelect.count() > 0) {
+      await selectStanceFromNativeSelect(stanceSelect.first(), stance);
+      return;
     }
+
+    const combobox = page.getByRole('combobox').filter({
+      hasText: /Balanced|Offensive|Defensive|Agile|Dexterous/i,
+    });
+    if (await combobox.count() > 0) {
+      await combobox.first().click({ timeout: 3000 }).catch(() => undefined);
+      const option = page.getByRole('option', { name: new RegExp(`^${stance}`, 'i') });
+      if (await option.count() > 0) {
+        await option.first().click({ timeout: 3000 }).catch(() => undefined);
+      }
+    }
+  } catch {
+    // Stance is best-effort — proceed with UI default and still click Battle.
   }
 }
 
