@@ -39,7 +39,7 @@ Shared state snapshots passed to Jev: `GatherState`, `HuntState`, `BattleState`,
 | Module | Route | Flow |
 |--------|-------|------|
 | `skills.ts` | — | Skill configs (woodcutting / mining / fishing), resource labels, bait flag |
-| `gather.ts` | `/skills/view/<skill>` | Wait for `CURRENT ACTION`, `Start`, or default resource label after navigation; detect busy/idle; select resource → Start; handle replace dialog; `missing_requirement` for fishing without bait |
+| `gather.ts` | `/skills/view/<skill>` | Wait for `CURRENT ACTION`, `Start`, or default resource label; probe other gather pages for global busy; never click disabled Start; `missing_requirement` for fishing without bait; `another_action_active` when another skill owns the slot |
 | `combat.ts` | `/combat/battle` | Start Hunt → wait enemies → Stop → pick card → max/stance → Battle → Hunt More / Run Away |
 | `quest.ts` | `/quests` | Open card → Talk → dialogue → Overview progress → Turn In when enabled |
 

@@ -9,9 +9,16 @@ export type Stance =
 
 export type SkillId = 'woodcutting' | 'mining' | 'fishing';
 
+export interface ActiveGatherElsewhere {
+  skill: SkillId;
+  resource?: string;
+}
+
 export interface GatherState {
-  /** True when page shows CURRENT ACTION (character is busy gathering). */
+  /** True when this skill's page shows CURRENT ACTION. */
   busy: boolean;
+  /** When busy is false but another skill page shows CURRENT ACTION (one action at a time). */
+  busyElsewhere?: ActiveGatherElsewhere;
   /** Current resource label if detectable from UI text. */
   currentResource?: string;
   /** Skill page this state was read from. */
@@ -60,6 +67,7 @@ export interface QuestState {
 
 export type GatherRestartResult =
   | 'already_busy'
+  | 'another_action_active'
   | 'restarted'
   | 'kept_current_action'
   | 'missing_requirement'

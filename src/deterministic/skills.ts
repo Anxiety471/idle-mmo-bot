@@ -16,6 +16,9 @@ export interface SkillConfig {
   requiresBait?: boolean;
 }
 
+/** Gather skills that share the global one-at-a-time CURRENT ACTION slot. */
+export const GATHER_SKILL_IDS: SkillId[] = ['woodcutting', 'mining', 'fishing'];
+
 export const SKILL_CONFIGS: Record<SkillId, SkillConfig> = {
   woodcutting: {
     id: 'woodcutting',

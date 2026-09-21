@@ -61,7 +61,9 @@ npm run fish          # fishing → Cod (default)
 | mining | `/skills/view/mining` | Coal Ore | Tin Ore, Limestone (Lv.10) |
 | fishing | `/skills/view/fishing` | Cod | Salmon, Tuna |
 
-**Fishing bait:** Cod/Salmon/Tuna require **Cheap Bait** (buy at `/merchants` → General Goods, 2g). The bot does **not** auto-purchase bait. If bait is missing, the command exits with `missing_requirement` instead of looping on failures.
+**Fishing bait:** Cod/Salmon/Tuna require **Cheap Bait** (buy at `/merchants` → General Goods, 2g). The bot does **not** auto-purchase bait. If bait is missing (or Start is disabled), the command exits with `missing_requirement` instead of clicking or looping on failures.
+
+**Global gather slot:** Only one gather action runs at a time. `CURRENT ACTION` only appears on the skill page that owns it — mining may look idle while woodcutting runs. The bot probes other gather skill pages and backs off (30s+) instead of hammering Start every poll when another action is active and interrupt is disallowed.
 
 ```bash
 # Hunt → battle loop; Jev chooses stance, max enemies, flee, stop timing

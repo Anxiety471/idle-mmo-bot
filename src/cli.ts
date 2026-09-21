@@ -58,28 +58,74 @@ async function runSkillLoop(
     );
   }
 
+  const backoffMs = Math.max(config.pollMs * 6, 30_000);
+  let backoffUntil = 0;
+
   try {
     while (true) {
-      const state = await readSkillState(session.page, config, skill.id);
+      const state = await readSkillState(session.page, config, skill.id, {
+        probeOtherSkills: true,
+      });
+
+      const elsewhere = state.busyElsewhere;
+      const elsewhereLabel = elsewhere
+        ? `${elsewhere.skill}${elsewhere.resource ? ` (${elsewhere.resource})` : ''}`
+        : undefined;
+
       console.log(
-        `[${skill.id}] busy=${state.busy}${state.currentResource ? ` resource=${state.currentResource}` : ''}`,
+        `[${skill.id}] busy=${state.busy}` +
+          `${state.currentResource ? ` resource=${state.currentResource}` : ''}` +
+          `${elsewhereLabel ? ` elsewhere=${elsewhereLabel}` : ''}`,
       );
 
-      if (!state.busy) {
-        const allowInterrupt = await jev.shouldInterruptGather(state);
-        const result = await restartSkillGather(session.page, config, {
-          skill: skill.id,
-          resourceLabel: resource,
-          allowInterrupt,
-        });
-        console.log(`[${skill.id}] restart → ${result}`);
+      if (state.busy) {
+        backoffUntil = 0;
+        await sleep(config.pollMs);
+        continue;
+      }
 
-        if (result === 'missing_requirement') {
-          console.error(
-            `[${skill.id}] Missing Cheap Bait — buy at /merchants (General Goods, 2g) then retry. Exiting.`,
+      const allowInterrupt = await jev.shouldInterruptGather(state);
+
+      if (elsewhere && !allowInterrupt) {
+        if (Date.now() >= backoffUntil) {
+          console.log(
+            `[${skill.id}] Another action active (${elsewhereLabel}) — waiting (no interrupt)`,
           );
-          break;
+          backoffUntil = Date.now() + backoffMs;
+        } else {
+          console.log(
+            `[${skill.id}] Another action active (${elsewhereLabel}) — backing off`,
+          );
         }
+        await sleep(config.pollMs);
+        continue;
+      }
+
+      if (Date.now() < backoffUntil) {
+        console.log(`[${skill.id}] Backing off after blocked restart — retry soon`);
+        await sleep(config.pollMs);
+        continue;
+      }
+      const result = await restartSkillGather(session.page, config, {
+        skill: skill.id,
+        resourceLabel: resource,
+        allowInterrupt,
+        knownState: state,
+      });
+      console.log(`[${skill.id}] restart → ${result}`);
+
+      if (result === 'missing_requirement') {
+        console.error(
+          `[${skill.id}] Missing Cheap Bait — buy at /merchants (General Goods, 2g) then retry. Exiting.`,
+        );
+        break;
+      }
+
+      if (result === 'another_action_active' || result === 'kept_current_action') {
+        console.log(
+          `[${skill.id}] Another gather action is active — backing off ${backoffMs / 1000}s (no interrupt)`,
+        );
+        backoffUntil = Date.now() + backoffMs;
       }
 
       await sleep(config.pollMs);
