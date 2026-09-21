@@ -40,7 +40,7 @@ Shared state snapshots passed to Jev: `GatherState`, `HuntState`, `BattleState`,
 |--------|-------|------|
 | `skills.ts` | — | Skill configs for gather/craft skills; `resourceRequired` for unconfirmed defaults |
 | `gather.ts` | `/skills/view/<skill>` | Wait for UI settle; probe other skill pages for global busy; never click disabled Start; `missing_requirement` for fishing without bait |
-| `combat.ts` | `/combat/battle` | Start Hunt → replace dialog → wait enemies → Stop → Battle → Hunt More / Run Away |
+| `combat.ts` | `/combat/battle` | Wait for Start Hunt; replace dialog; layered enemy card detection; Stop → Battle → Hunt More / Run Away |
 | `quest.ts` | `/quests` | Tab switch → open card → Overview → Turn In when enabled; `turnInQuestWhenReady` |
 | `merchant.ts` | `/merchants` | General Goods → Cheap Bait → buy 1 (only when `--buy-bait` / `BUY_BAIT`) |
 
@@ -74,7 +74,7 @@ Comments in each file note that UI selectors are live-tested but may drift.
 | `quest-turnin` | Accepted tab → open quest → Turn In when enabled |
 | `quest` | Jev priority → talk → turn in if enabled |
 | `farm-hearth` | Gather until hearth quest turn-in |
-| `combat` | Hunt loop; backs off 30s+ when replace dialog blocks hunt |
+| `combat` | Hunt loop; `--interrupt` / `FORCE_INTERRUPT` for replace dialog; backs off when blocked |
 
 ## Replace-dialog policy
 

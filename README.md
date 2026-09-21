@@ -35,6 +35,7 @@ Set `STORAGE_STATE=./storage-state.json` in `.env`. This file is gitignored — 
 | `HEADLESS` | `true` | Run Chromium headless |
 | `STORAGE_STATE` | _(unset)_ | Path to saved session JSON |
 | `BUY_BAIT` | `false` | Auto-buy Cheap Bait when fishing (off by default) |
+| `FORCE_INTERRUPT` | `false` | Click Start anyway on replace dialog for combat |
 
 ## Commands
 
@@ -106,11 +107,14 @@ npm run farm-hearth
 # Hunt → battle loop; Jev chooses stance, max enemies, flee, stop timing
 npm run combat
 
-# Limit rounds
-npm run combat -- --rounds 5
+# Limit rounds; interrupt active gather to start hunt
+npm run combat -- --rounds 5 --interrupt
+# or FORCE_INTERRUPT=true in .env
 ```
 
-If a gather action is running, **Start Hunt** shows the replace dialog. With default Jev (no interrupt), the bot closes the dialog, logs clearly, and backs off 30s+ instead of spinning forever.
+Combat waits for **Start Hunt** to appear (~3–4s after navigation) before clicking. Enemy cards use layered detection (legacy `button.h-24`, level labels, heuristics).
+
+If a gather action is running, **Start Hunt** shows the replace dialog. With default Jev (no interrupt), the bot closes the dialog, logs clearly, and backs off 30s+ instead of spinning forever. Use `--interrupt` to click **Start anyway**.
 
 Add `-v` / `--verbose` to any command to use **ConsoleJev** (logs every decision):
 
