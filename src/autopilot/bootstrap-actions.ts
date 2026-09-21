@@ -5,6 +5,7 @@ import { navigateTo } from '../browser.js';
 import {
   restartSkillGather,
   readGatherState,
+  readSkillState,
   ensureHuntActive,
   waitForEnemies,
   prepareEnemyBattleSelection,
@@ -194,19 +195,25 @@ function gatherAction(
       );
     },
     execute: async (ctx) => {
-      const gatherState = await readGatherState(ctx.page, ctx.config);
+      const skillState = await readSkillState(ctx.page, ctx.config, skill);
       const playbook = getPlaybookFromSnapshot(ctx.snapshot);
       const playbookInterrupt = Boolean(
         playbook?.enabled && !playbook.complete && playbook.interruptActions.includes(id),
       );
       const allowInterrupt =
-        playbookInterrupt || (await ctx.jev.shouldInterruptGather(gatherState));
+        playbookInterrupt || (await ctx.jev.shouldInterruptGather(skillState));
       const result = await restartSkillGather(ctx.page, ctx.config, {
         skill,
         resourceLabel: resource,
         allowInterrupt: ctx.forceInterrupt || allowInterrupt,
+        knownState: skillState,
       });
-      return { action: id, outcome: result };
+      const backoffMs = /restarted|already_busy/i.test(result) ? ctx.config.pollMs * 2 : undefined;
+      return {
+        action: id,
+        outcome: result,
+        ...(backoffMs !== undefined ? { backoffMs } : {}),
+      };
     },
   };
 }
@@ -233,12 +240,15 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
     priority: 5,
     tags: ['meta'],
     safety: 'safe',
-    isAllowed: (ctx) =>
-      Boolean(
+    isAllowed: (ctx) => {
+      const playbook = getPlaybookFromSnapshot(ctx.snapshot);
+      return Boolean(
         ctx.snapshot.currentAction?.busy ||
           ctx.snapshot.flags.inBattle ||
-          ctx.snapshot.combatPhase !== 'none',
-      ),
+          ctx.snapshot.combatPhase !== 'none' ||
+          (playbook?.gatherGraceActive && playbook.stage === 'fish_cod'),
+      );
+    },
     execute: async (ctx) => ({
       action: 'continue_current',
       outcome: 'polling',

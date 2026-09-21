@@ -57,6 +57,10 @@ export interface PlaybookProgress {
   };
   curriculumHint: string;
   complete: boolean;
+  /** True while waiting for CURRENT ACTION after a gather restart (probe gap). */
+  gatherGraceActive: boolean;
+  gatherGraceSkill?: string;
+  gatherGraceResource?: string;
 }
 
 interface PersistedPlaybook {
@@ -67,6 +71,9 @@ interface PersistedPlaybook {
   baitOwned?: boolean;
   lastBaitPurchaseAt?: string;
   completedAt?: string;
+  lastGatherRestartAt?: string;
+  lastGatherSkill?: string;
+  lastGatherResource?: string;
 }
 
 const STAGE_ORDER: EarlyStageId[] = [
@@ -88,6 +95,8 @@ const COD_MAX = 50;
 /** Busy-cycle heuristic when inventory scrape is empty (~5s poll → ~2–3 cycles/ore). */
 const COAL_BUSY_TARGET = 90;
 const COD_BUSY_TARGET = 90;
+/** Grace window after restartSkillGather before re-injecting interrupt gathers. */
+export const GATHER_GRACE_MS = 30_000;
 
 /** Resolved at call time so AUTOPILOT_LOG_DIR is honored after env load. */
 export function resolvePlaybookStatePath(): string {
@@ -140,6 +149,9 @@ function loadPersisted(): PersistedPlaybook {
       baitOwned: Boolean(parsed.baitOwned),
       lastBaitPurchaseAt: parsed.lastBaitPurchaseAt,
       completedAt: parsed.completedAt,
+      lastGatherRestartAt: parsed.lastGatherRestartAt,
+      lastGatherSkill: parsed.lastGatherSkill,
+      lastGatherResource: parsed.lastGatherResource,
     };
   } catch {
     return { version: 1, stage: 'mine_coal', counts: emptyCounts() };
@@ -191,7 +203,11 @@ function trustHasBait(snapshot: GameSnapshot, baitOwned: boolean, stage: EarlySt
   return false;
 }
 
-function syncCountsFromSnapshot(counts: PlaybookCounts, snapshot: GameSnapshot): PlaybookCounts {
+function syncCountsFromSnapshot(
+  counts: PlaybookCounts,
+  snapshot: GameSnapshot,
+  options?: { creditCodGrace?: boolean },
+): PlaybookCounts {
   const next = { ...counts };
   const coal = invCount(snapshot, ['Coal Ore', 'Coal']);
   const rawCod = invCount(snapshot, ['Cod', 'Raw Cod']);
@@ -204,8 +220,27 @@ function syncCountsFromSnapshot(counts: PlaybookCounts, snapshot: GameSnapshot):
   if (/coal/i.test(resource)) next.coalBusyCycles += 1;
   if (/\bcod\b/i.test(resource) && snapshot.currentAction?.skill === 'fishing') {
     next.codBusyCycles += 1;
+  } else if (options?.creditCodGrace) {
+    next.codBusyCycles += 1;
   }
   return next;
+}
+
+function computeGatherGrace(
+  persisted: PersistedPlaybook,
+  stage: EarlyStageId,
+): { active: boolean; skill?: string; resource?: string } {
+  if (!persisted.lastGatherRestartAt) return { active: false };
+  const elapsed = Date.now() - new Date(persisted.lastGatherRestartAt).getTime();
+  if (elapsed > GATHER_GRACE_MS) return { active: false };
+  if (stage === 'fish_cod' || stage === 'mine_coal') {
+    return {
+      active: true,
+      skill: persisted.lastGatherSkill,
+      resource: persisted.lastGatherResource,
+    };
+  }
+  return { active: false };
 }
 
 function effectiveCoal(counts: PlaybookCounts): number {
@@ -384,11 +419,12 @@ export function evaluatePlaybook(
       targets: { coalMin: COAL_MIN, coalMax: COAL_MAX, codMin: COD_MIN, codMax: COD_MAX },
       curriculumHint: 'Early playbook disabled (EARLY_PLAYBOOK=false).',
       complete: true,
+      gatherGraceActive: false,
     };
   }
 
   const persisted = loadPersisted();
-  const counts = syncCountsFromSnapshot(persisted.counts, snapshot);
+  let counts = syncCountsFromSnapshot(persisted.counts, snapshot);
   // Recover pre-baitOwned runs that already advanced past buy_bait after purchases.
   let baitOwned = Boolean(persisted.baitOwned);
   if (!baitOwned && STAGE_ORDER.indexOf(persisted.stage) > STAGE_ORDER.indexOf('buy_bait')) {
@@ -422,6 +458,16 @@ export function evaluatePlaybook(
   if (stage === 'hunt_rabbits' && counts.rabbitHunts >= 2) stage = 'explore_map';
   if (stage === 'explore_map' && counts.mapPeeks >= 1) stage = 'complete';
 
+  const grace = computeGatherGrace(persisted, stage);
+  if (grace.active && stage === 'fish_cod') {
+    const resource = snapshot.currentAction?.resource ?? snapshot.currentAction?.label ?? '';
+    const creditedFromSnapshot =
+      /\bcod\b/i.test(resource) && snapshot.currentAction?.skill === 'fishing';
+    if (!creditedFromSnapshot) {
+      counts = { ...counts, codBusyCycles: counts.codBusyCycles + 1 };
+    }
+  }
+
   const meta = stageMeta(stage, baitOwned);
   const complete = stage === 'complete';
 
@@ -432,6 +478,9 @@ export function evaluatePlaybook(
     baitOwned,
     lastBaitPurchaseAt: persisted.lastBaitPurchaseAt,
     completedAt: complete ? persisted.completedAt ?? new Date().toISOString() : undefined,
+    lastGatherRestartAt: persisted.lastGatherRestartAt,
+    lastGatherSkill: persisted.lastGatherSkill,
+    lastGatherResource: persisted.lastGatherResource,
   });
 
   return {
@@ -447,6 +496,9 @@ export function evaluatePlaybook(
     targets: { coalMin: COAL_MIN, coalMax: COAL_MAX, codMin: COD_MIN, codMax: COD_MAX },
     curriculumHint: meta.hint,
     complete,
+    gatherGraceActive: grace.active,
+    gatherGraceSkill: grace.skill,
+    gatherGraceResource: grace.resource,
   };
 }
 
@@ -472,6 +524,9 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
   }
   let baitOwned = Boolean(persisted.baitOwned);
   let lastBaitPurchaseAt = persisted.lastBaitPurchaseAt;
+  let lastGatherRestartAt = persisted.lastGatherRestartAt;
+  let lastGatherSkill = persisted.lastGatherSkill;
+  let lastGatherResource = persisted.lastGatherResource;
   if (action === 'buy_bait' && /purchased/i.test(outcome)) {
     baitOwned = true;
     lastBaitPurchaseAt = new Date().toISOString();
@@ -481,9 +536,17 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
   }
   if (action === 'fish_cod' && /missing_requirement/i.test(outcome)) {
     baitOwned = false;
+    lastGatherRestartAt = undefined;
+    lastGatherSkill = undefined;
+    lastGatherResource = undefined;
     if (STAGE_ORDER.indexOf(stage) >= STAGE_ORDER.indexOf('fish_cod')) {
       stage = 'buy_bait';
     }
+  }
+  if (action === 'fish_cod' && /restarted|already_busy/i.test(outcome)) {
+    lastGatherRestartAt = new Date().toISOString();
+    lastGatherSkill = 'fishing';
+    lastGatherResource = 'Cod';
   }
   if (action === 'cook_cod' && /restarted|already_busy|kept_current/i.test(outcome)) {
     counts.cookedCod = Math.max(counts.cookedCod, counts.cookedCod + 1);
@@ -495,7 +558,16 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
     }
   }
 
-  savePersisted({ version: 1, stage, counts, baitOwned, lastBaitPurchaseAt });
+  savePersisted({
+    version: 1,
+    stage,
+    counts,
+    baitOwned,
+    lastBaitPurchaseAt,
+    lastGatherRestartAt,
+    lastGatherSkill,
+    lastGatherResource,
+  });
 }
 
 /**
@@ -541,6 +613,13 @@ export function filterAllowedByPlaybook(
       }
     }
     for (const id of playbook.interruptActions) {
+      if (
+        playbook.gatherGraceActive &&
+        playbook.stage === 'fish_cod' &&
+        id === 'fish_cod'
+      ) {
+        continue;
+      }
       if (!next.includes(id) && ['mine_coal', 'fish_cod', 'cook_cod', 'market_sell_half', 'explore_map', 'hunt_rabbits', 'buy_bait', 'sell_junk'].includes(id)) {
         next.push(id);
       }

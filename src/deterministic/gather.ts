@@ -289,17 +289,28 @@ export async function restartSkillGather(
       const startAnyway = page.getByRole('button', { name: 'Start anyway', exact: true });
       if (await startAnyway.count() > 0) {
         await startAnyway.click();
-        return 'restarted';
+      } else {
+        return 'failed';
+      }
+    } else {
+      const closeButton = page.getByRole('button', { name: 'Close', exact: true });
+      if (await closeButton.count() > 0) {
+        await closeButton.click();
+        return 'kept_current_action';
       }
       return 'failed';
     }
+  }
 
-    const closeButton = page.getByRole('button', { name: 'Close', exact: true });
-    if (await closeButton.count() > 0) {
-      await closeButton.click();
-      return 'kept_current_action';
-    }
+  await waitForSkillUiSettled(page, skill);
+  const finalText = await page.locator('body').innerText();
+  if (!finalText.includes(CURRENT_ACTION_MARKER)) {
     return 'failed';
+  }
+
+  const activeResource = parseCurrentResource(finalText, skill.resources);
+  if (activeResource && activeResource !== resourceLabel) {
+    return 'already_busy';
   }
 
   return 'restarted';
