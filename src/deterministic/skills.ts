@@ -76,8 +76,8 @@ export const SKILL_CONFIGS: Record<SkillId, SkillConfig> = {
   cooking: {
     id: 'cooking',
     path: '/skills/view/cooking',
-    defaultResource: '',
-    resources: [],
+    defaultResource: 'Cooked Cod',
+    resources: ['Cooked Cod', 'Cooked Salmon', 'Cooked Tuna'],
     resourceRequired: true,
   },
   forge: {

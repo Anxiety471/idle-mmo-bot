@@ -22,6 +22,7 @@ export interface DecisionLogRecord {
   backoffMs?: number;
   gatherRotationIndex: number;
   lastAction?: AutopilotAction;
+  playbook?: unknown;
 }
 
 export function buildDecisionRecord(
@@ -52,6 +53,7 @@ export function buildDecisionRecord(
     backoffMs: result.backoffMs,
     gatherRotationIndex: context.gatherRotationIndex,
     lastAction: context.lastAction,
+    playbook: snapshot.extensions?.earlySystemsPlaybook ?? null,
   };
 }
 

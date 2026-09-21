@@ -207,6 +207,13 @@ export class HttpJev implements SupervisorAdvisor {
       return allowed[0];
     }
 
+    const playbook = snapshot.extensions?.earlySystemsPlaybook as
+      | { curriculumHint?: string; stage?: string; preferredActions?: string[]; complete?: boolean }
+      | undefined;
+    const playbookHint =
+      playbook && !playbook.complete
+        ? ` ${playbook.curriculumHint ?? ''} Prefer among: ${(playbook.preferredActions ?? []).join(', ') || 'n/a'}. Deprioritize endless Oak woodcutting until early playbook completes.`
+        : '';
     return this.withApiLog(
       'chooseNextAction',
       snapshotPayload(snapshot, context),
@@ -214,8 +221,9 @@ export class HttpJev implements SupervisorAdvisor {
         action: {
           type: 'choice',
           instructions:
-            'Choose the single best next action to advance this Idle MMO account (quests, combat XP, skill training, crafting, selling junk). Prefer progress over passive waiting.',
-          criteria: actionCriteria(allowed),
+            'Choose the single best next action to advance this Idle MMO account (quests, combat XP, skill training, crafting, selling junk). Prefer progress over passive waiting.' +
+            playbookHint,
+          criteria: actionCriteria(allowed, snapshot),
         },
       },
       'action',
@@ -241,7 +249,7 @@ export class HttpJev implements SupervisorAdvisor {
         interrupt: {
           type: 'noul',
           instructions:
-            'Should the bot interrupt the currently running gather/craft action and start a new one?',
+            'Should the bot interrupt the currently running gather/craft action and start a new one? If early playbook wants Coal/Cod and current resource is Oak/Yew, interrupt.',
           criteria: {
             true: 'Another action is blocking progress or combat/hunt is more valuable now',
             false: 'Keep the current gather/craft running; do not replace it',

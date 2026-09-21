@@ -10,6 +10,12 @@ import { logDecision } from './logging/decision-log.js';
 import { getLogDir } from './logging/jsonl-writer.js';
 import { setLogContext } from './logging/log-context.js';
 import { readGameSnapshot } from './snapshot/read-snapshot.js';
+import {
+  attachPlaybookToSnapshot,
+  evaluatePlaybook,
+  formatPlaybookLogLine,
+  notePlaybookOutcome,
+} from './autopilot/early-systems-playbook.js';
 import type { AutopilotAction, AutopilotContext } from './types.js';
 
 export interface RunAutopilotOptions {
@@ -22,7 +28,12 @@ function sleep(ms: number): Promise<void> {
 }
 
 function isGatherAction(action: AutopilotAction): boolean {
-  return action.startsWith('gather_') || action === 'mine_coal' || action === 'fish_cod';
+  return (
+    action.startsWith('gather_') ||
+    action === 'mine_coal' ||
+    action === 'fish_cod' ||
+    action === 'cook_cod'
+  );
 }
 
 // Register bootstrap actions once; discovered actions register via registerDiscoveredAction().
@@ -71,6 +82,9 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
           const discovered = await discoverFeatures(session.page);
           snapshot = mergeDiscoveryIntoSnapshot(snapshot, discovered);
           logDiscoveries(discovered, context.cycle);
+          const playbook = evaluatePlaybook(snapshot, context);
+          snapshot = attachPlaybookToSnapshot(snapshot, playbook);
+          console.log(`[playbook] cycle=${context.cycle} ${formatPlaybookLogLine(playbook)}`);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           console.error(`[autopilot] snapshot failed: ${message}`);
@@ -113,14 +127,13 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
         }
 
         console.log(`[autopilot] result: ${result.outcome}`);
-
+        notePlaybookOutcome(action, result.outcome);
         try {
           await logDecision(snapshot, context, allowed, action, result);
         } catch (logError) {
           const message = logError instanceof Error ? logError.message : String(logError);
           console.error(`[autopilot] decision log write failed: ${message}`);
         }
-
         await sleep(result.backoffMs ?? config.pollMs);
       }
     } catch (error) {

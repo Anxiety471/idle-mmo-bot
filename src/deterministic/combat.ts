@@ -35,6 +35,14 @@ async function pageText(page: Page): Promise<string> {
   return page.locator('body').innerText();
 }
 
+async function safeInnerText(locator: Locator, timeoutMs = 3000): Promise<string> {
+  try {
+    return (await locator.innerText({ timeout: timeoutMs })).trim();
+  } catch {
+    return '';
+  }
+}
+
 async function isButtonVisible(page: Page, name: string): Promise<boolean> {
   const btn = page.getByRole('button', { name, exact: true });
   if (await btn.count() === 0) return false;
@@ -144,7 +152,7 @@ async function getEnemiesNearbyWidget(page: Page): Promise<Locator | null> {
     for (let j = 0; j < btnCount; j++) {
       const btn = buttons.nth(j);
       if (!(await btn.isVisible().catch(() => false))) continue;
-      const text = (await btn.innerText()).trim();
+      const text = await safeInnerText(btn);
       if (PURE_NUMERIC_PATTERN.test(text)) {
         hasNumericBadge = true;
         break;
@@ -203,7 +211,7 @@ async function filterVisibleEnemyButtons(locator: Locator): Promise<Locator[]> {
   for (let i = 0; i < count; i++) {
     const btn = locator.nth(i);
     if (!(await btn.isVisible())) continue;
-    const text = (await btn.innerText()).trim();
+    const text = await safeInnerText(btn);
     if (isExcludedEnemyButton(text)) continue;
     if (!extractEnemyName(text)) continue;
     visible.push(btn);
@@ -228,7 +236,7 @@ async function collectCardsInScope(scope: Locator): Promise<Locator[]> {
   for (let i = 0; i < count; i++) {
     const btn = buttons.nth(i);
     if (!(await btn.isVisible())) continue;
-    const text = (await btn.innerText()).trim();
+    const text = await safeInnerText(btn);
     if (isExcludedEnemyButton(text)) continue;
     const name = extractEnemyName(text);
     if (!name) continue;
@@ -257,7 +265,7 @@ async function collectEnemyCardButtons(page: Page): Promise<Locator[]> {
 async function enemyInfosFromButtons(buttons: Locator[]): Promise<EnemyInfo[]> {
   const enemies: EnemyInfo[] = [];
   for (let i = 0; i < buttons.length; i++) {
-    const text = (await buttons[i].innerText()).trim();
+    const text = await safeInnerText(buttons[i]);
     const name = extractEnemyName(text);
     if (!name) continue;
     enemies.push({ name, index: enemies.length });
@@ -289,7 +297,7 @@ async function findEnemiesNearbyCountButton(page: Page): Promise<Locator | null>
   for (let i = 0; i < count; i++) {
     const btn = buttons.nth(i);
     if (!(await btn.isVisible())) continue;
-    const text = (await btn.innerText()).trim();
+    const text = await safeInnerText(btn);
     if (PURE_NUMERIC_PATTERN.test(text)) return btn;
   }
   return null;
@@ -320,7 +328,7 @@ async function readEnemyNameFromDetailPanel(page: Page): Promise<string | null> 
   if (await dialog.count() > 0) {
     const heading = dialog.locator('h1, h2, h3').first();
     if (await heading.count() > 0) {
-      const name = (await heading.innerText()).trim();
+      const name = await safeInnerText(heading);
       if (name && !/^(STANCE|LOOT|FOOD|ENEMIES)$/i.test(name)) return name;
     }
   }
@@ -566,6 +574,123 @@ export async function stopHunt(page: Page): Promise<CombatStepResult> {
   return 'hunt_stopped';
 }
 
+
+/** Preferred cooked-food labels for pre-battle FOOD Add dialog. */
+const BATTLE_FOOD_LABELS = [
+  'Cooked Cod',
+  'Cooked Salmon',
+  'Cooked Tuna',
+  'Cooked Trout',
+  'Cooked Fish',
+  'Bread',
+];
+
+/**
+ * Idle MMO heals via food packed BEFORE Battle (effective HP), not mid-fight clicks.
+ * Flow: FOOD → Add → food-for-battle modal → click Nx item → quantity modal → Max → Add.
+ */
+export async function selectBattleFood(page: Page): Promise<'added' | 'none' | 'failed'> {
+  try {
+    const foodHeading = page.getByText(/^FOOD$/i).first();
+    if (!(await foodHeading.isVisible({ timeout: 2000 }).catch(() => false))) {
+      return 'none';
+    }
+
+    const addNearFood = page
+      .locator(
+        'xpath=//*[normalize-space()="FOOD" or normalize-space()="Food"]/following::button[normalize-space()="Add"][1]',
+      )
+      .or(page.getByRole('button', { name: 'Add', exact: true }));
+
+    if ((await addNearFood.count()) === 0) {
+      console.log('[combat] FOOD Add not visible — no food UI');
+      return 'none';
+    }
+
+    await addNearFood.first().click({ timeout: 5000 });
+    await page.waitForTimeout(800);
+
+    // food-for-battle modal: icon buttons show quantity as "25\\nx".
+    const foodModal = page.locator('[x-data*="food-for-battle"]');
+    const itemInModal = foodModal.locator('button').filter({ hasText: /\d+\s*x/i });
+    const itemFallback = page.getByRole('button').filter({ hasText: /^\d+\s*x$/im });
+    const foodItem = (await itemInModal.count()) > 0 ? itemInModal : itemFallback;
+
+    if ((await foodItem.count()) === 0 || !(await foodItem.first().isVisible().catch(() => false))) {
+      console.log('[combat] FOOD Add opened but no cooked food in inventory');
+      await page.keyboard.press('Escape').catch(() => undefined);
+      const closeFood = foodModal.locator('button').first();
+      if ((await closeFood.count()) > 0) {
+        await closeFood.click().catch(() => undefined);
+      }
+      return 'none';
+    }
+
+    await foodItem.first().click({ timeout: 5000 }).catch(() => undefined);
+    await page.waitForTimeout(700);
+
+    const body = await pageText(page);
+    let foodName = 'food';
+    const addItemMatch = body.match(/Add Item\s*\n\s*([^\n]+)/i);
+    if (addItemMatch?.[1]) {
+      foodName = addItemMatch[1].trim();
+    } else {
+      for (const label of BATTLE_FOOD_LABELS) {
+        if (body.includes(label)) {
+          foodName = label;
+          break;
+        }
+      }
+    }
+
+    // Quantity modal (select-battle-food-quantity): input#quantity + Max + Add.
+    const qtyModal = page.locator('[x-data*="select-battle-food-quantity"]');
+    const qtyInput = page.locator('input#quantity, input[name="quantity"]');
+    if ((await qtyInput.count()) > 0 && (await qtyInput.first().isVisible().catch(() => false))) {
+      const maxNearQty = qtyModal
+        .getByRole('button', { name: 'Max', exact: true })
+        .or(
+          page.locator(
+            'xpath=//*[@id="quantity" or @name="quantity"]/following::button[normalize-space()="Max"][1]',
+          ),
+        );
+      if ((await maxNearQty.count()) > 0) {
+        await maxNearQty.first().click().catch(() => undefined);
+      }
+      await page.waitForTimeout(300);
+    }
+
+    const confirmAdd = qtyModal
+      .getByRole('button', { name: 'Add', exact: true })
+      .or(page.getByRole('button', { name: 'Add', exact: true }));
+
+    // Prefer Add inside quantity modal; fall back to last visible Add.
+    let confirmed = false;
+    const modalAdd = qtyModal.getByRole('button', { name: 'Add', exact: true });
+    if ((await modalAdd.count()) > 0 && (await modalAdd.first().isVisible().catch(() => false))) {
+      await modalAdd.first().click({ timeout: 5000 });
+      confirmed = true;
+    } else if ((await confirmAdd.count()) > 0) {
+      await confirmAdd.last().click({ timeout: 5000 }).catch(() => undefined);
+      confirmed = true;
+    }
+
+    if (confirmed) {
+      console.log(`[combat] Packed battle food: ${foodName}`);
+      await page.waitForTimeout(500);
+      return 'added';
+    }
+
+    console.log('[combat] FOOD quantity dialog missing Add confirm');
+    await page.keyboard.press('Escape').catch(() => undefined);
+    return 'failed';
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.log(`[combat] selectBattleFood failed: ${message}`);
+    return 'failed';
+  }
+}
+
 /**
  * Open enemy detail (if needed), set stance/max, click Battle.
  * Post-Stop: count button → detail panel. Legacy: click creature card first.
@@ -589,6 +714,7 @@ export async function configureAndBattle(
 
   await setStance(page, stance);
   await setMaxEnemies(page, maxEnemies);
+  await selectBattleFood(page);
 
   const battleBtn = page.getByRole('button', { name: 'Battle', exact: true });
   if (await battleBtn.count() === 0) {

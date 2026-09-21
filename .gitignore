@@ -7,3 +7,5 @@ storage-state.json
 .playwright/
 playwright-report/
 test-results/
+
+logs/

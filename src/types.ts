@@ -126,12 +126,16 @@ export const BOOTSTRAP_ACTION_IDS = {
   gather_yew: 'gather_yew',
   mine_coal: 'mine_coal',
   fish_cod: 'fish_cod',
+  cook_cod: 'cook_cod',
   buy_bait: 'buy_bait',
   hunt_battle: 'hunt_battle',
   quest_talk_accept: 'quest_talk_accept',
   quest_turnin: 'quest_turnin',
   craft_if_ready: 'craft_if_ready',
   sell_junk: 'sell_junk',
+  market_sell_half: 'market_sell_half',
+  hunt_rabbits: 'hunt_rabbits',
+  explore_map: 'explore_map',
   idle: 'idle',
 } as const;
 

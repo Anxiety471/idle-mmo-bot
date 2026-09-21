@@ -1,6 +1,7 @@
 import type { AppConfig } from '../config.js';
 import type { ActionAllowContext, ActionDefinition, ActionExecuteContext, AutopilotActionId } from './action-types.js';
 import type { AutopilotContext, GameSnapshot, ActionResult } from '../types.js';
+import { filterAllowedByPlaybook, getPlaybookFromSnapshot } from './early-systems-playbook.js';
 
 const registry = new Map<AutopilotActionId, ActionDefinition>();
 
@@ -52,6 +53,11 @@ export function deriveAllowedActions(
 
   if (allowed.length === 0) {
     return registry.has('idle') ? ['idle'] : [];
+  }
+
+  const playbook = getPlaybookFromSnapshot(snapshot);
+  if (playbook) {
+    return filterAllowedByPlaybook(allowed, snapshot, playbook);
   }
 
   return allowed;

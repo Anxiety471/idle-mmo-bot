@@ -12,6 +12,7 @@ import type {
 import { listActions } from '../autopilot/action-registry.js';
 import { huntFoundCap } from './hunt-cap.js';
 import type { SupervisorAdvisor } from './supervisor-advisor.js';
+import { getPlaybookFromSnapshot } from '../autopilot/early-systems-playbook.js';
 
 const HEARTH_QUEST = 'Wood for the Hearth';
 const GOBLIN_QUEST = 'Goblin Menace';
@@ -62,6 +63,23 @@ export class ProgressiveStubJev implements SupervisorAdvisor {
       return allowed.includes('idle') ? 'idle' : allowed[0];
     }
 
+    const playbook = getPlaybookFromSnapshot(snapshot);
+    if (playbook && playbook.enabled && !playbook.complete) {
+      const preferredHit = pickAllowed(allowed, playbook.preferredActions);
+      const resource = snapshot.currentAction?.resource ?? snapshot.currentAction?.label ?? '';
+      const onCoal = /coal/i.test(resource);
+      const onCod = /\bcod\b/i.test(resource);
+      if (playbook.stage === 'mine_coal' && !onCoal) {
+        const mine = pickAllowed(allowed, ['mine_coal']);
+        if (mine) return mine;
+      }
+      if (playbook.stage === 'fish_cod' && !onCod) {
+        const fish = pickAllowed(allowed, ['fish_cod', 'buy_bait']);
+        if (fish) return fish;
+      }
+      if (preferredHit && preferredHit !== 'continue_current') return preferredHit;
+    }
+
     const byPriority = listActions()
       .filter((a) => allowed.includes(a.id))
       .sort((a, b) => (a.priority ?? 50) - (b.priority ?? 50));
@@ -71,6 +89,16 @@ export class ProgressiveStubJev implements SupervisorAdvisor {
         return def.id;
       }
       if (def.id === 'continue_current' && snapshot.currentAction?.busy) {
+        // Skip continue when playbook wants a different gather (interrupt path).
+        if (playbook && !playbook.complete && playbook.interruptActions.length) {
+          const resource = snapshot.currentAction?.resource ?? '';
+          if (playbook.stage === 'mine_coal' && !/coal/i.test(resource)) {
+            continue;
+          }
+          if (playbook.stage === 'fish_cod' && !/cod/i.test(resource)) {
+            continue;
+          }
+        }
         return def.id;
       }
       if (def.id === 'hunt_battle' && (hasKillQuest(snapshot) || combatLagging(snapshot))) {

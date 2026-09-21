@@ -4,16 +4,47 @@ import type { MerchantStepResult } from '../types.js';
 import { navigateTo } from '../browser.js';
 
 /**
- * Deterministic merchant purchase helpers.
- *
- * Flow from playbook: /merchants → General Goods → Cheap Bait (2g).
- * UI may change — update selectors when flows break.
- * Never auto-purchase unless explicitly requested by CLI/config.
+ * Buy Cheap Bait from Melriel (General Goods) at /merchants.
+ * Flow: merchants → Melriel → Cheap Bait → quantity → Purchase for N
  */
 
 const MERCHANTS_PATH = '/merchants';
-const GENERAL_GOODS = 'General Goods';
-const CHEAP_BAIT = 'Cheap Bait';
+
+async function dismissMerchantDialogue(page: Page): Promise<void> {
+  const lookAround = page.getByText("I'll have a look around.", { exact: true });
+  if (await lookAround.count() > 0 && (await lookAround.first().isVisible().catch(() => false))) {
+    await lookAround.first().click({ force: true }).catch(() => undefined);
+    await page.waitForTimeout(500);
+  }
+}
+
+async function openMelriel(page: Page): Promise<boolean> {
+  // Prefer visible General Goods / Melriel row (avoid hidden sm:hidden spans).
+  for (const pattern of [/General Goods/i, /Melriel/i]) {
+    const buttons = page.getByRole('button', { name: pattern });
+    const count = await buttons.count();
+    for (let i = 0; i < count; i++) {
+      const btn = buttons.nth(i);
+      const box = await btn.boundingBox().catch(() => null);
+      if (!box || box.width < 8 || box.height < 8) continue;
+      if (!(await btn.isVisible().catch(() => false))) continue;
+      await btn.click({ force: true, timeout: 8000 });
+      await page.waitForTimeout(1000);
+      const body = await page.locator('body').innerText();
+      if (/Cheap Bait/i.test(body) || /MELRIEL/i.test(body)) return true;
+    }
+  }
+  // Fallback: force-click any exact text match (may include hidden labels).
+  for (const label of ['Melriel', 'General Goods']) {
+    const el = page.getByText(label, { exact: true });
+    if ((await el.count()) === 0) continue;
+    await el.first().click({ force: true, timeout: 8000 }).catch(() => undefined);
+    await page.waitForTimeout(1000);
+    const body = await page.locator('body').innerText();
+    if (/Cheap Bait/i.test(body) || /MELRIEL/i.test(body)) return true;
+  }
+  return false;
+}
 
 /** Buy a small quantity of Cheap Bait (default 1). */
 export async function buyCheapBait(
@@ -21,36 +52,50 @@ export async function buyCheapBait(
   config: AppConfig,
   quantity = 1,
 ): Promise<MerchantStepResult> {
-  await navigateTo(page, config, MERCHANTS_PATH);
+  try {
+    await navigateTo(page, config, MERCHANTS_PATH);
+    await page.waitForTimeout(1000);
+    await dismissMerchantDialogue(page);
 
-  const category = page
-    .getByRole('button', { name: GENERAL_GOODS, exact: true })
-    .or(page.getByText(GENERAL_GOODS, { exact: true }));
-  if (await category.count() > 0) {
-    await category.first().click();
-  }
+    if (!(await openMelriel(page))) {
+      console.log('[merchant] Melriel / General Goods not found');
+      return 'failed';
+    }
 
-  const baitItem = page.getByText(CHEAP_BAIT, { exact: true });
-  if (await baitItem.count() === 0) {
+    const baitItem = page.getByRole('button', { name: /Cheap Bait/i })
+      .or(page.getByText('Cheap Bait', { exact: true }));
+    if (await baitItem.count() === 0) {
+      console.log('[merchant] Cheap Bait not listed');
+      return 'failed';
+    }
+    await baitItem.first().click({ force: true, timeout: 8000 });
+    await page.waitForTimeout(800);
+
+    const qtyInput = page.locator('input[name="quantity"], input[type="number"]');
+    if (await qtyInput.count() > 0) {
+      await qtyInput.first().fill(String(quantity));
+    }
+
+    const purchase = page.getByRole('button', { name: /Purchase for/i })
+      .or(page.getByRole('button', { name: 'Buy', exact: true }))
+      .or(page.getByRole('button', { name: 'Purchase', exact: true }));
+    if (await purchase.count() === 0) {
+      console.log('[merchant] Purchase button missing');
+      return 'failed';
+    }
+    await purchase.first().click({ force: true, timeout: 8000 });
+    await page.waitForTimeout(500);
+
+    const confirm = page.getByRole('button', { name: /^(Confirm|Purchase)$/i });
+    if (await confirm.count() > 0) {
+      await confirm.first().click({ force: true, timeout: 5000 }).catch(() => undefined);
+    }
+
+    console.log(`[merchant] Purchased Cheap Bait x${quantity}`);
+    return 'purchased';
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.log(`[merchant] buyCheapBait failed: ${message}`);
     return 'failed';
   }
-  await baitItem.first().click();
-
-  const qtyInput = page.locator('input[type="number"]');
-  if (await qtyInput.count() > 0) {
-    await qtyInput.first().fill(String(quantity));
-  }
-
-  const buyButton = page.getByRole('button', { name: 'Buy', exact: true });
-  if (await buyButton.count() === 0) {
-    return 'failed';
-  }
-  await buyButton.first().click();
-
-  const confirm = page.getByRole('button', { name: /^(Confirm|Purchase)$/i });
-  if (await confirm.count() > 0) {
-    await confirm.first().click();
-  }
-
-  return 'purchased';
 }
