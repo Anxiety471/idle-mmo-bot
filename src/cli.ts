@@ -24,6 +24,8 @@ import {
   turnInQuest,
   isTurnInEnabled,
   readQuestProgress,
+  turnInQuestWhenReady,
+  buyCheapBait,
 } from './deterministic/index.js';
 import { ConsoleJev, StubJev, type JevAdvisor } from './jev/index.js';
 
@@ -38,12 +40,18 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+interface SkillLoopOptions {
+  buyBait?: boolean;
+}
+
 async function runSkillLoop(
   skillId: SkillId,
   resourceLabel: string | undefined,
   verbose: boolean,
+  loopOptions: SkillLoopOptions = {},
 ): Promise<void> {
   const config = loadConfig();
+  const buyBait = loopOptions.buyBait ?? config.buyBait;
   const jev = createJev(verbose);
   const skill = getSkillConfig(skillId);
   const resource = resolveResource(skill, resourceLabel);
@@ -54,32 +62,89 @@ async function runSkillLoop(
   );
   if (skill.requiresBait) {
     console.log(
-      `[${skill.id}] Fishing requires Cheap Bait (buy at /merchants → General Goods). Bot does not auto-purchase.`,
+      buyBait
+        ? `[${skill.id}] Fishing requires Cheap Bait — will buy at /merchants if missing (--buy-bait / BUY_BAIT)`
+        : `[${skill.id}] Fishing requires Cheap Bait (buy at /merchants → General Goods). Bot does not auto-purchase.`,
     );
   }
 
+  const backoffMs = Math.max(config.pollMs * 6, 30_000);
+  let backoffUntil = 0;
+
   try {
     while (true) {
-      const state = await readSkillState(session.page, config, skill.id);
+      const state = await readSkillState(session.page, config, skill.id, {
+        probeOtherSkills: true,
+      });
+
+      const elsewhere = state.busyElsewhere;
+      const elsewhereLabel = elsewhere
+        ? `${elsewhere.skill}${elsewhere.resource ? ` (${elsewhere.resource})` : ''}`
+        : undefined;
+
       console.log(
-        `[${skill.id}] busy=${state.busy}${state.currentResource ? ` resource=${state.currentResource}` : ''}`,
+        `[${skill.id}] busy=${state.busy}` +
+          `${state.currentResource ? ` resource=${state.currentResource}` : ''}` +
+          `${elsewhereLabel ? ` elsewhere=${elsewhereLabel}` : ''}`,
       );
 
-      if (!state.busy) {
-        const allowInterrupt = await jev.shouldInterruptGather(state);
-        const result = await restartSkillGather(session.page, config, {
-          skill: skill.id,
-          resourceLabel: resource,
-          allowInterrupt,
-        });
-        console.log(`[${skill.id}] restart → ${result}`);
+      if (state.busy) {
+        backoffUntil = 0;
+        await sleep(config.pollMs);
+        continue;
+      }
 
-        if (result === 'missing_requirement') {
-          console.error(
-            `[${skill.id}] Missing Cheap Bait — buy at /merchants (General Goods, 2g) then retry. Exiting.`,
+      const allowInterrupt = await jev.shouldInterruptGather(state);
+
+      if (elsewhere && !allowInterrupt) {
+        if (Date.now() >= backoffUntil) {
+          console.log(
+            `[${skill.id}] Another action active (${elsewhereLabel}) — waiting (no interrupt)`,
           );
-          break;
+          backoffUntil = Date.now() + backoffMs;
+        } else {
+          console.log(
+            `[${skill.id}] Another action active (${elsewhereLabel}) — backing off`,
+          );
         }
+        await sleep(config.pollMs);
+        continue;
+      }
+
+      if (Date.now() < backoffUntil) {
+        console.log(`[${skill.id}] Backing off after blocked restart — retry soon`);
+        await sleep(config.pollMs);
+        continue;
+      }
+      const result = await restartSkillGather(session.page, config, {
+        skill: skill.id,
+        resourceLabel: resource,
+        allowInterrupt,
+        knownState: state,
+      });
+      console.log(`[${skill.id}] restart → ${result}`);
+
+      if (result === 'missing_requirement') {
+        if (skill.requiresBait && buyBait) {
+          console.log(`[${skill.id}] Missing Cheap Bait — purchasing 1 at /merchants...`);
+          const purchase = await buyCheapBait(session.page, config, 1);
+          console.log(`[${skill.id}] buy bait → ${purchase}`);
+          if (purchase === 'purchased') {
+            await sleep(config.pollMs);
+            continue;
+          }
+        }
+        console.error(
+          `[${skill.id}] Missing Cheap Bait — buy at /merchants (General Goods, 2g) then retry. Exiting.`,
+        );
+        break;
+      }
+
+      if (result === 'another_action_active' || result === 'kept_current_action') {
+        console.log(
+          `[${skill.id}] Another gather action is active — backing off ${backoffMs / 1000}s (no interrupt)`,
+        );
+        backoffUntil = Date.now() + backoffMs;
       }
 
       await sleep(config.pollMs);
@@ -97,8 +162,10 @@ async function runCombat(verbose: boolean, maxRounds = 10): Promise<void> {
   const config = loadConfig();
   const jev = createJev(verbose);
   const session = await launchBrowser(config);
+  const huntBackoffMs = Math.max(config.pollMs * 6, 30_000);
 
   console.log('[combat] Starting hunt → battle loop');
+  console.log('[combat] Replace dialog: Close keeps gather; Start anyway only when Jev allows interrupt');
 
   try {
     let rounds = 0;
@@ -110,7 +177,18 @@ async function runCombat(verbose: boolean, maxRounds = 10): Promise<void> {
       const allowInterrupt = await jev.shouldInterruptGather(gatherSnapshot);
       const huntResult = await startHunt(session.page, config, allowInterrupt);
       console.log(`[combat] startHunt → ${huntResult}`);
-      if (huntResult === 'failed' || huntResult === 'no_action') {
+
+      if (huntResult === 'no_action') {
+        console.log(
+          '[combat] Hunt not started — another action is running (replace dialog closed, no interrupt)',
+        );
+        console.log(`[combat] Backing off ${huntBackoffMs / 1000}s before retry`);
+        await sleep(huntBackoffMs);
+        continue;
+      }
+
+      if (huntResult === 'failed') {
+        console.log('[combat] startHunt failed — Start Hunt button not available');
         await sleep(config.pollMs);
         continue;
       }
@@ -159,6 +237,41 @@ async function runCombat(verbose: boolean, maxRounds = 10): Promise<void> {
       const moreResult = await huntMore(session.page);
       console.log(`[combat] huntMore → ${moreResult}`);
       await sleep(config.pollMs);
+    }
+  } finally {
+    await session.close();
+  }
+}
+
+async function runQuestTurnIn(questTitle: string, progressItem?: string): Promise<void> {
+  const config = loadConfig();
+  const session = await launchBrowser(config);
+
+  console.log(`[quest-turnin] Checking "${questTitle}" on Accepted tab`);
+
+  try {
+    const outcome = await turnInQuestWhenReady(session.page, config, {
+      title: questTitle,
+      tab: 'Accepted',
+      progressItem,
+    });
+
+    if (outcome.progress) {
+      console.log(`[quest-turnin] Progress: ${outcome.progress}`);
+    }
+
+    switch (outcome.result) {
+      case 'turned_in':
+        console.log(`[quest-turnin] Turned in "${questTitle}"`);
+        break;
+      case 'in_progress':
+        console.log(`[quest-turnin] Turn In not enabled — quest incomplete or requirements not met`);
+        break;
+      case 'failed':
+        console.error(`[quest-turnin] Could not open quest "${questTitle}"`);
+        break;
+      default:
+        console.log(`[quest-turnin] Result: ${outcome.result}`);
     }
   } finally {
     await session.close();
@@ -269,11 +382,17 @@ program
 program
   .command('skill')
   .description('Poll a skill page; restart resource when idle')
-  .requiredOption('-s, --skill <skill>', 'Skill: woodcutting, mining, or fishing')
-  .option('-r, --resource <name>', 'Resource label (defaults per skill)')
+  .requiredOption(
+    '-s, --skill <skill>',
+    'Skill: woodcutting, mining, fishing, alchemy, smelting, cooking, forge, construction',
+  )
+  .option('-r, --resource <name>', 'Resource label (required for crafting skills without defaults)')
+  .option('--buy-bait', 'Buy Cheap Bait at merchant when fishing (also BUY_BAIT env)', false)
   .action(async (opts, cmd) => {
     const verbose = cmd.parent?.opts().verbose ?? false;
-    await runSkillLoop(opts.skill as SkillId, opts.resource, verbose);
+    await runSkillLoop(opts.skill as SkillId, opts.resource, verbose, {
+      buyBait: opts.buyBait,
+    });
   });
 
 program
@@ -291,6 +410,15 @@ program
   .action(async (_opts, cmd) => {
     const verbose = cmd.parent?.opts().verbose ?? false;
     await runQuest(verbose);
+  });
+
+program
+  .command('quest-turnin')
+  .description('Turn in a quest when Turn In is enabled (default: Wood for the Hearth)')
+  .option('-q, --quest <title>', 'Quest title', HEARTH_QUEST)
+  .option('-i, --item <name>', 'Progress item to read from Overview', OAK_LOG)
+  .action(async (opts) => {
+    await runQuestTurnIn(opts.quest, opts.item);
   });
 
 program

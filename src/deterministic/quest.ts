@@ -12,6 +12,52 @@ import { navigateTo } from '../browser.js';
  */
 
 const QUESTS_PATH = '/quests';
+/** Max time to wait for async quest UI after navigation (~2–3s observed). */
+const QUEST_UI_SETTLE_MS = 10_000;
+/** Brief pause after tab switch for quest list to refresh. */
+const TAB_SWITCH_SETTLE_MS = 500;
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Match tab labels like "Accepted" or "Accepted 1", "Pending Nearby 3". */
+function questTabPattern(tabName: string): RegExp {
+  return new RegExp(`^${escapeRegex(tabName)}(?:\\s+\\d+)?$`);
+}
+
+/**
+ * Wait until quest tab buttons are visible after domcontentloaded.
+ * Tabs load asynchronously (~2–3s); switching too early misses Accepted list.
+ */
+async function waitForQuestTabsSettled(page: Page, timeoutMs = QUEST_UI_SETTLE_MS): Promise<void> {
+  const tabs = page
+    .getByRole('button', { name: questTabPattern('Accepted') })
+    .or(page.getByRole('button', { name: questTabPattern('Pending Nearby') }))
+    .or(page.getByRole('button', { name: questTabPattern('Completed') }));
+
+  await tabs
+    .first()
+    .waitFor({ state: 'visible', timeout: timeoutMs })
+    .catch(() => {
+      // Best-effort: proceed rather than hang forever.
+    });
+}
+
+/** Wait for a quest card button (substring name match) to appear in the current list. */
+async function waitForQuestCard(
+  page: Page,
+  title: string,
+  timeoutMs = QUEST_UI_SETTLE_MS,
+): Promise<boolean> {
+  const card = page.getByRole('button', { name: title });
+  try {
+    await card.first().waitFor({ state: 'visible', timeout: timeoutMs });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 async function pageText(page: Page): Promise<string> {
   return page.locator('body').innerText();
@@ -50,20 +96,111 @@ export async function readQuestState(page: Page, config: AppConfig): Promise<Que
   return { quests, pageText: text };
 }
 
+export interface OpenQuestOptions {
+  /** Skip navigation when already on /quests. */
+  skipNavigate?: boolean;
+}
+
 /** Open a quest card by title. */
 export async function openQuest(
   page: Page,
   config: AppConfig,
   title: string,
+  options: OpenQuestOptions = {},
 ): Promise<QuestStepResult> {
-  await navigateTo(page, config, QUESTS_PATH);
+  if (!options.skipNavigate) {
+    await navigateTo(page, config, QUESTS_PATH);
+  }
 
-  const card = page.getByRole('button', { name: title }).or(page.getByText(title, { exact: true }));
+  // Substring match on button accessible name (works once tab list is visible).
+  const card = page.getByRole('button', { name: title });
   if (await card.count() === 0) {
     return 'failed';
   }
   await card.first().click();
   return 'opened';
+}
+
+/**
+ * Switch quest list tab (e.g. Accepted, Pending Nearby, Completed).
+ * Tab buttons include optional counts: "Accepted 1", "Pending Nearby 3".
+ */
+export async function switchQuestTab(page: Page, tabName: string): Promise<QuestStepResult> {
+  const pattern = questTabPattern(tabName);
+
+  const tabByRole = page.getByRole('button', { name: pattern });
+  if (await tabByRole.count() > 0) {
+    await tabByRole.first().click();
+    await page.waitForTimeout(TAB_SWITCH_SETTLE_MS);
+    return 'opened';
+  }
+
+  // Fallback: scan visible buttons for matching label text
+  const buttons = page.getByRole('button');
+  const count = await buttons.count();
+  for (let i = 0; i < count; i++) {
+    const label = (await buttons.nth(i).innerText()).trim();
+    if (pattern.test(label)) {
+      await buttons.nth(i).click();
+      await page.waitForTimeout(TAB_SWITCH_SETTLE_MS);
+      return 'opened';
+    }
+  }
+
+  return 'no_action';
+}
+
+export interface TurnInQuestOptions {
+  title: string;
+  /** Quest tab to open first, e.g. "Accepted". */
+  tab?: string;
+  /** Progress item to read from Overview, e.g. "Oak Log". */
+  progressItem?: string;
+}
+
+export interface TurnInQuestOutcome {
+  result: QuestStepResult;
+  progress?: string;
+}
+
+/**
+ * Open a quest and turn in when the Turn In button is enabled.
+ * Does not invent completion — only clicks when the button is enabled.
+ */
+export async function turnInQuestWhenReady(
+  page: Page,
+  config: AppConfig,
+  options: TurnInQuestOptions,
+): Promise<TurnInQuestOutcome> {
+  await navigateTo(page, config, QUESTS_PATH);
+  await waitForQuestTabsSettled(page);
+
+  if (options.tab) {
+    const tabResult = await switchQuestTab(page, options.tab);
+    if (tabResult !== 'opened') {
+      return { result: 'failed' };
+    }
+  }
+
+  if (!(await waitForQuestCard(page, options.title))) {
+    return { result: 'failed' };
+  }
+
+  const opened = await openQuest(page, config, options.title, { skipNavigate: true });
+  if (opened === 'failed') {
+    return { result: 'failed' };
+  }
+
+  let progress: string | undefined;
+  if (options.progressItem) {
+    progress = await readQuestProgress(page, options.progressItem);
+  }
+
+  if (await isTurnInEnabled(page)) {
+    return { result: await turnInQuest(page), progress };
+  }
+
+  return { result: 'in_progress', progress };
 }
 
 /** Click Talk and select a dialogue option if a picker is shown. */

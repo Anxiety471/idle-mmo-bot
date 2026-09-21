@@ -1,8 +1,9 @@
 import type { Page } from 'playwright';
 import type { AppConfig } from '../config.js';
-import type { GatherRestartResult, GatherState } from '../types.js';
+import type { ActiveGatherElsewhere, GatherRestartResult, GatherState } from '../types.js';
 import { navigateTo } from '../browser.js';
 import {
+  GATHER_SKILL_IDS,
   getSkillConfig,
   resolveResource,
   type SkillConfig,
@@ -10,16 +11,21 @@ import {
 } from './skills.js';
 
 /**
- * Deterministic skill gather helpers (woodcutting, mining, fishing).
+ * Deterministic skill gather/craft helpers (woodcutting, mining, fishing, etc.).
  *
  * Selectors and labels are derived from live-tested UI flows (Sep 2025).
  * The Idle MMO web UI may change without notice — update selectors here
  * when flows break. Never invent outcomes; only report what the UI shows.
+ *
+ * CURRENT ACTION is global (one gather at a time) but only rendered on the
+ * skill page that owns the active action — other skill pages look idle.
  */
 
 const CURRENT_ACTION_MARKER = 'CURRENT ACTION';
 /** Max time to wait for async gather panel after navigation. */
 const GATHER_UI_SETTLE_MS = 10_000;
+/** Shorter settle when probing other skill pages for a global busy check. */
+const PROBE_SETTLE_MS = 3_000;
 
 /** Bait-related phrases observed / expected when fishing without Cheap Bait. */
 const BAIT_REQUIREMENT_PATTERNS = [
@@ -44,11 +50,12 @@ async function waitForSkillUiSettled(
 ): Promise<void> {
   const busyIndicator = page.getByText(CURRENT_ACTION_MARKER);
   const startButton = page.getByRole('button', { name: 'Start', exact: true });
-  const resourceLabel = page.getByText(skill.defaultResource, { exact: true });
+  let settleTarget = busyIndicator.or(startButton);
+  if (skill.defaultResource) {
+    settleTarget = settleTarget.or(page.getByText(skill.defaultResource, { exact: true }));
+  }
 
-  await busyIndicator
-    .or(startButton)
-    .or(resourceLabel)
+  await settleTarget
     .first()
     .waitFor({ state: 'visible', timeout: timeoutMs })
     .catch(() => {
@@ -88,11 +95,45 @@ async function clickResource(page: Page, resourceLabel: string): Promise<boolean
   return false;
 }
 
+/**
+ * Probe other gather skill pages for CURRENT ACTION.
+ * The game allows one gather action at a time; it only renders on the owning skill page.
+ */
+export async function findActiveGatherOnOtherSkill(
+  page: Page,
+  config: AppConfig,
+  excludeSkillId: SkillId,
+): Promise<ActiveGatherElsewhere | null> {
+  for (const skillId of GATHER_SKILL_IDS) {
+    if (skillId === excludeSkillId) continue;
+
+    const otherSkill = getSkillConfig(skillId);
+    await navigateTo(page, config, otherSkill.path);
+    await waitForSkillUiSettled(page, otherSkill, PROBE_SETTLE_MS);
+
+    const pageText = await page.locator('body').innerText();
+    if (pageText.includes(CURRENT_ACTION_MARKER)) {
+      return {
+        skill: skillId,
+        resource: parseCurrentResource(pageText, otherSkill.resources),
+      };
+    }
+  }
+
+  return null;
+}
+
+export interface ReadSkillStateOptions {
+  /** When true and this page looks idle, probe other gather skill pages. */
+  probeOtherSkills?: boolean;
+}
+
 /** Read skill gather page state without clicking anything. */
 export async function readSkillState(
   page: Page,
   config: AppConfig,
   skillId: SkillId,
+  options: ReadSkillStateOptions = {},
 ): Promise<GatherState> {
   const skill = getSkillConfig(skillId);
   await navigateTo(page, config, skill.path);
@@ -101,7 +142,16 @@ export async function readSkillState(
   const busy = pageText.includes(CURRENT_ACTION_MARKER);
   const currentResource = busy ? parseCurrentResource(pageText, skill.resources) : undefined;
 
-  return { busy, currentResource, pageText, skill: skill.id };
+  let busyElsewhere: ActiveGatherElsewhere | undefined;
+  if (!busy && options.probeOtherSkills) {
+    const elsewhere = await findActiveGatherOnOtherSkill(page, config, skill.id);
+    await navigateTo(page, config, skill.path);
+    if (elsewhere) {
+      busyElsewhere = elsewhere;
+    }
+  }
+
+  return { busy, busyElsewhere, currentResource, pageText, skill: skill.id };
 }
 
 /** Backward-compatible woodcutting state reader. */
@@ -119,9 +169,9 @@ export async function waitUntilIdle(
   const deadline = Date.now() + timeoutMs;
   let state = await readSkillState(page, config, skillId);
 
-  while (state.busy && Date.now() < deadline) {
+  while ((state.busy || state.busyElsewhere) && Date.now() < deadline) {
     await page.waitForTimeout(config.pollMs);
-    state = await readSkillState(page, config, skillId);
+    state = await readSkillState(page, config, skillId, { probeOtherSkills: true });
   }
 
   return state;
@@ -132,6 +182,8 @@ export interface RestartSkillOptions {
   resourceLabel?: string;
   /** When true, click "Start anyway" on the replace dialog. Default: false (Close). */
   allowInterrupt?: boolean;
+  /** Reuse a recent readSkillState result to avoid duplicate navigation. */
+  knownState?: GatherState;
 }
 
 /** @deprecated Use RestartSkillOptions */
@@ -140,9 +192,40 @@ export interface RestartGatherOptions {
   allowInterrupt?: boolean;
 }
 
+type StartReadiness = 'ready' | GatherRestartResult;
+
+/**
+ * Check whether Start can be clicked. Never clicks a disabled Start button
+ * (fishing without bait exposes a disabled Start that would timeout).
+ */
+async function checkStartReadiness(page: Page, skill: SkillConfig): Promise<StartReadiness> {
+  const pageText = await page.locator('body').innerText();
+
+  if (skill.requiresBait && detectMissingBait(pageText)) {
+    return 'missing_requirement';
+  }
+
+  const startButton = page.getByRole('button', { name: 'Start', exact: true });
+  if (await startButton.count() === 0) {
+    if (skill.requiresBait) {
+      return 'missing_requirement';
+    }
+    return 'failed';
+  }
+
+  if (await startButton.first().isDisabled()) {
+    if (skill.requiresBait) {
+      return 'missing_requirement';
+    }
+    return 'failed';
+  }
+
+  return 'ready';
+}
+
 /**
  * Restart gathering on the given skill/resource when idle.
- * If busy, returns immediately without clicking Start.
+ * If busy (locally or globally), returns without clicking Start.
  */
 export async function restartSkillGather(
   page: Page,
@@ -153,26 +236,35 @@ export async function restartSkillGather(
   const resourceLabel = resolveResource(skill, options.resourceLabel);
   const allowInterrupt = options.allowInterrupt ?? false;
 
-  const state = await readSkillState(page, config, skill.id);
+  const state = options.knownState ?? await readSkillState(page, config, skill.id);
   if (state.busy) {
     return 'already_busy';
+  }
+
+  if (!allowInterrupt && state.busyElsewhere) {
+    return 'another_action_active';
+  }
+
+  if (!allowInterrupt && !state.busyElsewhere && !options.knownState) {
+    const probed = await findActiveGatherOnOtherSkill(page, config, skill.id);
+    await navigateTo(page, config, skill.path);
+    if (probed) {
+      return 'another_action_active';
+    }
   }
 
   if (!(await clickResource(page, resourceLabel))) {
     return 'failed';
   }
 
-  const startButton = page.getByRole('button', { name: 'Start', exact: true });
-  if (await startButton.count() === 0) {
-    const pageText = await page.locator('body').innerText();
-    if (skill.requiresBait && detectMissingBait(pageText)) {
-      return 'missing_requirement';
-    }
-    return 'failed';
+  const startReadiness = await checkStartReadiness(page, skill);
+  if (startReadiness !== 'ready') {
+    return startReadiness;
   }
-  await startButton.first().click();
 
-  // Brief pause for validation messages (e.g. missing bait) after Start click
+  const startButton = page.getByRole('button', { name: 'Start', exact: true });
+  await startButton.first().click({ timeout: 5000 });
+
   await page.waitForTimeout(500);
   const afterClickText = await page.locator('body').innerText();
   if (skill.requiresBait && detectMissingBait(afterClickText)) {

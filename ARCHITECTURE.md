@@ -9,10 +9,10 @@
 └──────┬──────┘                    └──────────────┘
        │ clicks / reads
        ▼
-┌─────────────────────┐
-│  src/deterministic/ │
-│  gather combat quest│
-└──────────┬──────────┘
+┌─────────────────────────────────────┐
+│  src/deterministic/                 │
+│  gather · combat · quest · merchant │
+└──────────┬──────────────────────────┘
            │ Playwright
            ▼
     web.idle-mmo.com
@@ -24,7 +24,7 @@
 
 ### `src/config.ts`
 
-Loads `BASE_URL`, `POLL_MS`, `HEADLESS`, `STORAGE_STATE` from environment (via dotenv).
+Loads `BASE_URL`, `POLL_MS`, `HEADLESS`, `STORAGE_STATE`, `BUY_BAIT` from environment (via dotenv).
 
 ### `src/browser.ts`
 
@@ -38,10 +38,11 @@ Shared state snapshots passed to Jev: `GatherState`, `HuntState`, `BattleState`,
 
 | Module | Route | Flow |
 |--------|-------|------|
-| `skills.ts` | — | Skill configs (woodcutting / mining / fishing), resource labels, bait flag |
-| `gather.ts` | `/skills/view/<skill>` | Wait for `CURRENT ACTION`, `Start`, or default resource label after navigation; detect busy/idle; select resource → Start; handle replace dialog; `missing_requirement` for fishing without bait |
-| `combat.ts` | `/combat/battle` | Start Hunt → wait enemies → Stop → pick card → max/stance → Battle → Hunt More / Run Away |
-| `quest.ts` | `/quests` | Open card → Talk → dialogue → Overview progress → Turn In when enabled |
+| `skills.ts` | — | Skill configs for gather/craft skills; `resourceRequired` for unconfirmed defaults |
+| `gather.ts` | `/skills/view/<skill>` | Wait for UI settle; probe other skill pages for global busy; never click disabled Start; `missing_requirement` for fishing without bait |
+| `combat.ts` | `/combat/battle` | Start Hunt → replace dialog → wait enemies → Stop → Battle → Hunt More / Run Away |
+| `quest.ts` | `/quests` | Tab switch → open card → Overview → Turn In when enabled; `turnInQuestWhenReady` |
+| `merchant.ts` | `/merchants` | General Goods → Cheap Bait → buy 1 (only when `--buy-bait` / `BUY_BAIT`) |
 
 Comments in each file note that UI selectors are live-tested but may drift.
 
@@ -63,42 +64,33 @@ Comments in each file note that UI selectors are live-tested but may drift.
 - **`StubJev`** — production default in CLI; conservative, no logging overhead.
 - **`ConsoleJev`** — same defaults but logs every decision; enabled with `-v`.
 
-#### Implementing a real Jev agent
-
-1. Implement `JevAdvisor` in a new file (e.g. `src/jev/openai-jev.ts`).
-2. Use `state.pageText` and parsed fields as LLM context; return structured decisions.
-3. On parse failure or timeout, fall back to `StubJev` behavior.
-4. Register in `cli.ts` via env var, e.g. `JEV_PROVIDER=openai`.
-5. Never let Jev invent UI outcomes — only deterministic code clicks buttons.
-
-Example decision prompt (gather):
-
-> Page shows CURRENT ACTION: {state.currentResource}. User wants Oak Log. Interrupt? Reply JSON: `{ "interrupt": false }`
-
 ### `src/cli.ts`
 
-Commander entry point:
-
-| Command | Loop behavior |
-|---------|---------------|
-| `gather` | Woodcutting Oak Log (alias) → `runSkillLoop` |
-| `skill` | `--skill` + optional `--resource` → poll busy/idle → `restartSkillGather` |
-| `mine` / `fish` | npm aliases for mining (Coal Ore) and fishing (Cod) |
-| `combat` | `startHunt` → wait → Jev stop → `configureAndBattle` → flee check → `huntMore` |
-| `quest` | Jev priority → open → talk → turn in if enabled |
-| `farm-hearth` | Accept hearth quest → gather loop until Turn In enabled |
+| Command | Behavior |
+|---------|----------|
+| `gather` | Woodcutting Oak Log alias |
+| `skill` | `--skill` + `--resource`; `--buy-bait` for fishing |
+| `mine` / `fish` | npm aliases |
+| `quest-turnin` | Accepted tab → open quest → Turn In when enabled |
+| `quest` | Jev priority → talk → turn in if enabled |
+| `farm-hearth` | Gather until hearth quest turn-in |
+| `combat` | Hunt loop; backs off 30s+ when replace dialog blocks hunt |
 
 ## Replace-dialog policy
 
 When starting gather or hunt while another action runs, the game shows **"Start a new action?"**:
 
-- **Close** — keep current action (default for gather helper).
+- **Close** — keep current action (default).
 - **Start anyway** — replace (only when `allowInterrupt` is true from Jev).
 
-CLI never sets `allowInterrupt` unless `jev.shouldInterruptGather()` returns true.
+Gather and combat both back off instead of hammering Start/Hunt every poll when blocked.
+
+## Merchant purchases
+
+Off by default. Fishing with `--buy-bait` or `BUY_BAIT=true` buys one Cheap Bait at `/merchants` → General Goods when `missing_requirement` is detected.
 
 ## Extending
 
-- Add new deterministic flows under `src/deterministic/` with parallel Jev hooks if needed.
+- Add skill configs in `skills.ts`; use `resourceRequired` until playbook confirms item labels.
 - Add npm script + commander subcommand in `cli.ts`.
 - Keep secrets and `storage-state.json` out of the repo (see `.gitignore`).

@@ -18,6 +18,8 @@ export interface AppConfig {
   pollMs: number;
   headless: boolean;
   storageStatePath: string | undefined;
+  /** When true, fishing may buy Cheap Bait at /merchants before retrying. Off by default. */
+  buyBait: boolean;
 }
 
 export function loadConfig(): AppConfig {
@@ -26,5 +28,6 @@ export function loadConfig(): AppConfig {
     pollMs: parseIntEnv(process.env.POLL_MS, 5000),
     headless: parseBool(process.env.HEADLESS, true),
     storageStatePath: process.env.STORAGE_STATE?.trim() || undefined,
+    buyBait: parseBool(process.env.BUY_BAIT, false),
   };
 }

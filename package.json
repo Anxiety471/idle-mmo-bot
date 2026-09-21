@@ -14,6 +14,7 @@
     "fish": "tsx src/cli.ts skill --skill fishing",
     "combat": "tsx src/cli.ts combat",
     "quest": "tsx src/cli.ts quest",
+    "quest-turnin": "tsx src/cli.ts quest-turnin",
     "farm-hearth": "tsx src/cli.ts farm-hearth"
   },
   "dependencies": {
