@@ -2,114 +2,183 @@ import type { Page } from 'playwright';
 import type { AppConfig } from '../config.js';
 import type { GatherRestartResult, GatherState } from '../types.js';
 import { navigateTo } from '../browser.js';
+import {
+  getSkillConfig,
+  resolveResource,
+  type SkillConfig,
+  type SkillId,
+} from './skills.js';
 
 /**
- * Deterministic woodcutting gather helpers.
+ * Deterministic skill gather helpers (woodcutting, mining, fishing).
  *
  * Selectors and labels are derived from live-tested UI flows (Sep 2025).
  * The Idle MMO web UI may change without notice — update selectors here
  * when flows break. Never invent outcomes; only report what the UI shows.
  */
 
-const WOODCUTTING_PATH = '/skills/view/woodcutting';
 const CURRENT_ACTION_MARKER = 'CURRENT ACTION';
-const DEFAULT_RESOURCE = 'Oak Log';
 /** Max time to wait for async gather panel after navigation. */
 const GATHER_UI_SETTLE_MS = 10_000;
 
+/** Bait-related phrases observed / expected when fishing without Cheap Bait. */
+const BAIT_REQUIREMENT_PATTERNS = [
+  /cheap bait/i,
+  /need.*bait/i,
+  /require.*bait/i,
+  /don't have.*bait/i,
+  /out of.*bait/i,
+  /missing.*bait/i,
+  /no bait/i,
+];
+
 /**
- * Wait until the woodcutting page shows either an active action or idle controls.
- * The CURRENT ACTION panel loads asynchronously after domcontentloaded (~2–3s).
+ * Wait until the skill page shows either an active action or idle controls.
+ * CURRENT ACTION loads asynchronously after domcontentloaded (~2–3s).
+ * Idle pages may show resource list (default resource label) before Start appears.
  */
-async function waitForGatherUiSettled(page: Page, timeoutMs = GATHER_UI_SETTLE_MS): Promise<void> {
+async function waitForSkillUiSettled(
+  page: Page,
+  skill: SkillConfig,
+  timeoutMs = GATHER_UI_SETTLE_MS,
+): Promise<void> {
   const busyIndicator = page.getByText(CURRENT_ACTION_MARKER);
-  const idleIndicator = page.getByRole('button', { name: 'Start', exact: true });
+  const startButton = page.getByRole('button', { name: 'Start', exact: true });
+  const resourceLabel = page.getByText(skill.defaultResource, { exact: true });
 
   await busyIndicator
-    .or(idleIndicator)
+    .or(startButton)
+    .or(resourceLabel)
     .first()
     .waitFor({ state: 'visible', timeout: timeoutMs })
     .catch(() => {
-      // Best-effort: if neither appears, read state anyway rather than hanging forever.
+      // Best-effort: if none appear, read state anyway rather than hanging forever.
     });
 }
 
-/** Read gather page state without clicking anything. */
-export async function readGatherState(page: Page, config: AppConfig): Promise<GatherState> {
-  await navigateTo(page, config, WOODCUTTING_PATH);
-  await waitForGatherUiSettled(page);
-  const pageText = await page.locator('body').innerText();
-  const busy = pageText.includes(CURRENT_ACTION_MARKER);
+function parseCurrentResource(pageText: string, resources: string[]): string | undefined {
+  if (!pageText.includes(CURRENT_ACTION_MARKER)) return undefined;
 
-  let currentResource: string | undefined;
-  if (busy) {
-    const match = pageText.match(/CURRENT ACTION[\s\S]*?(\w[\w\s]*Log)/i);
-    currentResource = match?.[1]?.trim();
+  const sectionStart = pageText.indexOf(CURRENT_ACTION_MARKER);
+  const section = pageText.slice(sectionStart, sectionStart + 600);
+
+  for (const resource of resources) {
+    if (section.includes(resource)) return resource;
   }
-
-  return { busy, currentResource, pageText };
+  return undefined;
 }
 
-/** Poll until gather is idle or timeout elapses. */
+function detectMissingBait(pageText: string): boolean {
+  return BAIT_REQUIREMENT_PATTERNS.some((pattern) => pattern.test(pageText));
+}
+
+async function clickResource(page: Page, resourceLabel: string): Promise<boolean> {
+  const resourceButton = page.getByRole('button', { name: resourceLabel, exact: true });
+  if (await resourceButton.count() > 0) {
+    await resourceButton.first().click();
+    return true;
+  }
+
+  const resourceText = page.getByText(resourceLabel, { exact: true });
+  if (await resourceText.count() > 0) {
+    await resourceText.first().click();
+    return true;
+  }
+
+  return false;
+}
+
+/** Read skill gather page state without clicking anything. */
+export async function readSkillState(
+  page: Page,
+  config: AppConfig,
+  skillId: SkillId,
+): Promise<GatherState> {
+  const skill = getSkillConfig(skillId);
+  await navigateTo(page, config, skill.path);
+  await waitForSkillUiSettled(page, skill);
+  const pageText = await page.locator('body').innerText();
+  const busy = pageText.includes(CURRENT_ACTION_MARKER);
+  const currentResource = busy ? parseCurrentResource(pageText, skill.resources) : undefined;
+
+  return { busy, currentResource, pageText, skill: skill.id };
+}
+
+/** Backward-compatible woodcutting state reader. */
+export async function readGatherState(page: Page, config: AppConfig): Promise<GatherState> {
+  return readSkillState(page, config, 'woodcutting');
+}
+
+/** Poll until skill gather is idle or timeout elapses. */
 export async function waitUntilIdle(
   page: Page,
   config: AppConfig,
+  skillId: SkillId,
   timeoutMs = 120_000,
 ): Promise<GatherState> {
   const deadline = Date.now() + timeoutMs;
-  let state = await readGatherState(page, config);
+  let state = await readSkillState(page, config, skillId);
 
   while (state.busy && Date.now() < deadline) {
     await page.waitForTimeout(config.pollMs);
-    state = await readGatherState(page, config);
+    state = await readSkillState(page, config, skillId);
   }
 
   return state;
 }
 
-export interface RestartGatherOptions {
+export interface RestartSkillOptions {
+  skill: SkillId;
   resourceLabel?: string;
   /** When true, click "Start anyway" on the replace dialog. Default: false (Close). */
   allowInterrupt?: boolean;
 }
 
+/** @deprecated Use RestartSkillOptions */
+export interface RestartGatherOptions {
+  resourceLabel?: string;
+  allowInterrupt?: boolean;
+}
+
 /**
- * Restart woodcutting on the given resource when idle.
+ * Restart gathering on the given skill/resource when idle.
  * If busy, returns immediately without clicking Start.
  */
-export async function restartGather(
+export async function restartSkillGather(
   page: Page,
   config: AppConfig,
-  options: RestartGatherOptions = {},
+  options: RestartSkillOptions,
 ): Promise<GatherRestartResult> {
-  const resourceLabel = options.resourceLabel ?? DEFAULT_RESOURCE;
+  const skill = getSkillConfig(options.skill);
+  const resourceLabel = resolveResource(skill, options.resourceLabel);
   const allowInterrupt = options.allowInterrupt ?? false;
 
-  const state = await readGatherState(page, config);
+  const state = await readSkillState(page, config, skill.id);
   if (state.busy) {
     return 'already_busy';
   }
 
-  // Select resource (e.g. Oak Log)
-  const resourceButton = page.getByRole('button', { name: resourceLabel, exact: true });
-  if (await resourceButton.count() === 0) {
-    const resourceText = page.getByText(resourceLabel, { exact: true });
-    if (await resourceText.count() === 0) {
-      return 'failed';
-    }
-    await resourceText.first().click();
-  } else {
-    await resourceButton.first().click();
+  if (!(await clickResource(page, resourceLabel))) {
+    return 'failed';
   }
 
-  // Click Start
   const startButton = page.getByRole('button', { name: 'Start', exact: true });
   if (await startButton.count() === 0) {
+    const pageText = await page.locator('body').innerText();
+    if (skill.requiresBait && detectMissingBait(pageText)) {
+      return 'missing_requirement';
+    }
     return 'failed';
   }
   await startButton.first().click();
 
-  // Handle "Start a new action?" dialog if it appears
+  // Brief pause for validation messages (e.g. missing bait) after Start click
+  await page.waitForTimeout(500);
+  const afterClickText = await page.locator('body').innerText();
+  if (skill.requiresBait && detectMissingBait(afterClickText)) {
+    return 'missing_requirement';
+  }
+
   const dialog = page.getByText('Start a new action?');
   if (await dialog.isVisible({ timeout: 2000 }).catch(() => false)) {
     if (allowInterrupt) {
@@ -130,4 +199,17 @@ export async function restartGather(
   }
 
   return 'restarted';
+}
+
+/** Backward-compatible woodcutting restart. */
+export async function restartGather(
+  page: Page,
+  config: AppConfig,
+  options: RestartGatherOptions = {},
+): Promise<GatherRestartResult> {
+  return restartSkillGather(page, config, {
+    skill: 'woodcutting',
+    resourceLabel: options.resourceLabel,
+    allowInterrupt: options.allowInterrupt,
+  });
 }

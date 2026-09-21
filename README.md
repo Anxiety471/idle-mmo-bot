@@ -37,10 +37,33 @@ Set `STORAGE_STATE=./storage-state.json` in `.env`. This file is gitignored — 
 
 ## Commands
 
+### Skill gathering
+
+Skill pages live at `/skills/view/<skill>` (woodcutting, mining, fishing). The bot waits for `CURRENT ACTION` or idle controls after navigation, then polls busy/idle and restarts the chosen resource when idle. Replace dialog defaults to **Close**; **Start anyway** only when Jev allows interrupt.
+
 ```bash
-# Monitor woodcutting; restart Oak Log when idle (never "Start anyway" unless Jev allows)
+# Woodcutting — Oak Log (backward-compatible alias)
 npm run gather
 
+# Unified skill command
+npm run skill -- --skill mining --resource "Coal Ore"
+npm run skill -- --skill fishing --resource Cod
+npm run skill -- --skill woodcutting --resource "Yew Log"
+
+# Thin npm aliases
+npm run mine          # mining → Coal Ore (default)
+npm run fish          # fishing → Cod (default)
+```
+
+| Skill | URL | Default resource | Other resources |
+|-------|-----|------------------|-----------------|
+| woodcutting | `/skills/view/woodcutting` | Oak Log | Yew Log |
+| mining | `/skills/view/mining` | Coal Ore | Tin Ore, Limestone (Lv.10) |
+| fishing | `/skills/view/fishing` | Cod | Salmon, Tuna |
+
+**Fishing bait:** Cod/Salmon/Tuna require **Cheap Bait** (buy at `/merchants` → General Goods, 2g). The bot does **not** auto-purchase bait. If bait is missing, the command exits with `missing_requirement` instead of looping on failures.
+
+```bash
 # Hunt → battle loop; Jev chooses stance, max enemies, flee, stop timing
 npm run combat
 

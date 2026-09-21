@@ -7,11 +7,15 @@ export type Stance =
   | 'Agile'
   | 'Dexterous';
 
+export type SkillId = 'woodcutting' | 'mining' | 'fishing';
+
 export interface GatherState {
   /** True when page shows CURRENT ACTION (character is busy gathering). */
   busy: boolean;
   /** Current resource label if detectable from UI text. */
   currentResource?: string;
+  /** Skill page this state was read from. */
+  skill?: SkillId;
   /** Raw page text snapshot for advisor context. */
   pageText: string;
 }
@@ -58,6 +62,7 @@ export type GatherRestartResult =
   | 'already_busy'
   | 'restarted'
   | 'kept_current_action'
+  | 'missing_requirement'
   | 'failed';
 
 export type CombatStepResult =

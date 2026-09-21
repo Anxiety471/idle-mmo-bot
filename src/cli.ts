@@ -4,7 +4,12 @@ import { loadConfig } from './config.js';
 import { launchBrowser } from './browser.js';
 import {
   readGatherState,
+  readSkillState,
   restartGather,
+  restartSkillGather,
+  getSkillConfig,
+  resolveResource,
+  type SkillId,
   startHunt,
   waitForEnemies,
   readHuntState,
@@ -33,25 +38,48 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function runGather(verbose: boolean): Promise<void> {
+async function runSkillLoop(
+  skillId: SkillId,
+  resourceLabel: string | undefined,
+  verbose: boolean,
+): Promise<void> {
   const config = loadConfig();
   const jev = createJev(verbose);
+  const skill = getSkillConfig(skillId);
+  const resource = resolveResource(skill, resourceLabel);
   const session = await launchBrowser(config);
 
-  console.log('[gather] Monitoring woodcutting — conservative mode (no interrupt unless Jev allows)');
+  console.log(
+    `[${skill.id}] Monitoring ${resource} — conservative mode (no interrupt unless Jev allows)`,
+  );
+  if (skill.requiresBait) {
+    console.log(
+      `[${skill.id}] Fishing requires Cheap Bait (buy at /merchants → General Goods). Bot does not auto-purchase.`,
+    );
+  }
 
   try {
     while (true) {
-      const state = await readGatherState(session.page, config);
-      console.log(`[gather] busy=${state.busy}${state.currentResource ? ` resource=${state.currentResource}` : ''}`);
+      const state = await readSkillState(session.page, config, skill.id);
+      console.log(
+        `[${skill.id}] busy=${state.busy}${state.currentResource ? ` resource=${state.currentResource}` : ''}`,
+      );
 
       if (!state.busy) {
         const allowInterrupt = await jev.shouldInterruptGather(state);
-        const result = await restartGather(session.page, config, {
-          resourceLabel: OAK_LOG,
+        const result = await restartSkillGather(session.page, config, {
+          skill: skill.id,
+          resourceLabel: resource,
           allowInterrupt,
         });
-        console.log(`[gather] restart → ${result}`);
+        console.log(`[${skill.id}] restart → ${result}`);
+
+        if (result === 'missing_requirement') {
+          console.error(
+            `[${skill.id}] Missing Cheap Bait — buy at /merchants (General Goods, 2g) then retry. Exiting.`,
+          );
+          break;
+        }
       }
 
       await sleep(config.pollMs);
@@ -59,6 +87,10 @@ async function runGather(verbose: boolean): Promise<void> {
   } finally {
     await session.close();
   }
+}
+
+async function runGather(verbose: boolean): Promise<void> {
+  await runSkillLoop('woodcutting', OAK_LOG, verbose);
 }
 
 async function runCombat(verbose: boolean, maxRounds = 10): Promise<void> {
@@ -228,10 +260,20 @@ program
 
 program
   .command('gather')
-  .description('Poll woodcutting idle/busy; restart Oak Log when idle')
+  .description('Poll woodcutting idle/busy; restart Oak Log when idle (alias for skill woodcutting)')
   .action(async (_opts, cmd) => {
     const verbose = cmd.parent?.opts().verbose ?? false;
     await runGather(verbose);
+  });
+
+program
+  .command('skill')
+  .description('Poll a skill page; restart resource when idle')
+  .requiredOption('-s, --skill <skill>', 'Skill: woodcutting, mining, or fishing')
+  .option('-r, --resource <name>', 'Resource label (defaults per skill)')
+  .action(async (opts, cmd) => {
+    const verbose = cmd.parent?.opts().verbose ?? false;
+    await runSkillLoop(opts.skill as SkillId, opts.resource, verbose);
   });
 
 program

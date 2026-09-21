@@ -38,7 +38,8 @@ Shared state snapshots passed to Jev: `GatherState`, `HuntState`, `BattleState`,
 
 | Module | Route | Flow |
 |--------|-------|------|
-| `gather.ts` | `/skills/view/woodcutting` | Wait for `CURRENT ACTION` or `Start` button after navigation, then detect busy/idle; select Oak Log → Start; handle replace dialog |
+| `skills.ts` | — | Skill configs (woodcutting / mining / fishing), resource labels, bait flag |
+| `gather.ts` | `/skills/view/<skill>` | Wait for `CURRENT ACTION`, `Start`, or default resource label after navigation; detect busy/idle; select resource → Start; handle replace dialog; `missing_requirement` for fishing without bait |
 | `combat.ts` | `/combat/battle` | Start Hunt → wait enemies → Stop → pick card → max/stance → Battle → Hunt More / Run Away |
 | `quest.ts` | `/quests` | Open card → Talk → dialogue → Overview progress → Turn In when enabled |
 
@@ -80,7 +81,9 @@ Commander entry point:
 
 | Command | Loop behavior |
 |---------|---------------|
-| `gather` | Poll busy/idle → `restartGather` when idle |
+| `gather` | Woodcutting Oak Log (alias) → `runSkillLoop` |
+| `skill` | `--skill` + optional `--resource` → poll busy/idle → `restartSkillGather` |
+| `mine` / `fish` | npm aliases for mining (Coal Ore) and fishing (Cod) |
 | `combat` | `startHunt` → wait → Jev stop → `configureAndBattle` → flee check → `huntMore` |
 | `quest` | Jev priority → open → talk → turn in if enabled |
 | `farm-hearth` | Accept hearth quest → gather loop until Turn In enabled |
