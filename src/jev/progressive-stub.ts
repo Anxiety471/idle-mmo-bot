@@ -9,8 +9,8 @@ import type {
   QuestInfo,
   Stance,
 } from '../types.js';
-import { huntFoundCap } from '../deterministic/hunt-cap.js';
 import { listActions } from '../autopilot/action-registry.js';
+import { huntFoundCap } from './hunt-cap.js';
 import type { SupervisorAdvisor } from './supervisor-advisor.js';
 import { getPlaybookFromSnapshot } from '../autopilot/early-systems-playbook.js';
 
@@ -142,10 +142,8 @@ export class ProgressiveStubJev implements SupervisorAdvisor {
   }
 
   async decideHuntStop(state: HuntState): Promise<boolean> {
-    // Default combat 1 → cap 1; hard max 10 when levels are supplied on state later.
-    const combat = (state as HuntState & { combatLevel?: number }).combatLevel ?? 1;
-    const total = (state as HuntState & { totalLevel?: number }).totalLevel;
-    return (state.totalEnemiesFound ?? 0) >= huntFoundCap(combat, total);
+    const cap = huntFoundCap(state.combatLevel, state.totalLevel);
+    return (state.totalEnemiesFound ?? 0) >= cap;
   }
 
   async chooseStance(enemy: EnemyInfo): Promise<Stance> {

@@ -29,7 +29,7 @@ import type { ActionAllowContext, ActionDefinition, ActionExecuteContext } from 
 import { registerAction } from './action-registry.js';
 import { tryCookCod } from '../deterministic/cook.js';
 import { getPlaybookFromSnapshot } from './early-systems-playbook.js';
-import { shouldHardStopHunt, huntFoundCap } from '../deterministic/hunt-cap.js';
+import { pollUntilHuntStop } from '../jev/hunt-cap.js';
 
 const HEARTH_QUEST = 'Wood for the Hearth';
 const GOBLIN_QUEST = 'Goblin Menace';
@@ -88,23 +88,10 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<string> {
     ) {
       return 'hunt_metrics_pending';
     }
-    huntState = afterWait;
-    const combatLevel = ctx.snapshot.combatLevel;
-    const totalLevel = ctx.snapshot.totalLevel;
-    const foundCap = huntFoundCap(combatLevel, totalLevel);
-    while (true) {
-      const found = huntState.totalEnemiesFound ?? 0;
-      if (shouldHardStopHunt(found, combatLevel, totalLevel)) {
-        console.log(
-          `[combat] Hard stop hunt: found=${found} >= cap=${foundCap}` +
-            ` (combat=${combatLevel ?? '?'}, total=${totalLevel ?? '?'})`,
-        );
-        break;
-      }
-      if (await jev.decideHuntStop(huntState)) break;
-      await sleep(config.pollMs);
-      huntState = await readHuntState(page);
-    }
+    huntState = await pollUntilHuntStop(page, config, jev, afterWait, {
+      combatLevel: ctx.snapshot.combatLevel,
+      totalLevel: ctx.snapshot.totalLevel,
+    });
     const stopResult = await stopHunt(page);
     huntState = await prepareEnemyBattleSelection(page);
     if (huntState.enemies.length === 0) return `stop:${stopResult}:no_enemies`;

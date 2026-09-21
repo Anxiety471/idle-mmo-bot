@@ -50,6 +50,9 @@ export interface HuntState {
   totalEnemiesFound?: number;
   enemiesRemaining?: number;
   bonusEnemies?: number;
+  /** Account levels passed into stop decisions (from GameSnapshot or profile). */
+  combatLevel?: number;
+  totalLevel?: number;
   pageText: string;
 }
 

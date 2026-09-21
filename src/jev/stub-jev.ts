@@ -7,7 +7,7 @@ import type {
   QuestInfo,
   Stance,
 } from '../types.js';
-import { huntFoundCap } from '../deterministic/hunt-cap.js';
+import { huntFoundCap } from './hunt-cap.js';
 
 const HEARTH_QUEST = 'Wood for the Hearth';
 const LOW_HP_THRESHOLD = 25;
@@ -16,7 +16,7 @@ const LOW_HP_THRESHOLD = 25;
  * StubJev — conservative defaults for unattended runs.
  *
  * - Never interrupt an active gather
- * - Stop hunt when Total Enemies Found >= 1 (cards appear only after Stop)
+ * - Stop hunt when Total Enemies Found >= huntFoundCap (combat 1 → cap 1)
  * - Balanced stance, max 1 enemy
  * - Flee only when HP is detectably low
  * - Prefer "Wood for the Hearth" quest
@@ -27,10 +27,8 @@ export class StubJev implements JevAdvisor {
   }
 
   async decideHuntStop(state: HuntState): Promise<boolean> {
-    // Default combat 1 → cap 1; hard max 10 when levels are supplied on state later.
-    const combat = (state as HuntState & { combatLevel?: number }).combatLevel ?? 1;
-    const total = (state as HuntState & { totalLevel?: number }).totalLevel;
-    return (state.totalEnemiesFound ?? 0) >= huntFoundCap(combat, total);
+    const cap = huntFoundCap(state.combatLevel, state.totalLevel);
+    return (state.totalEnemiesFound ?? 0) >= cap;
   }
 
   async chooseStance(_enemy: EnemyInfo): Promise<Stance> {

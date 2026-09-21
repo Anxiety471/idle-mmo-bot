@@ -28,9 +28,10 @@ import {
   turnInQuestWhenReady,
   buyCheapBait,
 } from './deterministic/index.js';
-import { huntFoundCap, shouldHardStopHunt } from './deterministic/hunt-cap.js';
 import { createJev } from './jev/index.js';
+import { pollUntilHuntStop } from './jev/hunt-cap.js';
 import { runAutopilot } from './autopilot.js';
+import { readAccountLevels } from './snapshot/account-levels.js';
 import type { HuntState } from './types.js';
 
 const HEARTH_QUEST = 'Wood for the Hearth';
@@ -225,29 +226,20 @@ async function runCombat(
           continue;
         }
 
-        huntState = huntStateAfterWait;
-        // CLI combat has no snapshot; use HUNT_COMBAT_LEVEL / HUNT_TOTAL_LEVEL env or defaults.
-        const combatLevel = Number(process.env.HUNT_COMBAT_LEVEL ?? 1) || 1;
-        const totalLevel = Number(process.env.HUNT_TOTAL_LEVEL ?? 0) || undefined;
-        const foundCap = huntFoundCap(combatLevel, totalLevel);
-        while (true) {
-          const found = huntState.totalEnemiesFound ?? 0;
-          if (shouldHardStopHunt(found, combatLevel, totalLevel)) {
-            console.log(
-              `[combat] Hard stop hunt: found=${found} >= cap=${foundCap}` +
-                ` (combat=${combatLevel}, total=${totalLevel ?? '?'})`,
-            );
-            break;
-          }
-          if (await jev.decideHuntStop(huntState)) break;
-          await sleep(config.pollMs);
-          huntState = await readHuntState(session.page);
-        }
+        const accountLevels = await readAccountLevels(session.page, config);
+        huntState = await pollUntilHuntStop(
+          session.page,
+          config,
+          jev,
+          huntStateAfterWait,
+          accountLevels,
+        );
 
         console.log(
           `[combat] Hunt metrics: found=${huntState.totalEnemiesFound ?? 0}` +
             ` remaining=${huntState.enemiesRemaining ?? '?'}` +
-            ` bonus=${huntState.bonusEnemies ?? '?'}`,
+            ` bonus=${huntState.bonusEnemies ?? '?'}` +
+            ` cap-level combat=${accountLevels.combatLevel ?? '?'}`,
         );
 
         const stopResult = await stopHunt(session.page);

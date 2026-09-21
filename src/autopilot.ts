@@ -6,8 +6,10 @@ import { deriveAllowedActions } from './autopilot/action-registry.js';
 import { discoverFeatures, logDiscoveries, mergeDiscoveryIntoSnapshot } from './autopilot/discovery.js';
 import { createSupervisor } from './jev/create-jev.js';
 import { parseJunkSellItems } from './snapshot/allowed-actions.js';
+import { logDecision } from './logging/decision-log.js';
+import { getLogDir } from './logging/jsonl-writer.js';
+import { setLogContext } from './logging/log-context.js';
 import { readGameSnapshot } from './snapshot/read-snapshot.js';
-import { logDecision } from './log/decision-log.js';
 import {
   attachPlaybookToSnapshot,
   evaluatePlaybook,
@@ -58,6 +60,7 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
   );
   console.log('[autopilot] Flow: snapshot → discover → allowed → Jev → execute one action');
   console.log('[autopilot] Bootstrap actions registered; discovery logs unregistered UI features');
+  console.log(`[autopilot] Structured logs → ${getLogDir()}/decisions.jsonl and jev.jsonl`);
 
   const context: AutopilotContext = {
     cycle: 0,
@@ -71,6 +74,7 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
     try {
       while (true) {
         context.cycle++;
+        setLogContext({ cycle: context.cycle });
 
         let snapshot;
         try {
@@ -124,7 +128,12 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
 
         console.log(`[autopilot] result: ${result.outcome}`);
         notePlaybookOutcome(action, result.outcome);
-        logDecision({ snapshot, allowed, action, result, context });
+        try {
+          await logDecision(snapshot, context, allowed, action, result);
+        } catch (logError) {
+          const message = logError instanceof Error ? logError.message : String(logError);
+          console.error(`[autopilot] decision log write failed: ${message}`);
+        }
         await sleep(result.backoffMs ?? config.pollMs);
       }
     } catch (error) {
