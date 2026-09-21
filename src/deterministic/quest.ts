@@ -12,6 +12,8 @@ import { navigateTo } from '../browser.js';
  */
 
 const QUESTS_PATH = '/quests';
+/** Max time to wait for async quest UI after navigation (~2–3s observed). */
+const QUEST_UI_SETTLE_MS = 10_000;
 /** Brief pause after tab switch for quest list to refresh. */
 const TAB_SWITCH_SETTLE_MS = 500;
 
@@ -22,6 +24,39 @@ function escapeRegex(value: string): string {
 /** Match tab labels like "Accepted" or "Accepted 1", "Pending Nearby 3". */
 function questTabPattern(tabName: string): RegExp {
   return new RegExp(`^${escapeRegex(tabName)}(?:\\s+\\d+)?$`);
+}
+
+/**
+ * Wait until quest tab buttons are visible after domcontentloaded.
+ * Tabs load asynchronously (~2–3s); switching too early misses Accepted list.
+ */
+async function waitForQuestTabsSettled(page: Page, timeoutMs = QUEST_UI_SETTLE_MS): Promise<void> {
+  const tabs = page
+    .getByRole('button', { name: questTabPattern('Accepted') })
+    .or(page.getByRole('button', { name: questTabPattern('Pending Nearby') }))
+    .or(page.getByRole('button', { name: questTabPattern('Completed') }));
+
+  await tabs
+    .first()
+    .waitFor({ state: 'visible', timeout: timeoutMs })
+    .catch(() => {
+      // Best-effort: proceed rather than hang forever.
+    });
+}
+
+/** Wait for a quest card button (substring name match) to appear in the current list. */
+async function waitForQuestCard(
+  page: Page,
+  title: string,
+  timeoutMs = QUEST_UI_SETTLE_MS,
+): Promise<boolean> {
+  const card = page.getByRole('button', { name: title });
+  try {
+    await card.first().waitFor({ state: 'visible', timeout: timeoutMs });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function pageText(page: Page): Promise<string> {
@@ -77,7 +112,8 @@ export async function openQuest(
     await navigateTo(page, config, QUESTS_PATH);
   }
 
-  const card = page.getByRole('button', { name: title }).or(page.getByText(title, { exact: true }));
+  // Substring match on button accessible name (works once tab list is visible).
+  const card = page.getByRole('button', { name: title });
   if (await card.count() === 0) {
     return 'failed';
   }
@@ -137,9 +173,17 @@ export async function turnInQuestWhenReady(
   options: TurnInQuestOptions,
 ): Promise<TurnInQuestOutcome> {
   await navigateTo(page, config, QUESTS_PATH);
+  await waitForQuestTabsSettled(page);
 
   if (options.tab) {
-    await switchQuestTab(page, options.tab);
+    const tabResult = await switchQuestTab(page, options.tab);
+    if (tabResult !== 'opened') {
+      return { result: 'failed' };
+    }
+  }
+
+  if (!(await waitForQuestCard(page, options.title))) {
+    return { result: 'failed' };
   }
 
   const opened = await openQuest(page, config, options.title, { skipNavigate: true });
