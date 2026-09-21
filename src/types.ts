@@ -7,7 +7,15 @@ export type Stance =
   | 'Agile'
   | 'Dexterous';
 
-export type SkillId = 'woodcutting' | 'mining' | 'fishing';
+export type SkillId =
+  | 'woodcutting'
+  | 'mining'
+  | 'fishing'
+  | 'alchemy'
+  | 'smelting'
+  | 'cooking'
+  | 'forge'
+  | 'construction';
 
 export interface ActiveGatherElsewhere {
   skill: SkillId;
@@ -91,3 +99,5 @@ export type QuestStepResult =
   | 'in_progress'
   | 'no_action'
   | 'failed';
+
+export type MerchantStepResult = 'purchased' | 'failed' | 'no_action';

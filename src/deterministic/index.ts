@@ -33,8 +33,15 @@ export {
 export {
   readQuestState,
   openQuest,
+  switchQuestTab,
   talkQuest,
   turnInQuest,
+  turnInQuestWhenReady,
   readQuestProgress,
   isTurnInEnabled,
+  type OpenQuestOptions,
+  type TurnInQuestOptions,
+  type TurnInQuestOutcome,
 } from './quest.js';
+
+export { buyCheapBait } from './merchant.js';

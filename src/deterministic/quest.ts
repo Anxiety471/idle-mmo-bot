@@ -50,13 +50,21 @@ export async function readQuestState(page: Page, config: AppConfig): Promise<Que
   return { quests, pageText: text };
 }
 
+export interface OpenQuestOptions {
+  /** Skip navigation when already on /quests. */
+  skipNavigate?: boolean;
+}
+
 /** Open a quest card by title. */
 export async function openQuest(
   page: Page,
   config: AppConfig,
   title: string,
+  options: OpenQuestOptions = {},
 ): Promise<QuestStepResult> {
-  await navigateTo(page, config, QUESTS_PATH);
+  if (!options.skipNavigate) {
+    await navigateTo(page, config, QUESTS_PATH);
+  }
 
   const card = page.getByRole('button', { name: title }).or(page.getByText(title, { exact: true }));
   if (await card.count() === 0) {
@@ -64,6 +72,63 @@ export async function openQuest(
   }
   await card.first().click();
   return 'opened';
+}
+
+/** Switch quest list tab (e.g. Accepted, Pending Nearby, Completed). */
+export async function switchQuestTab(page: Page, tabName: string): Promise<QuestStepResult> {
+  const tab = page
+    .getByRole('button', { name: tabName, exact: true })
+    .or(page.getByText(tabName, { exact: true }));
+  if (await tab.count() === 0) {
+    return 'no_action';
+  }
+  await tab.first().click();
+  return 'opened';
+}
+
+export interface TurnInQuestOptions {
+  title: string;
+  /** Quest tab to open first, e.g. "Accepted". */
+  tab?: string;
+  /** Progress item to read from Overview, e.g. "Oak Log". */
+  progressItem?: string;
+}
+
+export interface TurnInQuestOutcome {
+  result: QuestStepResult;
+  progress?: string;
+}
+
+/**
+ * Open a quest and turn in when the Turn In button is enabled.
+ * Does not invent completion — only clicks when the button is enabled.
+ */
+export async function turnInQuestWhenReady(
+  page: Page,
+  config: AppConfig,
+  options: TurnInQuestOptions,
+): Promise<TurnInQuestOutcome> {
+  await navigateTo(page, config, QUESTS_PATH);
+
+  if (options.tab) {
+    await switchQuestTab(page, options.tab);
+  }
+
+  const opened = await openQuest(page, config, options.title, { skipNavigate: true });
+  if (opened === 'failed') {
+    return { result: 'failed' };
+  }
+
+  let progress: string | undefined;
+  if (options.progressItem) {
+    progress = await readQuestProgress(page, options.progressItem);
+  }
+
+  if (await isTurnInEnabled(page)) {
+    return { result: await turnInQuest(page), progress };
+  }
+
+  return { result: 'in_progress', progress };
 }
 
 /** Click Talk and select a dialogue option if a picker is shown. */

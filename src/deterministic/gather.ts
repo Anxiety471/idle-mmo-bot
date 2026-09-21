@@ -11,7 +11,7 @@ import {
 } from './skills.js';
 
 /**
- * Deterministic skill gather helpers (woodcutting, mining, fishing).
+ * Deterministic skill gather/craft helpers (woodcutting, mining, fishing, etc.).
  *
  * Selectors and labels are derived from live-tested UI flows (Sep 2025).
  * The Idle MMO web UI may change without notice — update selectors here
@@ -50,11 +50,12 @@ async function waitForSkillUiSettled(
 ): Promise<void> {
   const busyIndicator = page.getByText(CURRENT_ACTION_MARKER);
   const startButton = page.getByRole('button', { name: 'Start', exact: true });
-  const resourceLabel = page.getByText(skill.defaultResource, { exact: true });
+  let settleTarget = busyIndicator.or(startButton);
+  if (skill.defaultResource) {
+    settleTarget = settleTarget.or(page.getByText(skill.defaultResource, { exact: true }));
+  }
 
-  await busyIndicator
-    .or(startButton)
-    .or(resourceLabel)
+  await settleTarget
     .first()
     .waitFor({ state: 'visible', timeout: timeoutMs })
     .catch(() => {

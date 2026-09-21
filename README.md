@@ -34,12 +34,13 @@ Set `STORAGE_STATE=./storage-state.json` in `.env`. This file is gitignored — 
 | `POLL_MS` | `5000` | Poll interval (ms) for gather/combat loops |
 | `HEADLESS` | `true` | Run Chromium headless |
 | `STORAGE_STATE` | _(unset)_ | Path to saved session JSON |
+| `BUY_BAIT` | `false` | Auto-buy Cheap Bait when fishing (off by default) |
 
 ## Commands
 
-### Skill gathering
+### Skill gathering & crafting
 
-Skill pages live at `/skills/view/<skill>` (woodcutting, mining, fishing). The bot waits for `CURRENT ACTION` or idle controls after navigation, then polls busy/idle and restarts the chosen resource when idle. Replace dialog defaults to **Close**; **Start anyway** only when Jev allows interrupt.
+Skill pages live at `/skills/view/<skill>`. The bot waits for `CURRENT ACTION` or idle controls after navigation, then polls busy/idle and restarts the chosen resource when idle. Replace dialog defaults to **Close**; **Start anyway** only when Jev allows interrupt.
 
 ```bash
 # Woodcutting — Oak Log (backward-compatible alias)
@@ -50,31 +51,65 @@ npm run skill -- --skill mining --resource "Coal Ore"
 npm run skill -- --skill fishing --resource Cod
 npm run skill -- --skill woodcutting --resource "Yew Log"
 
+# Crafting skills (require --resource until labels confirmed in playbook)
+npm run skill -- --skill alchemy --resource "Item Name"
+npm run skill -- --skill smelting --resource "Item Name"
+npm run skill -- --skill cooking --resource "Item Name"
+npm run skill -- --skill forge --resource "Item Name"
+npm run skill -- --skill construction --resource "Item Name"
+
 # Thin npm aliases
 npm run mine          # mining → Coal Ore (default)
 npm run fish          # fishing → Cod (default)
 ```
 
-| Skill | URL | Default resource | Other resources |
-|-------|-----|------------------|-----------------|
+| Skill | URL | Default resource | Notes |
+|-------|-----|------------------|-------|
 | woodcutting | `/skills/view/woodcutting` | Oak Log | Yew Log |
 | mining | `/skills/view/mining` | Coal Ore | Tin Ore, Limestone (Lv.10) |
-| fishing | `/skills/view/fishing` | Cod | Salmon, Tuna |
+| fishing | `/skills/view/fishing` | Cod | Salmon, Tuna; needs Cheap Bait |
+| alchemy | `/skills/view/alchemy` | _(requires `--resource`)_ | |
+| smelting | `/skills/view/smelting` | _(requires `--resource`)_ | |
+| cooking | `/skills/view/cooking` | _(requires `--resource`)_ | |
+| forge | `/skills/view/forge` | _(requires `--resource`)_ | |
+| construction | `/skills/view/construction` | _(requires `--resource`)_ | |
 
-**Fishing bait:** Cod/Salmon/Tuna require **Cheap Bait** (buy at `/merchants` → General Goods, 2g). The bot does **not** auto-purchase bait. If bait is missing (or Start is disabled), the command exits with `missing_requirement` instead of clicking or looping on failures.
+**Fishing bait:** Cod/Salmon/Tuna require **Cheap Bait** (buy at `/merchants` → General Goods, 2g). By default the bot does **not** purchase bait. If bait is missing (or Start is disabled), the command exits with `missing_requirement`. Opt in to auto-purchase:
 
-**Global gather slot:** Only one gather action runs at a time. `CURRENT ACTION` only appears on the skill page that owns it — mining may look idle while woodcutting runs. The bot probes other gather skill pages and backs off (30s+) instead of hammering Start every poll when another action is active and interrupt is disallowed.
+```bash
+npm run fish -- --buy-bait
+# or set BUY_BAIT=true in .env
+```
+
+**Global gather slot:** Only one gather/craft action runs at a time. `CURRENT ACTION` only appears on the skill page that owns it. The bot probes other skill pages and backs off (30s+) instead of hammering Start when another action is active.
+
+### Quests
+
+```bash
+# Turn in Wood for the Hearth when Oak Log 150/150 / Turn In enabled
+npm run quest-turnin
+
+# Custom quest
+npm run quest-turnin -- --quest "Wood for the Hearth" --item "Oak Log"
+
+# Progress all accepted quests (talk + turn in when enabled)
+npm run quest
+
+# Gather Oak Logs until Wood for the Hearth can turn in
+npm run farm-hearth
+```
+
+### Combat
 
 ```bash
 # Hunt → battle loop; Jev chooses stance, max enemies, flee, stop timing
 npm run combat
 
-# Open quests, talk, turn in when enabled
-npm run quest
-
-# Gather Oak Logs until "Wood for the Hearth" can turn in
-npm run farm-hearth
+# Limit rounds
+npm run combat -- --rounds 5
 ```
+
+If a gather action is running, **Start Hunt** shows the replace dialog. With default Jev (no interrupt), the bot closes the dialog, logs clearly, and backs off 30s+ instead of spinning forever.
 
 Add `-v` / `--verbose` to any command to use **ConsoleJev** (logs every decision):
 
@@ -84,7 +119,7 @@ npm run gather -- -v
 
 ## Architecture
 
-- **`src/deterministic/`** — pure Playwright click paths (gather, combat, quest). UI selectors may need updates when the game changes.
+- **`src/deterministic/`** — pure Playwright click paths (gather, combat, quest, merchant). UI selectors may need updates when the game changes.
 - **`src/jev/`** — `JevAdvisor` decision hooks. Default **StubJev** is conservative; **ConsoleJev** logs choices for local debugging.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for Jev hook details and how to plug in a real AI agent.
@@ -96,7 +131,7 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for Jev hook details and how to plug in
 | Deterministic | Navigate, click buttons, read visible page text |
 | Jev | Whether to interrupt gather, stop hunt, stance, max enemies, flee, quest priority |
 
-Conservative default: **do not** replace a running action unless Jev explicitly returns `shouldInterruptGather: true`.
+Conservative default: **do not** replace a running action unless Jev explicitly returns `shouldInterruptGather: true`. **No auto-spend** unless `--buy-bait` / `BUY_BAIT=true`.
 
 ## Terms of Service
 
