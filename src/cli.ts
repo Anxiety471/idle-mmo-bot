@@ -12,6 +12,7 @@ import {
   type SkillId,
   ensureHuntActive,
   waitForEnemies,
+  waitForEnemyCards,
   readHuntState,
   stopHunt,
   configureAndBattle,
@@ -217,10 +218,11 @@ async function runCombat(
       } else {
         const huntStateAfterWait = await waitForEnemies(session.page);
         if (
+          (huntStateAfterWait.totalEnemiesFound ?? 0) === 0 &&
           huntStateAfterWait.enemies.length === 0 &&
           huntStateAfterWait.defeatedCount === 0
         ) {
-          console.log('[combat] Hunt active but no enemies detected yet — polling');
+          console.log('[combat] Hunt active but no hunt metrics yet — polling');
           await sleep(config.pollMs);
           continue;
         }
@@ -231,13 +233,20 @@ async function runCombat(
           huntState = await readHuntState(session.page);
         }
 
+        console.log(
+          `[combat] Hunt metrics: found=${huntState.totalEnemiesFound ?? 0}` +
+            ` remaining=${huntState.enemiesRemaining ?? '?'}` +
+            ` bonus=${huntState.bonusEnemies ?? '?'}`,
+        );
+
         const stopResult = await stopHunt(session.page);
         console.log(`[combat] stopHunt → ${stopResult}`);
-        huntState = await readHuntState(session.page);
+
+        huntState = await waitForEnemyCards(session.page);
       }
 
       if (huntState.enemies.length === 0) {
-        console.log('[combat] No enemies visible — waiting');
+        console.log('[combat] No enemy cards after Stop — waiting');
         await sleep(config.pollMs);
         continue;
       }

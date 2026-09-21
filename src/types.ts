@@ -42,10 +42,14 @@ export interface EnemyInfo {
 }
 
 export interface HuntState {
-  /** Enemies visible on the hunt selection screen. */
+  /** Enemy card buttons (visible after Stop, for Battle selection). */
   enemies: EnemyInfo[];
   /** Number of enemies already defeated this hunt (if detectable). */
   defeatedCount: number;
+  /** Hunt metrics while Stop is active — cards are not shown until Stop. */
+  totalEnemiesFound?: number;
+  enemiesRemaining?: number;
+  bonusEnemies?: number;
   pageText: string;
 }
 

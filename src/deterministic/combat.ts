@@ -260,16 +260,38 @@ export async function startHunt(
   return ensureHuntActive(page, config, allowInterrupt);
 }
 
-/** Read visible enemies from hunt screen. */
+function parseHuntMetrics(text: string): {
+  totalEnemiesFound?: number;
+  enemiesRemaining?: number;
+  bonusEnemies?: number;
+} {
+  const totalMatch = text.match(/Total Enemies Found[^\d]*(\d+)/i);
+  const remainingMatch = text.match(/Enemies Remaining[^\d]*(\d+)/i);
+  const bonusMatch = text.match(/Bonus Enemies[^\d]*(\d+)/i);
+
+  return {
+    totalEnemiesFound: totalMatch ? Number.parseInt(totalMatch[1], 10) : undefined,
+    enemiesRemaining: remainingMatch ? Number.parseInt(remainingMatch[1], 10) : undefined,
+    bonusEnemies: bonusMatch ? Number.parseInt(bonusMatch[1], 10) : undefined,
+  };
+}
+
+/** Read hunt screen: metrics while hunting (Stop visible) and cards after Stop. */
 export async function readHuntState(page: Page): Promise<HuntState> {
   const text = await pageText(page);
   const cardButtons = await collectEnemyCardButtons(page);
   const enemies = await enemyInfosFromButtons(cardButtons);
+  const metrics = parseHuntMetrics(text);
 
   const defeatedMatch = text.match(/(\d+)\s+defeated/i);
   const defeatedCount = defeatedMatch ? Number.parseInt(defeatedMatch[1], 10) : 0;
 
-  return { enemies, defeatedCount, pageText: text };
+  return {
+    enemies,
+    defeatedCount,
+    ...metrics,
+    pageText: text,
+  };
 }
 
 /** Click Stop on hunt screen and confirm. */
@@ -365,8 +387,8 @@ export async function huntMore(
 }
 
 /**
- * Wait until hunt is active: Stop visible and enemies or defeated count appear.
- * Enemy cards may not use button.h-24 anymore — layered detection in readHuntState.
+ * Wait until hunt is active: Stop visible and hunt metrics or enemy cards appear.
+ * During hunting, only metrics (Total Enemies Found) are shown — not card buttons.
  */
 export async function waitForEnemies(
   page: Page,
@@ -384,7 +406,11 @@ export async function waitForEnemies(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const state = await readHuntState(page);
-    if (state.enemies.length > 0 || state.defeatedCount > 0) {
+    if (
+      (state.totalEnemiesFound ?? 0) > 0 ||
+      state.enemies.length > 0 ||
+      state.defeatedCount > 0
+    ) {
       return state;
     }
     if (await hasEnemySelectionReady(page)) {
@@ -393,5 +419,21 @@ export async function waitForEnemies(
     await page.waitForTimeout(500);
   }
 
+  return readHuntState(page);
+}
+
+/** Wait for enemy card buttons after Stop (Battle selection phase). */
+export async function waitForEnemyCards(
+  page: Page,
+  timeoutMs = 30_000,
+): Promise<HuntState> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = await readHuntState(page);
+    if (state.enemies.length > 0) {
+      return state;
+    }
+    await page.waitForTimeout(500);
+  }
   return readHuntState(page);
 }
