@@ -74,7 +74,11 @@ export class ProgressiveStubJev implements SupervisorAdvisor {
         if (mine) return mine;
       }
       if (playbook.stage === 'fish_cod' && !onCod) {
-        const fish = pickAllowed(allowed, ['fish_cod', 'buy_bait']);
+        // Prefer fishing; only buy_bait when bait is not trusted.
+        const prefer = snapshot.flags.hasBait || playbook.baitOwned
+          ? (['fish_cod'] as AutopilotAction[])
+          : (['fish_cod', 'buy_bait'] as AutopilotAction[]);
+        const fish = pickAllowed(allowed, prefer);
         if (fish) return fish;
       }
       if (preferredHit && preferredHit !== 'continue_current') return preferredHit;
@@ -107,7 +111,13 @@ export class ProgressiveStubJev implements SupervisorAdvisor {
       if (def.id === 'quest_talk_accept' && snapshot.pendingQuests.length > 0) {
         return def.id;
       }
-      if (def.id === 'buy_bait' && !snapshot.flags.hasBait && (snapshot.gold ?? 0) >= 2) {
+      if (
+        def.id === 'buy_bait' &&
+        !snapshot.flags.hasBait &&
+        !(playbook?.baitOwned) &&
+        playbook?.stage !== 'fish_cod' &&
+        (snapshot.gold ?? 0) >= 2
+      ) {
         return def.id;
       }
       if (def.id === 'craft_if_ready' && (snapshot.inventory['Coal Ore'] ?? 0) >= 5) {

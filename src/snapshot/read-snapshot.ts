@@ -132,13 +132,18 @@ async function scrapeInventoryFromDom(page: Page): Promise<Record<string, number
     const buttons = page.getByRole('button');
     const count = await buttons.count();
     let inspected = 0;
-    for (let i = 0; i < count && inspected < 12; i++) {
+    for (let i = 0; i < count && inspected < 24; i++) {
       const btn = buttons.nth(i);
       const label = (await btn.innerText().catch(() => '')).trim();
-      if (!label || /^Empty$/i.test(label)) continue;
-      if (!/^(\d+(?:\.\d+)?[kK]?)$/.test(label) && !KNOWN_INV_ITEMS.some((k) => label.includes(k))) {
-        continue;
-      }
+      if (/^Empty$/i.test(label)) continue;
+      const aria = (await btn.getAttribute('aria-label').catch(() => '')) ?? '';
+      const title = (await btn.getAttribute('title').catch(() => '')) ?? '';
+      const looksLikeSlot =
+        !label ||
+        /^(\d+(?:\.\d+)?[kK]?)$/.test(label) ||
+        KNOWN_INV_ITEMS.some((k) => label.includes(k) || aria.includes(k) || title.includes(k)) ||
+        /bait|cod|coal|log|ore/i.test(`${label} ${aria} ${title}`);
+      if (!looksLikeSlot) continue;
       await btn.click({ timeout: 1500 }).catch(() => undefined);
       await page.waitForTimeout(200);
       const body = await page.locator('body').innerText();
@@ -249,8 +254,9 @@ export async function readGameSnapshot(page: Page, config: AppConfig): Promise<G
   // Inventory is icon-heavy; also accept numeric badges near bait names or prior merchant buys.
   const hasBait =
     (inventory['Cheap Bait'] ?? 0) > 0 ||
-    /Cheap Bait/i.test(inventoryText) ||
-    /\bBait\b/i.test(inventoryText);
+    /Cheap\s*Bait/i.test(inventoryText) ||
+    /\b(?:cheap\s+)?bait\b/i.test(inventoryText) ||
+    Object.keys(inventory).some((k) => /cheap\s*bait|^bait$/i.test(k));
 
   const gatherState = await readSkillState(page, config, 'woodcutting', {
     probeOtherSkills: true,
