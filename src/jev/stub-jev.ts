@@ -7,6 +7,7 @@ import type {
   QuestInfo,
   Stance,
 } from '../types.js';
+import { huntFoundCap } from '../deterministic/hunt-cap.js';
 
 const HEARTH_QUEST = 'Wood for the Hearth';
 const LOW_HP_THRESHOLD = 25;
@@ -26,7 +27,10 @@ export class StubJev implements JevAdvisor {
   }
 
   async decideHuntStop(state: HuntState): Promise<boolean> {
-    return (state.totalEnemiesFound ?? 0) >= 1;
+    // Default combat 1 → cap 1; hard max 10 when levels are supplied on state later.
+    const combat = (state as HuntState & { combatLevel?: number }).combatLevel ?? 1;
+    const total = (state as HuntState & { totalLevel?: number }).totalLevel;
+    return (state.totalEnemiesFound ?? 0) >= huntFoundCap(combat, total);
   }
 
   async chooseStance(_enemy: EnemyInfo): Promise<Stance> {

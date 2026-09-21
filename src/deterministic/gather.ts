@@ -29,13 +29,14 @@ const PROBE_SETTLE_MS = 3_000;
 
 /** Bait-related phrases observed / expected when fishing without Cheap Bait. */
 const BAIT_REQUIREMENT_PATTERNS = [
-  /cheap bait/i,
-  /need.*bait/i,
-  /require.*bait/i,
+  // Do NOT match bare "Cheap Bait" — recipe lines always say "1 x Cheap Bait".
+  /need(?:s)?\s+(?:more\s+)?(?:cheap\s+)?bait/i,
   /don't have.*bait/i,
-  /out of.*bait/i,
-  /missing.*bait/i,
-  /no bait/i,
+  /do not have.*bait/i,
+  /out of\s+(?:cheap\s+)?bait/i,
+  /missing\s+(?:cheap\s+)?bait/i,
+  /no\s+(?:cheap\s+)?bait/i,
+  /you\s+need\s+bait/i,
 ];
 
 /**
@@ -80,19 +81,26 @@ function detectMissingBait(pageText: string): boolean {
 }
 
 async function clickResource(page: Page, resourceLabel: string): Promise<boolean> {
-  const resourceButton = page.getByRole('button', { name: resourceLabel, exact: true });
+  // Skill cards use names like "Cod Lv. 1 2 EXP …", not the bare label.
+  const resourceButton = page
+    .getByRole('button', { name: new RegExp(`^${escapeRegExp(resourceLabel)}\\b`, 'i') })
+    .or(page.getByRole('button', { name: resourceLabel, exact: true }));
   if (await resourceButton.count() > 0) {
-    await resourceButton.first().click();
+    await resourceButton.first().click({ force: true, timeout: 5000 });
     return true;
   }
 
   const resourceText = page.getByText(resourceLabel, { exact: true });
   if (await resourceText.count() > 0) {
-    await resourceText.first().click();
+    await resourceText.first().click({ force: true, timeout: 5000 }).catch(() => undefined);
     return true;
   }
 
   return false;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**
@@ -201,13 +209,16 @@ type StartReadiness = 'ready' | GatherRestartResult;
 async function checkStartReadiness(page: Page, skill: SkillConfig): Promise<StartReadiness> {
   const pageText = await page.locator('body').innerText();
 
-  if (skill.requiresBait && detectMissingBait(pageText)) {
+  // "You can perform this action N times" means materials (bait) are present.
+  const canPerform = /you can perform this action\s+\d+\s+times/i.test(pageText);
+
+  if (skill.requiresBait && !canPerform && detectMissingBait(pageText)) {
     return 'missing_requirement';
   }
 
   const startButton = page.getByRole('button', { name: 'Start', exact: true });
   if (await startButton.count() === 0) {
-    if (skill.requiresBait) {
+    if (skill.requiresBait && !canPerform) {
       return 'missing_requirement';
     }
     return 'failed';
@@ -267,7 +278,8 @@ export async function restartSkillGather(
 
   await page.waitForTimeout(500);
   const afterClickText = await page.locator('body').innerText();
-  if (skill.requiresBait && detectMissingBait(afterClickText)) {
+  const canPerformAfter = /you can perform this action\s+\d+\s+times/i.test(afterClickText);
+  if (skill.requiresBait && !canPerformAfter && detectMissingBait(afterClickText)) {
     return 'missing_requirement';
   }
 

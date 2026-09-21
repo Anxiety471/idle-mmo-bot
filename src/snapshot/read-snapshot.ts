@@ -58,6 +58,113 @@ function parseInventoryCounts(text: string): Record<string, number> {
   return counts;
 }
 
+
+const KNOWN_INV_ITEMS = [
+  'Coal Ore',
+  'Coal',
+  'Oak Log',
+  'Yew Log',
+  'Cheap Bait',
+  'Cod',
+  'Raw Cod',
+  'Cooked Cod',
+  'Burnt Cod',
+  'Salmon',
+  'Cooked Salmon',
+  'Burnt Salmon',
+  'Tuna',
+  'Cooked Tuna',
+];
+
+/** Icon-heavy inventory: scrape alt/title/aria-label and click slots for detail panel. */
+async function scrapeInventoryFromDom(page: Page): Promise<Record<string, number>> {
+  const counts: Record<string, number> = {};
+
+  try {
+  // String body avoids tsx/esbuild injecting __name into the browser context.
+  const fromDom = (await page.evaluate(
+    `([known]) => {
+      const out = {};
+      const bump = (name, qty) => {
+        if (!name || !Number.isFinite(qty) || qty <= 0) return;
+        out[name] = Math.max(out[name] || 0, qty);
+      };
+      const parseQty = (raw) => {
+        if (!raw) return 0;
+        const t = String(raw).trim().replace(/,/g, '');
+        const mk = t.match(/^(\d+(?:\.\d+)?)[kK]$/);
+        if (mk) return Math.round(Number.parseFloat(mk[1]) * 1000);
+        const m = t.match(/^(\d+)$/);
+        return m ? Number.parseInt(m[1], 10) : 0;
+      };
+      const nodes = Array.from(document.querySelectorAll('[title], img[alt], [aria-label]'));
+      for (const el of nodes) {
+        const label =
+          el.getAttribute('title') ||
+          el.getAttribute('alt') ||
+          el.getAttribute('aria-label') ||
+          '';
+        const name = label.trim();
+        if (!name || name.length < 2) continue;
+        const matched = known.find((k) => {
+          const kl = String(k).toLowerCase();
+          const nl = name.toLowerCase();
+          if (nl === kl) return true;
+          if (kl.length <= 3) return false; // avoid Cod⊂Code
+          return nl.includes(kl);
+        });
+        if (!matched) continue;
+        const root = el.closest('button, [role="button"], a, li, div');
+        const text = (root && root.textContent ? root.textContent : '').replace(/\s+/g, ' ');
+        const qtyMatch = text.match(/(\d+(?:\.\d+)?[kK]?)/);
+        bump(matched, parseQty(qtyMatch && qtyMatch[1]) || 1);
+      }
+      return out;
+    }`,
+    [KNOWN_INV_ITEMS] as [string[]],
+  )) as Record<string, number>;
+  Object.assign(counts, fromDom);
+  } catch {
+    // DOM evaluate best-effort
+  }
+
+  try {
+    const buttons = page.getByRole('button');
+    const count = await buttons.count();
+    let inspected = 0;
+    for (let i = 0; i < count && inspected < 12; i++) {
+      const btn = buttons.nth(i);
+      const label = (await btn.innerText().catch(() => '')).trim();
+      if (!label || /^Empty$/i.test(label)) continue;
+      if (!/^(\d+(?:\.\d+)?[kK]?)$/.test(label) && !KNOWN_INV_ITEMS.some((k) => label.includes(k))) {
+        continue;
+      }
+      await btn.click({ timeout: 1500 }).catch(() => undefined);
+      await page.waitForTimeout(200);
+      const body = await page.locator('body').innerText();
+      for (const name of KNOWN_INV_ITEMS) {
+        const nameRe = new RegExp(`(?:^|[^A-Za-z])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:[^A-Za-z]|$)`);
+        if (!nameRe.test(body)) continue;
+        const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const re = new RegExp(escaped + '[^0-9]{0,40}([0-9]+(?:[.,][0-9]+)?[kK]?)', 'i');
+        const m = body.match(re);
+        let qty = 1;
+        if (m?.[1]) {
+          const raw = m[1].replace(/,/g, '');
+          if (/k$/i.test(raw)) qty = Math.round(Number.parseFloat(raw) * 1000);
+          else qty = Number.parseInt(raw, 10) || 1;
+        }
+        counts[name] = Math.max(counts[name] ?? 0, qty);
+      }
+      inspected += 1;
+    }
+  } catch {
+    // best-effort
+  }
+
+  return counts;
+}
+
 function parseQuestCards(text: string, tab: SnapshotQuest['tab']): SnapshotQuest[] {
   const quests: SnapshotQuest[] = [];
   const knownTitles = [
@@ -125,8 +232,25 @@ export async function readGameSnapshot(page: Page, config: AppConfig): Promise<G
 
   await navigateTo(page, config, '/inventory');
   const inventoryText = await bodyText(page);
-  const inventory = parseInventoryCounts(inventoryText);
-  const hasBait = (inventory['Cheap Bait'] ?? 0) > 0 || /Cheap Bait/i.test(inventoryText);
+  const inventoryRaw = {
+    ...parseInventoryCounts(inventoryText),
+    ...(await scrapeInventoryFromDom(page)),
+  };
+  // Drop false positives (e.g. "Code of Conduct" → Cod).
+  const inventory: Record<string, number> = {};
+  for (const [key, qty] of Object.entries(inventoryRaw)) {
+    if (/^cod$/i.test(key) && !/raw\s*cod|cooked\s*cod|burnt\s*cod/i.test(key)) {
+      // keep only if exact Cod and qty looks like a stack, not page chrome
+      if (qty >= 200) continue;
+    }
+    if (/code of conduct|cookies|credits|monetisation/i.test(key)) continue;
+    inventory[key] = qty;
+  }
+  // Inventory is icon-heavy; also accept numeric badges near bait names or prior merchant buys.
+  const hasBait =
+    (inventory['Cheap Bait'] ?? 0) > 0 ||
+    /Cheap Bait/i.test(inventoryText) ||
+    /\bBait\b/i.test(inventoryText);
 
   const gatherState = await readSkillState(page, config, 'woodcutting', {
     probeOtherSkills: true,

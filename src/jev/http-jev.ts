@@ -14,6 +14,8 @@ import { actionCriteria } from './action-descriptions.js';
 import { ProgressiveStubJev } from './progressive-stub.js';
 import type { SupervisorAdvisor } from './supervisor-advisor.js';
 import { TypeSafeClient } from './typesafe-client.js';
+import { logJevCall } from '../log/decision-log.js';
+import { huntFoundCap, shouldHardStopHunt } from '../deterministic/hunt-cap.js';
 
 const STANCES: Stance[] = ['Balanced', 'Offensive', 'Defensive', 'Agile', 'Dexterous'];
 
@@ -136,6 +138,7 @@ export class HttpJev implements SupervisorAdvisor {
   private logError(method: string, error: unknown): void {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[Jev:Http] ${method} failed, using ProgressiveStubJev fallback: ${message}`);
+    logJevCall({ method, fallback: true, error: message });
   }
 
   async chooseNextAction(
@@ -147,12 +150,19 @@ export class HttpJev implements SupervisorAdvisor {
     if (allowed.length === 1) return allowed[0];
 
     try {
+      const playbook = snapshot.extensions?.earlySystemsPlaybook as
+        | { curriculumHint?: string; stage?: string; preferredActions?: string[]; complete?: boolean }
+        | undefined;
+      const playbookHint = playbook && !playbook.complete
+        ? ` ${playbook.curriculumHint ?? ''} Prefer among: ${(playbook.preferredActions ?? []).join(', ') || 'n/a'}. Deprioritize endless Oak woodcutting until early playbook completes.`
+        : '';
       const response = await this.client.systemOne(snapshotPayload(snapshot, context), {
         action: {
           type: 'choice',
           instructions:
-            'Choose the single best next action to advance this Idle MMO account (quests, combat XP, skill training, crafting, selling junk). Prefer progress over passive waiting.',
-          criteria: actionCriteria(allowed),
+            'Choose the single best next action to advance this Idle MMO account (quests, combat XP, skill training, crafting, selling junk). Prefer progress over passive waiting.' +
+            playbookHint,
+          criteria: actionCriteria(allowed, snapshot),
         },
       });
 
@@ -160,6 +170,15 @@ export class HttpJev implements SupervisorAdvisor {
       if (!answer || answer.type !== 'choice') {
         throw new Error('Missing choice answer for action');
       }
+
+      logJevCall({
+        method: 'chooseNextAction',
+        model: response.model,
+        usage: response.usage ?? null,
+        answer,
+        allowed,
+        cycle: context.cycle,
+      });
 
       if (allowed.includes(answer.choice as AutopilotAction)) {
         return answer.choice as AutopilotAction;
@@ -178,9 +197,9 @@ export class HttpJev implements SupervisorAdvisor {
         interrupt: {
           type: 'noul',
           instructions:
-            'Should the bot interrupt the currently running gather/craft action and start a new one?',
+            'Should the bot interrupt the currently running gather/craft action and start a new one? If early playbook wants Coal/Cod and current resource is Oak/Yew, interrupt.',
           criteria: {
-            true: 'Another action is blocking progress or combat/hunt is more valuable now',
+            true: 'Another action is blocking progress, combat/hunt is more valuable, OR early playbook needs a different resource (e.g. leave Oak to mine Coal)',
             false: 'Keep the current gather/craft running; do not replace it',
           },
         },
@@ -199,15 +218,25 @@ export class HttpJev implements SupervisorAdvisor {
   }
 
   async decideHuntStop(state: HuntState): Promise<boolean> {
+    const combat = (state as HuntState & { combatLevel?: number }).combatLevel ?? 1;
+    const total = (state as HuntState & { totalLevel?: number }).totalLevel;
+    const cap = huntFoundCap(combat, total);
+    const found = state.totalEnemiesFound ?? 0;
+    // Hard rule: never keep hunting past level-scaled cap (max 10).
+    if (shouldHardStopHunt(found, combat, total)) {
+      return true;
+    }
     try {
-      const response = await this.client.systemOne(huntPayload(state), {
+      const response = await this.client.systemOne(
+        { ...huntPayload(state), huntFoundCap: cap, combatLevel: combat, totalLevel: total ?? null },
+        {
         stop: {
           type: 'noul',
           instructions:
-            'Should the bot stop the current hunt now to select enemies and start battle?',
+            `Should the bot stop the current hunt now to select enemies and start battle? Hard max found is ${cap} (scales with combat level, absolute max 10). Prefer stopping once found >= 1 at low combat; never wait for remaining to drain when remaining is huge.`,
           criteria: {
-            true: 'Enough enemies found or remaining count is low enough to stop and battle',
-            false: 'Keep hunting to find more enemies before stopping',
+            true: `Found enough enemies (found >= 1, or approaching cap ${cap}) — stop and battle now. Ignore a large remaining count; that is not a reason to keep hunting.`,
+            false: `Found is still 0 or you want one more enemy before the cap of ${cap}`,
           },
         },
       });

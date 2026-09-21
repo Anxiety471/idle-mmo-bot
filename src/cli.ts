@@ -28,6 +28,7 @@ import {
   turnInQuestWhenReady,
   buyCheapBait,
 } from './deterministic/index.js';
+import { huntFoundCap, shouldHardStopHunt } from './deterministic/hunt-cap.js';
 import { createJev } from './jev/index.js';
 import { runAutopilot } from './autopilot.js';
 import type { HuntState } from './types.js';
@@ -225,7 +226,20 @@ async function runCombat(
         }
 
         huntState = huntStateAfterWait;
-        while (!(await jev.decideHuntStop(huntState))) {
+        // CLI combat has no snapshot; use HUNT_COMBAT_LEVEL / HUNT_TOTAL_LEVEL env or defaults.
+        const combatLevel = Number(process.env.HUNT_COMBAT_LEVEL ?? 1) || 1;
+        const totalLevel = Number(process.env.HUNT_TOTAL_LEVEL ?? 0) || undefined;
+        const foundCap = huntFoundCap(combatLevel, totalLevel);
+        while (true) {
+          const found = huntState.totalEnemiesFound ?? 0;
+          if (shouldHardStopHunt(found, combatLevel, totalLevel)) {
+            console.log(
+              `[combat] Hard stop hunt: found=${found} >= cap=${foundCap}` +
+                ` (combat=${combatLevel}, total=${totalLevel ?? '?'})`,
+            );
+            break;
+          }
+          if (await jev.decideHuntStop(huntState)) break;
           await sleep(config.pollMs);
           huntState = await readHuntState(session.page);
         }

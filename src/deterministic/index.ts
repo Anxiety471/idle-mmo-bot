@@ -50,5 +50,8 @@ export {
 } from './quest.js';
 
 export { buyCheapBait } from './merchant.js';
-export { sellJunk, sellJunkToVendor } from './inventory.js';
+export { sellJunk, sellJunkToVendor, sellHalfCareful } from './inventory.js';
 export { trySmeltCoal } from './craft.js';
+export { huntFoundCap, shouldHardStopHunt } from './hunt-cap.js';
+export { selectBattleFood } from './combat.js';
+export { tryCookCod } from './cook.js';

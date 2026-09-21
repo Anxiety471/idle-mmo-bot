@@ -22,10 +22,14 @@ import {
   waitForQuestTabsSettled,
   buyCheapBait,
   sellJunkToVendor,
+  sellHalfCareful,
   trySmeltCoal,
 } from '../deterministic/index.js';
 import type { ActionAllowContext, ActionDefinition, ActionExecuteContext } from './action-types.js';
 import { registerAction } from './action-registry.js';
+import { tryCookCod } from '../deterministic/cook.js';
+import { getPlaybookFromSnapshot } from './early-systems-playbook.js';
+import { shouldHardStopHunt, huntFoundCap } from '../deterministic/hunt-cap.js';
 
 const HEARTH_QUEST = 'Wood for the Hearth';
 const GOBLIN_QUEST = 'Goblin Menace';
@@ -85,7 +89,19 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<string> {
       return 'hunt_metrics_pending';
     }
     huntState = afterWait;
-    while (!(await jev.decideHuntStop(huntState))) {
+    const combatLevel = ctx.snapshot.combatLevel;
+    const totalLevel = ctx.snapshot.totalLevel;
+    const foundCap = huntFoundCap(combatLevel, totalLevel);
+    while (true) {
+      const found = huntState.totalEnemiesFound ?? 0;
+      if (shouldHardStopHunt(found, combatLevel, totalLevel)) {
+        console.log(
+          `[combat] Hard stop hunt: found=${found} >= cap=${foundCap}` +
+            ` (combat=${combatLevel ?? '?'}, total=${totalLevel ?? '?'})`,
+        );
+        break;
+      }
+      if (await jev.decideHuntStop(huntState)) break;
       await sleep(config.pollMs);
       huntState = await readHuntState(page);
     }
@@ -173,14 +189,26 @@ function gatherAction(
     priority,
     tags: ['gather', skill],
     safety: 'safe',
-    isAllowed: (ctx) =>
-      ctx.snapshot.flags.sessionValid &&
-      gatherIdle(ctx) &&
-      (id !== 'fish_cod' || ctx.snapshot.flags.hasBait) &&
-      (extraAllowed?.(ctx) ?? true),
+    isAllowed: (ctx) => {
+      const playbook = getPlaybookFromSnapshot(ctx.snapshot);
+      const playbookWantsInterrupt =
+        Boolean(playbook?.enabled && !playbook.complete && playbook.interruptActions.includes(id));
+      const idleOrInterrupt = gatherIdle(ctx) || playbookWantsInterrupt;
+      return (
+        ctx.snapshot.flags.sessionValid &&
+        idleOrInterrupt &&
+        (id !== 'fish_cod' || ctx.snapshot.flags.hasBait) &&
+        (extraAllowed?.(ctx) ?? true)
+      );
+    },
     execute: async (ctx) => {
       const gatherState = await readGatherState(ctx.page, ctx.config);
-      const allowInterrupt = await ctx.jev.shouldInterruptGather(gatherState);
+      const playbook = getPlaybookFromSnapshot(ctx.snapshot);
+      const playbookInterrupt = Boolean(
+        playbook?.enabled && !playbook.complete && playbook.interruptActions.includes(id),
+      );
+      const allowInterrupt =
+        playbookInterrupt || (await ctx.jev.shouldInterruptGather(gatherState));
       const result = await restartSkillGather(ctx.page, ctx.config, {
         skill,
         resourceLabel: resource,
@@ -280,15 +308,57 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
     priority: 20,
     tags: ['economy', 'fishing'],
     safety: 'gold_spend',
-    isAllowed: (ctx) =>
-      ctx.snapshot.flags.sessionValid &&
-      !ctx.snapshot.flags.hasBait &&
-      (ctx.snapshot.gold ?? 0) >= 2 &&
-      (ctx.config.buyBait || hasKillQuest(ctx)),
+    isAllowed: (ctx) => {
+      const combatLagging =
+        (ctx.snapshot.combatLevel ?? 1) <
+        Math.max(5, (ctx.snapshot.totalLevel ?? 10) * 0.2);
+      const playbook = getPlaybookFromSnapshot(ctx.snapshot);
+      const playbookWantsBait =
+        Boolean(playbook?.enabled && !playbook.complete && playbook.stage === 'buy_bait');
+      return (
+        ctx.snapshot.flags.sessionValid &&
+        !ctx.snapshot.flags.hasBait &&
+        (ctx.snapshot.gold ?? 0) >= 2 &&
+        (ctx.config.buyBait || hasKillQuest(ctx) || combatLagging || playbookWantsBait)
+      );
+    },
     execute: async (ctx) => ({
       action: 'buy_bait',
       outcome: await buyCheapBait(ctx.page, ctx.config, 1),
     }),
+  },
+  {
+    id: 'cook_cod',
+    description: 'Cook Cod into Cooked Cod for battle food (effective HP heal)',
+    bootstrap: true,
+    priority: 18,
+    tags: ['craft', 'combat', 'food'],
+    safety: 'safe',
+    isAllowed: (ctx) => {
+      const inv = ctx.snapshot.inventory;
+      const hasCod = (inv['Cod'] ?? 0) >= 1 || (inv['Raw Cod'] ?? 0) >= 1;
+      const hasCoal = (inv['Coal Ore'] ?? 0) >= 1;
+      const needsFood =
+        (inv['Cooked Cod'] ?? 0) < 5 &&
+        (inv['Cooked Salmon'] ?? 0) < 5 &&
+        (inv['Cooked Tuna'] ?? 0) < 5;
+      return (
+        ctx.snapshot.flags.sessionValid &&
+        gatherIdle(ctx) &&
+        hasCod &&
+        hasCoal &&
+        needsFood
+      );
+    },
+    execute: async (ctx) => {
+      const gatherState = await readGatherState(ctx.page, ctx.config);
+      const allowInterrupt =
+        ctx.forceInterrupt || (await ctx.jev.shouldInterruptGather(gatherState));
+      return {
+        action: 'cook_cod',
+        outcome: await tryCookCod(ctx.page, ctx.config, allowInterrupt),
+      };
+    },
   },
   {
     id: 'craft_if_ready',
@@ -323,6 +393,54 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
       outcome: await sellJunkToVendor(ctx.page, ctx.config, ctx.junkItems),
     }),
   },
+
+  {
+    id: 'market_sell_half',
+    description:
+      'Careful early-playbook sell: small vendor batches of excess mats; keep Coal for cook and Cod/Cooked Cod for battles (market price reader TBD)',
+    bootstrap: true,
+    priority: 28,
+    tags: ['economy', 'playbook'],
+    safety: 'inventory',
+    isAllowed: (ctx) => {
+      const playbook = getPlaybookFromSnapshot(ctx.snapshot);
+      const stageOk =
+        !playbook ||
+        playbook.complete ||
+        playbook.stage === 'sell_half' ||
+        playbook.stage === 'sell_extras';
+      return ctx.snapshot.flags.sessionValid && stageOk;
+    },
+    execute: async (ctx) => ({
+      action: 'market_sell_half',
+      outcome: await sellHalfCareful(ctx.page, ctx.config, {
+        keepCoal: 15,
+        maxStacks: 2,
+      }),
+    }),
+  },
+  {
+    id: 'hunt_rabbits',
+    description:
+      'Hunt and battle Rabbits using pre-battle Cooked Cod (FOOD Add). Respects huntFoundCap.',
+    bootstrap: true,
+    priority: 12,
+    tags: ['combat', 'playbook'],
+    safety: 'safe',
+    isAllowed: (ctx) => {
+      const playbook = getPlaybookFromSnapshot(ctx.snapshot);
+      const stageOk =
+        !playbook ||
+        playbook.complete ||
+        playbook.stage === 'hunt_rabbits' ||
+        playbook.stage === 'complete';
+      return ctx.snapshot.flags.sessionValid && stageOk;
+    },
+    execute: async (ctx) => ({
+      action: 'hunt_rabbits',
+      outcome: await runCombatRound(ctx),
+    }),
+  },
 ];
 
 /** Exploration action — not bootstrap; extends progressive loops as zones unlock. */
@@ -334,7 +452,13 @@ const EXPLORATION_ACTIONS: ActionDefinition[] = [
     priority: 90,
     tags: ['exploration'],
     safety: 'safe',
-    isAllowed: (ctx) => ctx.snapshot.flags.sessionValid,
+    isAllowed: (ctx) => {
+      const playbook = getPlaybookFromSnapshot(ctx.snapshot);
+      if (playbook?.enabled && !playbook.complete && playbook.stage !== 'explore_map' && playbook.stage !== 'complete') {
+        // Still allowed but deprioritized via playbook filter; keep available for Jev.
+      }
+      return ctx.snapshot.flags.sessionValid;
+    },
     execute: async (ctx) => {
       const mapBtn = ctx.page.getByRole('button', { name: /show-map|map/i });
       if (await mapBtn.count() > 0) {
