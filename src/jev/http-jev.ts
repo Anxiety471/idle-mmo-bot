@@ -15,6 +15,7 @@ import { ProgressiveStubJev } from './progressive-stub.js';
 import type { SupervisorAdvisor } from './supervisor-advisor.js';
 import type { Answer, Question, SystemOneResponse } from './typesafe-client.js';
 import { TypeSafeClient } from './typesafe-client.js';
+import { huntFoundCap, isHuntHardStop } from './hunt-cap.js';
 import { logJevCall, type JevMethodName } from '../logging/jev-log.js';
 
 const STANCES: Stance[] = ['Balanced', 'Offensive', 'Defensive', 'Agile', 'Dexterous'];
@@ -46,6 +47,7 @@ function gatherPayload(state: GatherState): Record<string, unknown> {
 }
 
 function huntPayload(state: HuntState): Record<string, unknown> {
+  const foundCap = huntFoundCap(state.combatLevel, state.totalLevel);
   return {
     context: 'hunt_stop',
     enemies: state.enemies,
@@ -53,6 +55,9 @@ function huntPayload(state: HuntState): Record<string, unknown> {
     totalEnemiesFound: state.totalEnemiesFound ?? null,
     enemiesRemaining: state.enemiesRemaining ?? null,
     bonusEnemies: state.bonusEnemies ?? null,
+    combatLevel: state.combatLevel ?? null,
+    totalLevel: state.totalLevel ?? null,
+    foundCap,
   };
 }
 
@@ -256,6 +261,19 @@ export class HttpJev implements SupervisorAdvisor {
   }
 
   async decideHuntStop(state: HuntState): Promise<boolean> {
+    if (isHuntHardStop(state)) {
+      await logJevCall({
+        method: 'decideHuntStop',
+        provider: 'HttpJev',
+        model: this.config.model,
+        result: true,
+        fallback: false,
+        answer: { type: 'noul', noul: 1 },
+      });
+      return true;
+    }
+
+    const foundCap = huntFoundCap(state.combatLevel, state.totalLevel);
     return this.withApiLog(
       'decideHuntStop',
       huntPayload(state),
@@ -263,10 +281,10 @@ export class HttpJev implements SupervisorAdvisor {
         stop: {
           type: 'noul',
           instructions:
-            'Should the bot stop the current hunt now to select enemies and start battle?',
+            `Should the bot stop hunting now to battle? Hard cap is ${foundCap} Total Enemies Found — stop once found >= 1 at low combat. A huge Enemies Remaining count is NOT a reason to keep hunting.`,
           criteria: {
-            true: 'Enough enemies found or remaining count is low enough to stop and battle',
-            false: 'Keep hunting to find more enemies before stopping',
+            true: `Found >= 1 enemy and ready to battle; or found is approaching cap (${foundCap})`,
+            false: 'Found is still 0 and hunt just started — keep hunting briefly',
           },
         },
       },

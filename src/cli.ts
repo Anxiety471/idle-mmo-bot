@@ -29,7 +29,9 @@ import {
   buyCheapBait,
 } from './deterministic/index.js';
 import { createJev } from './jev/index.js';
+import { pollUntilHuntStop } from './jev/hunt-cap.js';
 import { runAutopilot } from './autopilot.js';
+import { readAccountLevels } from './snapshot/account-levels.js';
 import type { HuntState } from './types.js';
 
 const HEARTH_QUEST = 'Wood for the Hearth';
@@ -224,16 +226,20 @@ async function runCombat(
           continue;
         }
 
-        huntState = huntStateAfterWait;
-        while (!(await jev.decideHuntStop(huntState))) {
-          await sleep(config.pollMs);
-          huntState = await readHuntState(session.page);
-        }
+        const accountLevels = await readAccountLevels(session.page, config);
+        huntState = await pollUntilHuntStop(
+          session.page,
+          config,
+          jev,
+          huntStateAfterWait,
+          accountLevels,
+        );
 
         console.log(
           `[combat] Hunt metrics: found=${huntState.totalEnemiesFound ?? 0}` +
             ` remaining=${huntState.enemiesRemaining ?? '?'}` +
-            ` bonus=${huntState.bonusEnemies ?? '?'}`,
+            ` bonus=${huntState.bonusEnemies ?? '?'}` +
+            ` cap-level combat=${accountLevels.combatLevel ?? '?'}`,
         );
 
         const stopResult = await stopHunt(session.page);
