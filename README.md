@@ -112,7 +112,7 @@ npm run combat -- --rounds 5 --interrupt
 # or FORCE_INTERRUPT=true in .env
 ```
 
-Combat waits for **Start Hunt** to appear (~3–4s after navigation) before clicking. Enemy cards use layered detection (legacy `button.h-24`, level labels, heuristics).
+Combat uses `ensureHuntActive`: **Start Hunt** if idle, **Hunt More** if post-hunt (replace dialog respects `--interrupt`), **Stop** if already hunting, or proceeds when enemy cards / `ENEMIES NEARBY` are already visible.
 
 If a gather action is running, **Start Hunt** shows the replace dialog. With default Jev (no interrupt), the bot closes the dialog, logs clearly, and backs off 30s+ instead of spinning forever. Use `--interrupt` to click **Start anyway**.
 

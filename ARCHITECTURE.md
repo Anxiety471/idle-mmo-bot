@@ -40,7 +40,7 @@ Shared state snapshots passed to Jev: `GatherState`, `HuntState`, `BattleState`,
 |--------|-------|------|
 | `skills.ts` | — | Skill configs for gather/craft skills; `resourceRequired` for unconfirmed defaults |
 | `gather.ts` | `/skills/view/<skill>` | Wait for UI settle; probe other skill pages for global busy; never click disabled Start; `missing_requirement` for fishing without bait |
-| `combat.ts` | `/combat/battle` | Wait for Start Hunt; replace dialog; layered enemy card detection; Stop → Battle → Hunt More / Run Away |
+| `combat.ts` | `/combat/battle` | `ensureHuntActive` (Start Hunt / Hunt More / already hunting / enemy-select); replace dialog; Stop → Battle → Hunt More |
 | `quest.ts` | `/quests` | Tab switch → open card → Overview → Turn In when enabled; `turnInQuestWhenReady` |
 | `merchant.ts` | `/merchants` | General Goods → Cheap Bait → buy 1 (only when `--buy-bait` / `BUY_BAIT`) |
 

@@ -21,6 +21,7 @@ export {
 
 export {
   startHunt,
+  ensureHuntActive,
   readHuntState,
   stopHunt,
   configureAndBattle,

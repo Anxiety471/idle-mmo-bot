@@ -10,7 +10,7 @@ import {
   getSkillConfig,
   resolveResource,
   type SkillId,
-  startHunt,
+  ensureHuntActive,
   waitForEnemies,
   readHuntState,
   stopHunt,
@@ -28,6 +28,7 @@ import {
   buyCheapBait,
 } from './deterministic/index.js';
 import { ConsoleJev, StubJev, type JevAdvisor } from './jev/index.js';
+import type { HuntState } from './types.js';
 
 const HEARTH_QUEST = 'Wood for the Hearth';
 const OAK_LOG = 'Oak Log';
@@ -189,8 +190,8 @@ async function runCombat(
       const gatherSnapshot = await readGatherState(session.page, config);
       const allowInterrupt =
         forceInterrupt || (await jev.shouldInterruptGather(gatherSnapshot));
-      const huntResult = await startHunt(session.page, config, allowInterrupt);
-      console.log(`[combat] startHunt → ${huntResult}`);
+      const huntResult = await ensureHuntActive(session.page, config, allowInterrupt);
+      console.log(`[combat] ensureHuntActive → ${huntResult}`);
 
       if (huntResult === 'no_action') {
         console.log(
@@ -202,26 +203,38 @@ async function runCombat(
       }
 
       if (huntResult === 'failed') {
-        console.log('[combat] startHunt failed — Start Hunt button not available');
+        console.log('[combat] ensureHuntActive failed — no Start Hunt, Hunt More, Stop, or enemy cards');
         await sleep(config.pollMs);
         continue;
       }
 
-      const huntStateAfterWait = await waitForEnemies(session.page);
-      if (huntStateAfterWait.enemies.length === 0 && huntStateAfterWait.defeatedCount === 0) {
-        console.log('[combat] Hunt active but no enemies detected yet — polling');
-        await sleep(config.pollMs);
-        continue;
-      }
+      let huntState: HuntState;
+      const skipHuntPolling = huntResult === 'enemy_select_ready';
 
-      let huntState = huntStateAfterWait;
-      while (!(await jev.decideHuntStop(huntState))) {
-        await sleep(config.pollMs);
+      if (skipHuntPolling) {
+        console.log('[combat] Post-hunt enemy selection ready — skipping Stop/poll');
+        huntState = await readHuntState(session.page);
+      } else {
+        const huntStateAfterWait = await waitForEnemies(session.page);
+        if (
+          huntStateAfterWait.enemies.length === 0 &&
+          huntStateAfterWait.defeatedCount === 0
+        ) {
+          console.log('[combat] Hunt active but no enemies detected yet — polling');
+          await sleep(config.pollMs);
+          continue;
+        }
+
+        huntState = huntStateAfterWait;
+        while (!(await jev.decideHuntStop(huntState))) {
+          await sleep(config.pollMs);
+          huntState = await readHuntState(session.page);
+        }
+
+        const stopResult = await stopHunt(session.page);
+        console.log(`[combat] stopHunt → ${stopResult}`);
         huntState = await readHuntState(session.page);
       }
-
-      const stopResult = await stopHunt(session.page);
-      console.log(`[combat] stopHunt → ${stopResult}`);
 
       if (huntState.enemies.length === 0) {
         console.log('[combat] No enemies visible — waiting');
@@ -253,7 +266,7 @@ async function runCombat(
         await sleep(config.pollMs);
       }
 
-      const moreResult = await huntMore(session.page);
+      const moreResult = await huntMore(session.page, allowInterrupt);
       console.log(`[combat] huntMore → ${moreResult}`);
       await sleep(config.pollMs);
     }

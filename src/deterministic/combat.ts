@@ -9,6 +9,8 @@ import { navigateTo } from '../browser.js';
  * Selectors follow live-tested flows on /combat/battle.
  * UI may change — update selectors when automation breaks.
  * Never invent battle outcomes; only drive clicks and read visible state.
+ *
+ * Post-hunt sessions may show Hunt More / ENEMIES NEARBY without Start Hunt.
  */
 
 const COMBAT_PATH = '/combat/battle';
@@ -23,6 +25,56 @@ const ACTION_BUTTON_PATTERN =
 
 async function pageText(page: Page): Promise<string> {
   return page.locator('body').innerText();
+}
+
+async function isButtonVisible(page: Page, name: string): Promise<boolean> {
+  const btn = page.getByRole('button', { name, exact: true });
+  if (await btn.count() === 0) return false;
+  return btn.first().isVisible();
+}
+
+/** Wait for any primary combat control after navigation. */
+async function waitForCombatUiSettled(page: Page, timeoutMs = COMBAT_UI_SETTLE_MS): Promise<void> {
+  const controls = page
+    .getByRole('button', { name: 'Start Hunt', exact: true })
+    .or(page.getByRole('button', { name: 'Hunt More', exact: true }))
+    .or(page.getByRole('button', { name: 'Stop', exact: true }))
+    .or(page.getByRole('button', { name: 'Battle', exact: true }));
+
+  await controls
+    .first()
+    .waitFor({ state: 'visible', timeout: timeoutMs })
+    .catch(() => {
+      // Best-effort: page may already show enemy cards without these buttons visible yet.
+    });
+}
+
+/** Handle "Start a new action?" after Start Hunt or Hunt More. */
+async function handleReplaceDialog(
+  page: Page,
+  allowInterrupt: boolean,
+): Promise<'continued' | 'no_action' | 'failed'> {
+  const dialog = page.getByText('Start a new action?');
+  if (!(await dialog.isVisible({ timeout: 2000 }).catch(() => false))) {
+    return 'continued';
+  }
+
+  if (allowInterrupt) {
+    const startAnyway = page.getByRole('button', { name: 'Start anyway', exact: true });
+    if (await startAnyway.count() > 0) {
+      await startAnyway.click();
+      return 'continued';
+    }
+    return 'failed';
+  }
+
+  const closeButton = page.getByRole('button', { name: 'Close', exact: true });
+  if (await closeButton.count() > 0) {
+    await closeButton.click();
+    return 'no_action';
+  }
+
+  return 'failed';
 }
 
 /** Collect visible enemy card buttons using layered selectors (legacy h-24 → Lv. text → heuristic). */
@@ -77,44 +129,59 @@ async function enemyInfosFromButtons(buttons: Locator[]): Promise<EnemyInfo[]> {
   return enemies;
 }
 
-/** Navigate to combat and click Start Hunt. */
-export async function startHunt(
+async function hasEnemySelectionReady(page: Page): Promise<boolean> {
+  const cards = await collectEnemyCardButtons(page);
+  if (cards.length > 0) return true;
+  const text = await pageText(page);
+  return /ENEMIES NEARBY/i.test(text);
+}
+
+/**
+ * Ensure combat is in a hunt-ready state. Handles fresh Start Hunt, post-hunt Hunt More,
+ * active hunts (Stop visible), and leftover enemy-select screens.
+ */
+export async function ensureHuntActive(
   page: Page,
   config: AppConfig,
   allowInterrupt = false,
 ): Promise<CombatStepResult> {
   await navigateTo(page, config, COMBAT_PATH);
+  await waitForCombatUiSettled(page);
 
-  const startHuntBtn = page.getByRole('button', { name: 'Start Hunt', exact: true });
-  const visible = await startHuntBtn
-    .first()
-    .waitFor({ state: 'visible', timeout: COMBAT_UI_SETTLE_MS })
-    .catch(() => null);
-
-  if (!visible && (await startHuntBtn.count()) === 0) {
-    return 'failed';
+  if (await isButtonVisible(page, 'Start Hunt')) {
+    await page.getByRole('button', { name: 'Start Hunt', exact: true }).first().click();
+    const dialog = await handleReplaceDialog(page, allowInterrupt);
+    if (dialog === 'no_action') return 'no_action';
+    if (dialog === 'failed') return 'failed';
+    return 'hunt_started';
   }
 
-  await startHuntBtn.first().click();
-
-  const dialog = page.getByText('Start a new action?');
-  if (await dialog.isVisible({ timeout: 2000 }).catch(() => false)) {
-    if (allowInterrupt) {
-      const startAnyway = page.getByRole('button', { name: 'Start anyway', exact: true });
-      if (await startAnyway.count() > 0) {
-        await startAnyway.click();
-        return 'hunt_started';
-      }
-      return 'failed';
-    }
-    const closeButton = page.getByRole('button', { name: 'Close', exact: true });
-    if (await closeButton.count() > 0) {
-      await closeButton.click();
-      return 'no_action';
-    }
+  if (await isButtonVisible(page, 'Hunt More')) {
+    await page.getByRole('button', { name: 'Hunt More', exact: true }).first().click();
+    const dialog = await handleReplaceDialog(page, allowInterrupt);
+    if (dialog === 'no_action') return 'no_action';
+    if (dialog === 'failed') return 'failed';
+    return 'hunt_started';
   }
 
-  return 'hunt_started';
+  if (await isButtonVisible(page, 'Stop')) {
+    return 'hunt_already_active';
+  }
+
+  if (await hasEnemySelectionReady(page)) {
+    return 'enemy_select_ready';
+  }
+
+  return 'failed';
+}
+
+/** @deprecated Use ensureHuntActive — kept for compatibility. */
+export async function startHunt(
+  page: Page,
+  config: AppConfig,
+  allowInterrupt = false,
+): Promise<CombatStepResult> {
+  return ensureHuntActive(page, config, allowInterrupt);
 }
 
 /** Read visible enemies from hunt screen. */
@@ -204,12 +271,20 @@ export async function runAway(page: Page): Promise<CombatStepResult> {
 }
 
 /** Click Hunt More to repeat after a battle completes. */
-export async function huntMore(page: Page): Promise<CombatStepResult> {
+export async function huntMore(
+  page: Page,
+  allowInterrupt = false,
+): Promise<CombatStepResult> {
   const huntMoreBtn = page.getByRole('button', { name: 'Hunt More', exact: true });
   if (await huntMoreBtn.count() === 0) {
     return 'no_action';
   }
-  await huntMoreBtn.click();
+  await huntMoreBtn.first().click();
+
+  const dialog = await handleReplaceDialog(page, allowInterrupt);
+  if (dialog === 'no_action') return 'no_action';
+  if (dialog === 'failed') return 'failed';
+
   return 'hunt_more_clicked';
 }
 
@@ -222,12 +297,21 @@ export async function waitForEnemies(
   timeoutMs = 60_000,
 ): Promise<HuntState> {
   const stopBtn = page.getByRole('button', { name: 'Stop', exact: true });
-  await stopBtn.first().waitFor({ state: 'visible', timeout: timeoutMs }).catch(() => undefined);
+  const huntMoreBtn = page.getByRole('button', { name: 'Hunt More', exact: true });
+
+  await stopBtn
+    .or(huntMoreBtn)
+    .first()
+    .waitFor({ state: 'visible', timeout: timeoutMs })
+    .catch(() => undefined);
 
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const state = await readHuntState(page);
     if (state.enemies.length > 0 || state.defeatedCount > 0) {
+      return state;
+    }
+    if (await hasEnemySelectionReady(page)) {
       return state;
     }
     await page.waitForTimeout(500);

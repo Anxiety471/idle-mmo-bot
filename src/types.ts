@@ -83,6 +83,8 @@ export type GatherRestartResult =
 
 export type CombatStepResult =
   | 'hunt_started'
+  | 'hunt_already_active'
+  | 'enemy_select_ready'
   | 'enemy_selected'
   | 'battle_started'
   | 'battle_in_progress'
