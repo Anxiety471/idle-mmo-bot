@@ -30,6 +30,8 @@ export {
   huntMore,
   waitForEnemies,
   waitForEnemyCards,
+  openEnemiesNearbyPanel,
+  prepareEnemyBattleSelection,
 } from './combat.js';
 
 export {
