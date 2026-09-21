@@ -12,6 +12,17 @@ import { navigateTo } from '../browser.js';
  */
 
 const QUESTS_PATH = '/quests';
+/** Brief pause after tab switch for quest list to refresh. */
+const TAB_SWITCH_SETTLE_MS = 500;
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Match tab labels like "Accepted" or "Accepted 1", "Pending Nearby 3". */
+function questTabPattern(tabName: string): RegExp {
+  return new RegExp(`^${escapeRegex(tabName)}(?:\\s+\\d+)?$`);
+}
 
 async function pageText(page: Page): Promise<string> {
   return page.locator('body').innerText();
@@ -74,16 +85,33 @@ export async function openQuest(
   return 'opened';
 }
 
-/** Switch quest list tab (e.g. Accepted, Pending Nearby, Completed). */
+/**
+ * Switch quest list tab (e.g. Accepted, Pending Nearby, Completed).
+ * Tab buttons include optional counts: "Accepted 1", "Pending Nearby 3".
+ */
 export async function switchQuestTab(page: Page, tabName: string): Promise<QuestStepResult> {
-  const tab = page
-    .getByRole('button', { name: tabName, exact: true })
-    .or(page.getByText(tabName, { exact: true }));
-  if (await tab.count() === 0) {
-    return 'no_action';
+  const pattern = questTabPattern(tabName);
+
+  const tabByRole = page.getByRole('button', { name: pattern });
+  if (await tabByRole.count() > 0) {
+    await tabByRole.first().click();
+    await page.waitForTimeout(TAB_SWITCH_SETTLE_MS);
+    return 'opened';
   }
-  await tab.first().click();
-  return 'opened';
+
+  // Fallback: scan visible buttons for matching label text
+  const buttons = page.getByRole('button');
+  const count = await buttons.count();
+  for (let i = 0; i < count; i++) {
+    const label = (await buttons.nth(i).innerText()).trim();
+    if (pattern.test(label)) {
+      await buttons.nth(i).click();
+      await page.waitForTimeout(TAB_SWITCH_SETTLE_MS);
+      return 'opened';
+    }
+  }
+
+  return 'no_action';
 }
 
 export interface TurnInQuestOptions {
