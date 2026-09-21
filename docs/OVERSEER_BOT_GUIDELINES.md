@@ -130,8 +130,11 @@ CLI / env equivalents:
 | `--interrupt` (autopilot, combat) | Sets `forceInterrupt: true` |
 | `FORCE_INTERRUPT=true` | Same as `--interrupt` when CLI flag omitted |
 | `BUY_BAIT=true` | Enables autopilot `buy_bait` when gold ≥ 2 and no bait; also skill `--buy-bait` |
+| `EARLY_PLAYBOOK=false` | Disable early-systems stage filters (default: playbook **on**) |
 
 Without `JEV_API_TOKEN`, autopilot runs **ProgressiveStubJev** (still writes `jev.jsonl` via `LoggingJev`).
+
+For a fresh low-level character, leave **`EARLY_PLAYBOOK` enabled** (default) so coal → sell → bait → fish → cook → hunt → map runs automatically.
 
 ### 3.7 Know where logs live
 
