@@ -1,14 +1,18 @@
-import type { JevAdvisor } from './types.js';
 import type {
+  AutopilotAction,
+  AutopilotContext,
   BattleState,
   EnemyInfo,
+  GameSnapshot,
   GatherState,
   HuntState,
   QuestInfo,
   Stance,
 } from '../types.js';
 import type { JevConfig } from './jev-config.js';
-import { StubJev } from './stub-jev.js';
+import { actionCriteria } from './action-descriptions.js';
+import { ProgressiveStubJev } from './progressive-stub.js';
+import type { SupervisorAdvisor } from './supervisor-advisor.js';
 import { TypeSafeClient } from './typesafe-client.js';
 
 const STANCES: Stance[] = ['Balanced', 'Offensive', 'Defensive', 'Agile', 'Dexterous'];
@@ -96,9 +100,30 @@ function isStance(value: string): value is Stance {
  *
  * On API failure, falls back to StubJev behavior and logs the error.
  */
-export class HttpJev implements JevAdvisor {
+function snapshotPayload(snapshot: GameSnapshot, context: AutopilotContext): Record<string, unknown> {
+  return {
+    context: 'autopilot_supervisor',
+    cycle: context.cycle,
+    location: snapshot.location,
+    totalLevel: snapshot.totalLevel ?? null,
+    combatLevel: snapshot.combatLevel ?? null,
+    gold: snapshot.gold ?? null,
+    tokens: snapshot.tokens ?? null,
+    currentAction: snapshot.currentAction ?? null,
+    skillLevels: snapshot.skillLevels,
+    inventory: snapshot.inventory,
+    acceptedQuests: snapshot.acceptedQuests,
+    pendingQuests: snapshot.pendingQuests,
+    combatPhase: snapshot.combatPhase,
+    flags: snapshot.flags,
+    lastAction: context.lastAction ?? null,
+    gatherRotationIndex: context.gatherRotationIndex,
+  };
+}
+
+export class HttpJev implements SupervisorAdvisor {
   private readonly client: TypeSafeClient;
-  private readonly fallback = new StubJev();
+  private readonly fallback = new ProgressiveStubJev();
 
   constructor(private readonly config: JevConfig) {
     this.client = new TypeSafeClient(config);
@@ -106,7 +131,41 @@ export class HttpJev implements JevAdvisor {
 
   private logError(method: string, error: unknown): void {
     const message = error instanceof Error ? error.message : String(error);
-    console.error(`[Jev:Http] ${method} failed, using StubJev fallback: ${message}`);
+    console.error(`[Jev:Http] ${method} failed, using ProgressiveStubJev fallback: ${message}`);
+  }
+
+  async chooseNextAction(
+    snapshot: GameSnapshot,
+    allowed: AutopilotAction[],
+    context: AutopilotContext,
+  ): Promise<AutopilotAction> {
+    if (allowed.length === 0) return 'idle';
+    if (allowed.length === 1) return allowed[0];
+
+    try {
+      const response = await this.client.systemOne(snapshotPayload(snapshot, context), {
+        action: {
+          type: 'choice',
+          instructions:
+            'Choose the single best next action to advance this Idle MMO account (quests, combat XP, skill training, crafting, selling junk). Prefer progress over passive waiting.',
+          criteria: actionCriteria(allowed),
+        },
+      });
+
+      const answer = response.answers.action;
+      if (!answer || answer.type !== 'choice') {
+        throw new Error('Missing choice answer for action');
+      }
+
+      if (allowed.includes(answer.choice as AutopilotAction)) {
+        return answer.choice as AutopilotAction;
+      }
+
+      throw new Error(`Jev chose disallowed action: ${answer.choice}`);
+    } catch (error) {
+      this.logError('chooseNextAction', error);
+      return this.fallback.chooseNextAction(snapshot, allowed, context);
+    }
   }
 
   async shouldInterruptGather(state: GatherState): Promise<boolean> {

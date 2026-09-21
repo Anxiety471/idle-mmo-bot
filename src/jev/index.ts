@@ -1,7 +1,9 @@
 export type { JevAdvisor } from './types.js';
+export type { SupervisorAdvisor } from './supervisor-advisor.js';
 export { ConsoleJev } from './console-jev.js';
-export { createJev } from './create-jev.js';
+export { createJev, createSupervisor } from './create-jev.js';
 export { HttpJev } from './http-jev.js';
+export { ProgressiveStubJev } from './progressive-stub.js';
 export { StubJev } from './stub-jev.js';
 export { loadJevConfig, resolveJevApiToken } from './jev-config.js';
 export { TypeSafeClient } from './typesafe-client.js';

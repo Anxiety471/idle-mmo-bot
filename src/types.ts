@@ -109,3 +109,68 @@ export type QuestStepResult =
 export type MerchantStepResult = 'purchased' | 'failed' | 'no_action';
 
 export type InventoryStepResult = 'sold' | 'no_action' | 'failed';
+
+/** Supervisor loop action — one executed per autopilot cycle. */
+export type AutopilotAction =
+  | 'continue_current'
+  | 'gather_oak'
+  | 'gather_yew'
+  | 'mine_coal'
+  | 'fish_cod'
+  | 'buy_bait'
+  | 'hunt_battle'
+  | 'quest_talk_accept'
+  | 'quest_turnin'
+  | 'craft_if_ready'
+  | 'sell_junk'
+  | 'idle';
+
+export type CombatPhase = 'hunt' | 'battle' | 'enemy_select' | 'none';
+
+export interface SnapshotQuest {
+  title: string;
+  progress?: string;
+  canTurnIn: boolean;
+  tab: 'accepted' | 'pending' | 'completed';
+}
+
+export interface CurrentActionInfo {
+  busy: boolean;
+  skill?: SkillId;
+  resource?: string;
+  label?: string;
+}
+
+export interface GameSnapshot {
+  location: string;
+  pagePath: string;
+  totalLevel?: number;
+  combatLevel?: number;
+  gold?: number;
+  tokens?: number;
+  currentAction?: CurrentActionInfo;
+  skillLevels: Partial<Record<SkillId, number>>;
+  inventory: Record<string, number>;
+  acceptedQuests: SnapshotQuest[];
+  pendingQuests: SnapshotQuest[];
+  combatPhase: CombatPhase;
+  flags: {
+    hasBait: boolean;
+    bankNearby: boolean;
+    gatherBusy: boolean;
+    inBattle: boolean;
+    sessionValid: boolean;
+  };
+}
+
+export interface AutopilotContext {
+  cycle: number;
+  gatherRotationIndex: number;
+  lastAction?: AutopilotAction;
+}
+
+export interface ActionResult {
+  action: AutopilotAction;
+  outcome: string;
+  backoffMs?: number;
+}

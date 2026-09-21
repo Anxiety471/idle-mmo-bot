@@ -38,6 +38,7 @@ export {
   readQuestState,
   openQuest,
   switchQuestTab,
+  waitForQuestTabsSettled,
   talkQuest,
   turnInQuest,
   turnInQuestWhenReady,
@@ -49,4 +50,5 @@ export {
 } from './quest.js';
 
 export { buyCheapBait } from './merchant.js';
-export { sellJunk } from './inventory.js';
+export { sellJunk, sellJunkToVendor } from './inventory.js';
+export { trySmeltCoal } from './craft.js';
