@@ -25,6 +25,8 @@ export {
   readHuntState,
   stopHunt,
   configureAndBattle,
+  selectBattleFood,
+  type BattleFoodResult,
   readBattleState,
   runAway,
   huntMore,

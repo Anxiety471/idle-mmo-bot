@@ -161,6 +161,8 @@ npm run combat -- --rounds 5 --interrupt
 
 Combat uses `ensureHuntActive`: **Start Hunt** if idle, **Hunt More** if post-hunt (replace dialog respects `--interrupt`), **Stop** if already hunting, or proceeds when enemy cards / `ENEMIES NEARBY` are already visible. While hunting, the UI shows **Total Enemies Found** metrics (not cards). A **hard stop** fires when found ≥ `huntFoundCap(combatLevel, totalLevel)` = `min(10, max(1, ceil(combat/2)))` (combat 1 → stop at 1 found; scales to max 10). This cap cannot be overridden by Jev — a huge **Enemies Remaining** count is not a reason to keep hunting. Jev may stop earlier via `decideHuntStop`. Then **Stop** → **ENEMIES NEARBY** count → Battle.
 
+Before **Battle**, `configureAndBattle` selects food on the enemy detail panel (**FOOD** section alongside STANCE/LOOT/ENEMIES). Per [wiki battling](https://wiki.idle-mmo.com/combat/battling), food is chosen pre-fight (not mid-battle click-heal): it raises effective HP, auto-consumes during the fight, and unused food returns afterward. The bot brings all owned stacks of the first available cooked food (prefers Cooked Cod → Salmon → Tuna). Logs `[combat] food → Cooked Cod x12` or `none available`; battles proceed either way. Auto-cooking when inventory is empty is a follow-up, not a blocker.
+
 If a gather action is running, **Start Hunt** shows the replace dialog. With default Jev (no interrupt), the bot closes the dialog, logs clearly, and backs off 30s+ instead of spinning forever. Use `--interrupt` to click **Start anyway**.
 
 Add `-v` / `--verbose` to any command to log every Jev decision (wraps HttpJev or StubJev):

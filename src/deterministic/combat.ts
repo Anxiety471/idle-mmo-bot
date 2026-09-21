@@ -426,6 +426,160 @@ async function setMaxEnemies(page: Page, maxEnemies: number): Promise<void> {
   }
 }
 
+/** Cooked food preferred for pre-battle heal (weakest first per wiki). */
+const COOKED_FOOD_PRIORITY = ['Cooked Cod', 'Cooked Salmon', 'Cooked Tuna'];
+const COOKED_FOOD_PATTERN = /^Cooked /i;
+
+export type BattleFoodResult =
+  | { status: 'food_selected'; item: string; quantity: number }
+  | { status: 'no_food' };
+
+async function getBattleDetailPanel(page: Page): Promise<Locator> {
+  const dialog = page.locator('[role="dialog"]');
+  if (await dialog.count() > 0 && await dialog.first().isVisible().catch(() => false)) {
+    return dialog.first();
+  }
+  return page.locator('body');
+}
+
+function logBattleFood(result: BattleFoodResult): void {
+  if (result.status === 'food_selected') {
+    console.log(`[combat] food → ${result.item} x${result.quantity}`);
+    return;
+  }
+  console.log('[combat] food → none available');
+}
+
+/** Use the battle Alpine component to add all owned stacks of the best cooked food. */
+async function selectBattleFoodViaAlpine(page: Page): Promise<BattleFoodResult | null> {
+  return page.evaluate((priority) => {
+    const root = globalThis as {
+      Alpine?: { $data: (el: unknown) => Record<string, unknown> };
+      document?: { querySelectorAll: (selector: string) => Iterable<unknown> };
+    };
+    const alpine = root.Alpine;
+    if (!alpine || !root.document) return null;
+
+    let component: Record<string, unknown> | null = null;
+    for (const node of root.document.querySelectorAll('[x-data]')) {
+      try {
+        const data = alpine.$data(node);
+        if (data && typeof data.addFoodItem === 'function' && Array.isArray(data.food_items)) {
+          component = data;
+          break;
+        }
+      } catch {
+        // skip nodes without Alpine data
+      }
+    }
+    if (!component) return null;
+
+    const entries = component.food_items as Array<Record<string, unknown>>;
+    if (!entries.length) return { status: 'no_food' as const };
+
+    const getName = (entry: Record<string, unknown>): string => {
+      const item = entry.item as Record<string, unknown> | undefined;
+      return String(item?.name ?? entry.name ?? '');
+    };
+    const getItem = (entry: Record<string, unknown>): Record<string, unknown> =>
+      (entry.item as Record<string, unknown>) ?? entry;
+    const getOwned = (entry: Record<string, unknown>): number => {
+      const item = entry.item as Record<string, unknown> | undefined;
+      const qty = entry.quantity ?? entry.owned ?? item?.quantity ?? 0;
+      return Number(qty) || 0;
+    };
+
+    const cooked = entries.filter(
+      (entry) => /^Cooked /i.test(getName(entry)) && getOwned(entry) > 0,
+    );
+    if (!cooked.length) return { status: 'no_food' as const };
+
+    let chosen = cooked[0];
+    for (const preferred of priority) {
+      const match = cooked.find((entry) => getName(entry).toLowerCase() === preferred.toLowerCase());
+      if (match) {
+        chosen = match;
+        break;
+      }
+    }
+
+    const item = getItem(chosen);
+    const quantity = getOwned(chosen);
+    const name = getName(chosen);
+    (component.addFoodItem as (item: Record<string, unknown>, qty: number) => void)(item, quantity);
+    return { status: 'food_selected' as const, item: name, quantity };
+  }, COOKED_FOOD_PRIORITY);
+}
+
+/** DOM fallback: find a cooked food row in the FOOD section and set quantity to max owned. */
+async function selectBattleFoodViaDom(page: Page): Promise<BattleFoodResult | null> {
+  const panel = await getBattleDetailPanel(page);
+  const foodHeading = panel.getByText(/^FOOD$/i).first();
+  if (await foodHeading.count() > 0 && await foodHeading.isVisible().catch(() => false)) {
+    await foodHeading.click().catch(() => undefined);
+  }
+
+  const candidates: string[] = [...COOKED_FOOD_PRIORITY];
+  const cookedLabels = panel.getByText(COOKED_FOOD_PATTERN);
+  const labelCount = await cookedLabels.count();
+  for (let i = 0; i < labelCount; i++) {
+    const name = (await cookedLabels.nth(i).innerText()).trim();
+    if (name && !candidates.includes(name)) candidates.push(name);
+  }
+
+  for (const name of candidates) {
+    const nameEl = panel.getByText(name, { exact: true }).first();
+    if (await nameEl.count() === 0 || !(await nameEl.isVisible().catch(() => false))) continue;
+
+    const row = nameEl.locator(
+      'xpath=ancestor::*[self::tr or self::li or contains(@class,"flex")][1]',
+    );
+    const qtyInput = row.locator('input[type="number"]');
+    if (await qtyInput.count() > 0) {
+      const maxAttr = await qtyInput.first().getAttribute('max');
+      const placeholder = await qtyInput.first().getAttribute('placeholder');
+      const parsed = Number(maxAttr ?? placeholder ?? 0);
+      const quantity = parsed > 0 ? parsed : 999;
+      await qtyInput.first().fill(String(quantity));
+      return { status: 'food_selected', item: name, quantity };
+    }
+
+    const foodBtn = panel.getByRole('button', { name: new RegExp(name, 'i') });
+    if (await foodBtn.count() > 0) {
+      await foodBtn.first().click();
+      return { status: 'food_selected', item: name, quantity: 1 };
+    }
+
+    await nameEl.click().catch(() => undefined);
+    return { status: 'food_selected', item: name, quantity: 1 };
+  }
+
+  return null;
+}
+
+/**
+ * Select cooked food on the pre-battle enemy detail panel (FOOD section).
+ * Food raises effective HP and is auto-consumed; unused returns after battle.
+ * Does not click-heal mid-fight.
+ */
+export async function selectBattleFood(page: Page): Promise<BattleFoodResult> {
+  const alpineResult = await selectBattleFoodViaAlpine(page);
+  if (alpineResult) {
+    logBattleFood(alpineResult);
+    return alpineResult;
+  }
+
+  const domResult = await selectBattleFoodViaDom(page);
+  if (domResult) {
+    logBattleFood(domResult);
+    return domResult;
+  }
+
+  const none: BattleFoodResult = { status: 'no_food' };
+  logBattleFood(none);
+  return none;
+}
+
 /**
  * Click the ENEMIES NEARBY count button to open the enemy detail panel.
  * Post-Stop UI shows a numeric badge (e.g. 40), not creature card buttons.
@@ -589,6 +743,7 @@ export async function configureAndBattle(
 
   await setStance(page, stance);
   await setMaxEnemies(page, maxEnemies);
+  await selectBattleFood(page);
 
   const battleBtn = page.getByRole('button', { name: 'Battle', exact: true });
   if (await battleBtn.count() === 0) {
