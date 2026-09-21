@@ -10,6 +10,7 @@ import type {
   Stance,
 } from '../types.js';
 import { listActions } from '../autopilot/action-registry.js';
+import { huntFoundCap } from './hunt-cap.js';
 import type { SupervisorAdvisor } from './supervisor-advisor.js';
 
 const HEARTH_QUEST = 'Wood for the Hearth';
@@ -113,7 +114,8 @@ export class ProgressiveStubJev implements SupervisorAdvisor {
   }
 
   async decideHuntStop(state: HuntState): Promise<boolean> {
-    return (state.totalEnemiesFound ?? 0) >= 1;
+    const cap = huntFoundCap(state.combatLevel, state.totalLevel);
+    return (state.totalEnemiesFound ?? 0) >= cap;
   }
 
   async chooseStance(enemy: EnemyInfo): Promise<Stance> {

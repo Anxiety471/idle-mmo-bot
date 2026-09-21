@@ -26,6 +26,7 @@ import {
 } from '../deterministic/index.js';
 import type { ActionAllowContext, ActionDefinition, ActionExecuteContext } from './action-types.js';
 import { registerAction } from './action-registry.js';
+import { pollUntilHuntStop } from '../jev/hunt-cap.js';
 
 const HEARTH_QUEST = 'Wood for the Hearth';
 const GOBLIN_QUEST = 'Goblin Menace';
@@ -84,11 +85,10 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<string> {
     ) {
       return 'hunt_metrics_pending';
     }
-    huntState = afterWait;
-    while (!(await jev.decideHuntStop(huntState))) {
-      await sleep(config.pollMs);
-      huntState = await readHuntState(page);
-    }
+    huntState = await pollUntilHuntStop(page, config, jev, afterWait, {
+      combatLevel: ctx.snapshot.combatLevel,
+      totalLevel: ctx.snapshot.totalLevel,
+    });
     const stopResult = await stopHunt(page);
     huntState = await prepareEnemyBattleSelection(page);
     if (huntState.enemies.length === 0) return `stop:${stopResult}:no_enemies`;

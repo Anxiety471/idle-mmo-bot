@@ -159,7 +159,7 @@ npm run combat -- --rounds 5 --interrupt
 # or FORCE_INTERRUPT=true in .env
 ```
 
-Combat uses `ensureHuntActive`: **Start Hunt** if idle, **Hunt More** if post-hunt (replace dialog respects `--interrupt`), **Stop** if already hunting, or proceeds when enemy cards / `ENEMIES NEARBY` are already visible. While hunting, the UI shows **Total Enemies Found** metrics (not cards); Jev stops when found ≥ 1, then **Stop** → click the **ENEMIES NEARBY** count button (e.g. `40`) → detail panel → Battle.
+Combat uses `ensureHuntActive`: **Start Hunt** if idle, **Hunt More** if post-hunt (replace dialog respects `--interrupt`), **Stop** if already hunting, or proceeds when enemy cards / `ENEMIES NEARBY` are already visible. While hunting, the UI shows **Total Enemies Found** metrics (not cards). A **hard stop** fires when found ≥ `huntFoundCap(combatLevel, totalLevel)` = `min(10, max(1, ceil(combat/2)))` (combat 1 → stop at 1 found; scales to max 10). This cap cannot be overridden by Jev — a huge **Enemies Remaining** count is not a reason to keep hunting. Jev may stop earlier via `decideHuntStop`. Then **Stop** → **ENEMIES NEARBY** count → Battle.
 
 If a gather action is running, **Start Hunt** shows the replace dialog. With default Jev (no interrupt), the bot closes the dialog, logs clearly, and backs off 30s+ instead of spinning forever. Use `--interrupt` to click **Start anyway**.
 
@@ -176,7 +176,7 @@ When `JEV_API_TOKEN` or `TYPESAFE_API_KEY` is set, the CLI uses **HttpJev** — 
 | Advisor method | TypeSafe question | Decision rule |
 |----------------|-------------------|---------------|
 | `shouldInterruptGather` | noul | `true` when noul ≥ `JEV_NOUL_THRESHOLD` |
-| `decideHuntStop` | noul | `true` when noul ≥ threshold |
+| `decideHuntStop` | noul | hard stop at found ≥ cap; else `true` when noul ≥ threshold |
 | `chooseStance` | choice | Balanced / Offensive / Defensive / Agile / Dexterous |
 | `chooseMaxEnemies` | score | 1–5 enemies from ordered rubric |
 | `shouldFlee` | noul | `true` when noul ≥ threshold |
