@@ -28,17 +28,12 @@ import {
   turnInQuestWhenReady,
   buyCheapBait,
 } from './deterministic/index.js';
-import { ConsoleJev, HttpJev, StubJev, loadJevConfig, type JevAdvisor } from './jev/index.js';
+import { createJev } from './jev/index.js';
+import { runAutopilot } from './autopilot.js';
 import type { HuntState } from './types.js';
 
 const HEARTH_QUEST = 'Wood for the Hearth';
 const OAK_LOG = 'Oak Log';
-
-function createJev(verbose: boolean): JevAdvisor {
-  const jevConfig = loadJevConfig();
-  const base = jevConfig ? new HttpJev(jevConfig) : new StubJev();
-  return verbose ? new ConsoleJev(base) : base;
-}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -478,6 +473,19 @@ program
   .action(async (_opts, cmd) => {
     const verbose = cmd.parent?.opts().verbose ?? false;
     await runFarmHearth(verbose);
+  });
+
+program
+  .command('autopilot')
+  .description('Forever loop: quest → combat → gather → sell junk (overnight mode)')
+  .option(
+    '--interrupt',
+    'Click Start anyway on replace dialog (also FORCE_INTERRUPT env)',
+    false,
+  )
+  .action(async (opts, cmd) => {
+    const verbose = cmd.parent?.opts().verbose ?? false;
+    await runAutopilot({ verbose, forceInterrupt: opts.interrupt });
   });
 
 program.parse();

@@ -49,3 +49,4 @@ export {
 } from './quest.js';
 
 export { buyCheapBait } from './merchant.js';
+export { sellJunk } from './inventory.js';

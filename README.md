@@ -104,6 +104,21 @@ npm run quest
 npm run farm-hearth
 ```
 
+### Autopilot (overnight)
+
+Forever loop rotating soft goals: **quest → combat → gather → sell junk**. Uses **HttpJev** when `JEV_API_TOKEN` is set; relaunches the browser on session errors.
+
+```bash
+export JEV_API_TOKEN=your-key
+export STORAGE_STATE=./storage-state.json
+npm run autopilot
+
+# Log every Jev decision
+npm run autopilot -- -v
+```
+
+Optional: `AUTOPILOT_GATHER_SKILL` (default `woodcutting`), `AUTOPILOT_GATHER_RESOURCE` (default skill default).
+
 ### Combat
 
 ```bash

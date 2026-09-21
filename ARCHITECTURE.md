@@ -94,6 +94,7 @@ Smoke test: `npm run jev-smoke` (`src/jev-smoke.ts`).
 | `quest` | Jev priority → talk → turn in if enabled |
 | `farm-hearth` | Gather until hearth quest turn-in |
 | `combat` | Hunt loop; `--interrupt` / `FORCE_INTERRUPT` for replace dialog; backs off when blocked |
+| `autopilot` | Forever loop: quest → combat → gather → sell junk; session relaunch on crash |
 
 ## Replace-dialog policy
 
