@@ -191,6 +191,10 @@ export JEV_API_TOKEN=your-key
 npm run jev-smoke
 ```
 
+## For overseer bots
+
+AI overseers (e.g. Grok Bot / Cursor agents supervising live autopilot) should read **[docs/OVERSEER_BOT_GUIDELINES.md](./docs/OVERSEER_BOT_GUIDELINES.md)** first. It covers bootstrap checklist, architecture, hard rules, early-systems playbook stages, log locations, sibling coordination, and how to register new actions from discovery output.
+
 ## Architecture
 
 - **`src/deterministic/`** — pure Playwright click paths (gather, combat, quest, merchant). UI selectors may need updates when the game changes.
