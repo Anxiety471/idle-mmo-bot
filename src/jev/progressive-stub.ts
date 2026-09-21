@@ -65,6 +65,10 @@ export class ProgressiveStubJev implements SupervisorAdvisor {
 
     const playbook = getPlaybookFromSnapshot(snapshot);
     if (playbook && playbook.enabled && !playbook.complete) {
+      if (playbook.stage === 'fish_cod' && playbook.gatherGraceActive) {
+        const cont = pickAllowed(allowed, ['continue_current']);
+        if (cont) return cont;
+      }
       const preferredHit = pickAllowed(allowed, playbook.preferredActions);
       const resource = snapshot.currentAction?.resource ?? snapshot.currentAction?.label ?? '';
       const onCoal = /coal/i.test(resource);
