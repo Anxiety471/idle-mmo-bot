@@ -116,6 +116,62 @@ function extractEnemyName(text: string): string | null {
   return null;
 }
 
+/** Dedicated locator for the ENEMIES NEARBY sidebar widget (not main content). */
+async function getEnemiesNearbyWidget(page: Page): Promise<Locator | null> {
+  const heading = page.getByText(ENEMIES_NEARBY_LABEL_PATTERN).first();
+  if (await heading.count() === 0 || !(await heading.isVisible().catch(() => false))) {
+    return null;
+  }
+
+  const containers = page.locator('section, div, article').filter({
+    has: page.getByText(ENEMIES_NEARBY_LABEL_PATTERN),
+  });
+
+  const count = await containers.count();
+  let best: Locator | null = null;
+  let bestArea = Infinity;
+
+  for (let i = 0; i < count; i++) {
+    const container = containers.nth(i);
+    if (!(await container.isVisible().catch(() => false))) continue;
+
+    const tagName = await container.evaluate((el) => el.tagName.toLowerCase()).catch(() => '');
+    if (tagName === 'main' || tagName === 'body') continue;
+
+    const buttons = container.getByRole('button');
+    const btnCount = await buttons.count();
+    let hasNumericBadge = false;
+    for (let j = 0; j < btnCount; j++) {
+      const btn = buttons.nth(j);
+      if (!(await btn.isVisible().catch(() => false))) continue;
+      const text = (await btn.innerText()).trim();
+      if (PURE_NUMERIC_PATTERN.test(text)) {
+        hasNumericBadge = true;
+        break;
+      }
+    }
+    if (!hasNumericBadge) continue;
+
+    const box = await container.boundingBox();
+    if (!box) continue;
+    const area = box.width * box.height;
+    if (area < bestArea) {
+      bestArea = area;
+      best = container;
+    }
+  }
+
+  if (best) return best;
+
+  const fallback = heading.locator('xpath=./parent::div | ./parent::section');
+  if (await fallback.count() > 0) {
+    const tag = await fallback.first().evaluate((el) => el.tagName.toLowerCase()).catch(() => 'main');
+    if (tag !== 'main' && tag !== 'body') return fallback.first();
+  }
+
+  return null;
+}
+
 /** Prefer the ENEMIES NEARBY panel; fall back to main content. */
 async function getEnemySearchRoot(page: Page): Promise<Locator> {
   const label = page.getByText(/ENEMIES\s+NEARBY/i).first();
@@ -129,6 +185,10 @@ async function getEnemySearchRoot(page: Page): Promise<Locator> {
       const cardCount = await container.locator('button.h-24, button.h-20, button.h-28').count();
       if (cardCount > 0) return container;
     }
+
+    const widget = await getEnemiesNearbyWidget(page);
+    if (widget) return widget;
+
     if (count > 0) return containers.last();
   }
 
@@ -205,7 +265,203 @@ async function enemyInfosFromButtons(buttons: Locator[]): Promise<EnemyInfo[]> {
   return enemies;
 }
 
+async function isEnemyDetailPanelOpen(page: Page): Promise<boolean> {
+  const hasStance = await page
+    .getByText(/^STANCE$/i)
+    .first()
+    .isVisible()
+    .catch(() => false);
+  const hasBattle = await page
+    .getByRole('button', { name: 'Battle', exact: true })
+    .first()
+    .isVisible()
+    .catch(() => false);
+  return hasStance && hasBattle;
+}
+
+/** Numeric count button in ENEMIES NEARBY (e.g. "40") — opens enemy detail panel. */
+async function findEnemiesNearbyCountButton(page: Page): Promise<Locator | null> {
+  const widget = await getEnemiesNearbyWidget(page);
+  if (!widget) return null;
+
+  const buttons = widget.getByRole('button');
+  const count = await buttons.count();
+  for (let i = 0; i < count; i++) {
+    const btn = buttons.nth(i);
+    if (!(await btn.isVisible())) continue;
+    const text = (await btn.innerText()).trim();
+    if (PURE_NUMERIC_PATTERN.test(text)) return btn;
+  }
+  return null;
+}
+
+async function dismissBlockingOverlays(page: Page): Promise<void> {
+  await page.keyboard.press('Escape').catch(() => undefined);
+
+  const overlays = page.locator('div.absolute.inset-0.bg-immo');
+  const overlayCount = await overlays.count();
+  for (let i = 0; i < overlayCount; i++) {
+    await overlays.nth(i).waitFor({ state: 'hidden', timeout: 2000 }).catch(() => undefined);
+  }
+
+  const closeBtn = page.getByRole('button', { name: 'Close', exact: true });
+  const closeCount = await closeBtn.count();
+  for (let i = 0; i < closeCount; i++) {
+    const btn = closeBtn.nth(i);
+    if (await btn.isVisible().catch(() => false)) {
+      await btn.click({ timeout: 2000 }).catch(() => undefined);
+    }
+  }
+}
+
+/** Read enemy name from open detail panel (e.g. Rabbit). */
+async function readEnemyNameFromDetailPanel(page: Page): Promise<string | null> {
+  const dialog = page.locator('[role="dialog"]');
+  if (await dialog.count() > 0) {
+    const heading = dialog.locator('h1, h2, h3').first();
+    if (await heading.count() > 0) {
+      const name = (await heading.innerText()).trim();
+      if (name && !/^(STANCE|LOOT|FOOD|ENEMIES)$/i.test(name)) return name;
+    }
+  }
+
+  const text = await pageText(page);
+  const match = text.match(/\n([A-Za-z][A-Za-z' -]+)\s*\n\s*\d+\s+Combat EXP/i);
+  return match?.[1]?.trim() ?? null;
+}
+
+/** Match stance option labels like "Balanced (All Stats)" from short name "Balanced". */
+function stanceOptionMatches(label: string, stance: Stance): boolean {
+  const normalized = label.trim().toLowerCase();
+  const needle = stance.toLowerCase();
+  return normalized.startsWith(needle) || normalized.includes(`(${needle}`) || normalized.includes(needle);
+}
+
+async function selectStanceFromNativeSelect(select: Locator, stance: Stance): Promise<boolean> {
+  const options = select.locator('option');
+  const count = await options.count();
+
+  for (let i = 0; i < count; i++) {
+    const opt = options.nth(i);
+    const label = ((await opt.textContent()) ?? '').trim();
+    if (!label || !stanceOptionMatches(label, stance)) continue;
+
+    const value = await opt.getAttribute('value');
+    try {
+      if (value !== null && value !== '') {
+        await select.selectOption(value, { timeout: 3000 });
+      } else {
+        await select.selectOption({ label }, { timeout: 3000 });
+      }
+      return true;
+    } catch {
+      try {
+        await select.selectOption({ label }, { timeout: 3000 });
+        return true;
+      } catch {
+        // try next matching option
+      }
+    }
+  }
+
+  // Fallback: keep default / first non-empty option rather than abort Battle.
+  for (let i = 0; i < count; i++) {
+    const opt = options.nth(i);
+    const label = ((await opt.textContent()) ?? '').trim();
+    if (!label) continue;
+    const value = await opt.getAttribute('value');
+    try {
+      if (value !== null && value !== '') {
+        await select.selectOption(value, { timeout: 3000 });
+      } else {
+        await select.selectOption({ label }, { timeout: 3000 });
+      }
+      return true;
+    } catch {
+      // leave default
+    }
+  }
+
+  return false;
+}
+
+async function setStance(page: Page, stance: Stance): Promise<void> {
+  try {
+    const namedSelect = page.locator('select[name="location"]');
+    if (await namedSelect.count() > 0) {
+      await selectStanceFromNativeSelect(namedSelect.first(), stance);
+      return;
+    }
+
+    const stanceSelect = page.locator('select').filter({
+      hasText: /Balanced|Offensive|Defensive|Agile|Dexterous/i,
+    });
+    if (await stanceSelect.count() > 0) {
+      await selectStanceFromNativeSelect(stanceSelect.first(), stance);
+      return;
+    }
+
+    const combobox = page.getByRole('combobox').filter({
+      hasText: /Balanced|Offensive|Defensive|Agile|Dexterous/i,
+    });
+    if (await combobox.count() > 0) {
+      await combobox.first().click({ timeout: 3000 }).catch(() => undefined);
+      const option = page.getByRole('option', { name: new RegExp(`^${stance}`, 'i') });
+      if (await option.count() > 0) {
+        await option.first().click({ timeout: 3000 }).catch(() => undefined);
+      }
+    }
+  } catch {
+    // Stance is best-effort — proceed with UI default and still click Battle.
+  }
+}
+
+async function setMaxEnemies(page: Page, maxEnemies: number): Promise<void> {
+  let maxInput = page.locator('input#max_enemies');
+  if (await maxInput.count() === 0) {
+    maxInput = page.locator('input[type="number"]');
+  }
+  if (await maxInput.count() > 0) {
+    await maxInput.first().fill(String(maxEnemies));
+  }
+}
+
+/**
+ * Click the ENEMIES NEARBY count button to open the enemy detail panel.
+ * Post-Stop UI shows a numeric badge (e.g. 40), not creature card buttons.
+ */
+export async function openEnemiesNearbyPanel(page: Page): Promise<CombatStepResult> {
+  try {
+    if (await isEnemyDetailPanelOpen(page)) {
+      return 'enemy_selected';
+    }
+
+    const countBtn = await findEnemiesNearbyCountButton(page);
+    if (!countBtn) {
+      return 'failed';
+    }
+
+    await dismissBlockingOverlays(page);
+    await countBtn.click({ force: true, timeout: 5000 }).catch(() => undefined);
+    await page
+      .getByText(/^STANCE$/i)
+      .first()
+      .waitFor({ state: 'visible', timeout: COMBAT_UI_SETTLE_MS })
+      .catch(() => undefined);
+
+    if (await isEnemyDetailPanelOpen(page)) {
+      return 'enemy_selected';
+    }
+
+    return 'failed';
+  } catch {
+    return 'failed';
+  }
+}
+
 async function hasEnemySelectionReady(page: Page): Promise<boolean> {
+  if (await isEnemyDetailPanelOpen(page)) return true;
+  if (await findEnemiesNearbyCountButton(page)) return true;
   const cards = await collectEnemyCardButtons(page);
   if (cards.length > 0) return true;
   const text = await pageText(page);
@@ -310,34 +566,35 @@ export async function stopHunt(page: Page): Promise<CombatStepResult> {
   return 'hunt_stopped';
 }
 
-/** Select enemy card, set max enemies and stance, then click Battle. */
+/**
+ * Open enemy detail (if needed), set stance/max, click Battle.
+ * Post-Stop: count button → detail panel. Legacy: click creature card first.
+ */
 export async function configureAndBattle(
   page: Page,
   enemyIndex: number,
   maxEnemies: number,
   stance: Stance,
 ): Promise<CombatStepResult> {
-  const cardButtons = await collectEnemyCardButtons(page);
-  if (cardButtons.length <= enemyIndex) {
-    return 'failed';
+  if (!(await isEnemyDetailPanelOpen(page))) {
+    const opened = await openEnemiesNearbyPanel(page);
+    if (opened !== 'enemy_selected') {
+      const cardButtons = await collectEnemyCardButtons(page);
+      if (cardButtons.length <= enemyIndex) {
+        return 'failed';
+      }
+      await cardButtons[enemyIndex].click();
+    }
   }
-  await cardButtons[enemyIndex].click();
 
-  const maxInput = page.locator('input#max_enemies');
-  if (await maxInput.count() > 0) {
-    await maxInput.fill(String(maxEnemies));
-  }
-
-  const stanceSelect = page.locator('select[name="location"]');
-  if (await stanceSelect.count() > 0) {
-    await stanceSelect.selectOption({ label: stance });
-  }
+  await setStance(page, stance);
+  await setMaxEnemies(page, maxEnemies);
 
   const battleBtn = page.getByRole('button', { name: 'Battle', exact: true });
   if (await battleBtn.count() === 0) {
     return 'failed';
   }
-  await battleBtn.click();
+  await battleBtn.first().click();
 
   return 'battle_started';
 }
@@ -422,18 +679,54 @@ export async function waitForEnemies(
   return readHuntState(page);
 }
 
-/** Wait for enemy card buttons after Stop (Battle selection phase). */
-export async function waitForEnemyCards(
+/**
+ * After Stop: open ENEMIES NEARBY count panel or wait for legacy creature cards.
+ * Returns HuntState with enemy name from detail panel when available.
+ */
+export async function prepareEnemyBattleSelection(
   page: Page,
   timeoutMs = 30_000,
 ): Promise<HuntState> {
   const deadline = Date.now() + timeoutMs;
+
   while (Date.now() < deadline) {
+    if (await isEnemyDetailPanelOpen(page)) {
+      const name = await readEnemyNameFromDetailPanel(page);
+      const base = await readHuntState(page);
+      if (name) {
+        return { ...base, enemies: [{ name, index: 0 }] };
+      }
+      return base;
+    }
+
+    const countBtn = await findEnemiesNearbyCountButton(page);
+    if (countBtn) {
+      const opened = await openEnemiesNearbyPanel(page);
+      if (opened === 'enemy_selected') {
+        const name = await readEnemyNameFromDetailPanel(page);
+        const base = await readHuntState(page);
+        if (name) {
+          return { ...base, enemies: [{ name, index: 0 }] };
+        }
+        return base;
+      }
+    }
+
     const state = await readHuntState(page);
     if (state.enemies.length > 0) {
       return state;
     }
+
     await page.waitForTimeout(500);
   }
+
   return readHuntState(page);
+}
+
+/** @deprecated Use prepareEnemyBattleSelection */
+export async function waitForEnemyCards(
+  page: Page,
+  timeoutMs = 30_000,
+): Promise<HuntState> {
+  return prepareEnemyBattleSelection(page, timeoutMs);
 }

@@ -112,7 +112,7 @@ npm run combat -- --rounds 5 --interrupt
 # or FORCE_INTERRUPT=true in .env
 ```
 
-Combat uses `ensureHuntActive`: **Start Hunt** if idle, **Hunt More** if post-hunt (replace dialog respects `--interrupt`), **Stop** if already hunting, or proceeds when enemy cards / `ENEMIES NEARBY` are already visible. While hunting, the UI shows **Total Enemies Found** metrics (not cards); Jev stops when found ≥ 1, then **Stop** → wait for enemy cards → Battle.
+Combat uses `ensureHuntActive`: **Start Hunt** if idle, **Hunt More** if post-hunt (replace dialog respects `--interrupt`), **Stop** if already hunting, or proceeds when enemy cards / `ENEMIES NEARBY` are already visible. While hunting, the UI shows **Total Enemies Found** metrics (not cards); Jev stops when found ≥ 1, then **Stop** → click the **ENEMIES NEARBY** count button (e.g. `40`) → detail panel → Battle.
 
 If a gather action is running, **Start Hunt** shows the replace dialog. With default Jev (no interrupt), the bot closes the dialog, logs clearly, and backs off 30s+ instead of spinning forever. Use `--interrupt` to click **Start anyway**.
 

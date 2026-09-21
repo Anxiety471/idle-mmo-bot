@@ -12,7 +12,7 @@ import {
   type SkillId,
   ensureHuntActive,
   waitForEnemies,
-  waitForEnemyCards,
+  prepareEnemyBattleSelection,
   readHuntState,
   stopHunt,
   configureAndBattle,
@@ -242,16 +242,17 @@ async function runCombat(
         const stopResult = await stopHunt(session.page);
         console.log(`[combat] stopHunt → ${stopResult}`);
 
-        huntState = await waitForEnemyCards(session.page);
+        huntState = await prepareEnemyBattleSelection(session.page);
       }
 
       if (huntState.enemies.length === 0) {
-        console.log('[combat] No enemy cards after Stop — waiting');
+        console.log('[combat] Could not open enemy detail panel after Stop — waiting');
         await sleep(config.pollMs);
         continue;
       }
 
       const enemy = huntState.enemies[0];
+      console.log(`[combat] Selected enemy: ${enemy.name}`);
       const maxEnemies = await jev.chooseMaxEnemies(enemy);
       const stance = await jev.chooseStance(enemy);
       const battleResult = await configureAndBattle(
