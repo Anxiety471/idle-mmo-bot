@@ -10,7 +10,7 @@ import {
   getSkillConfig,
   resolveResource,
   type SkillId,
-  startHunt,
+  ensureHuntActive,
   waitForEnemies,
   readHuntState,
   stopHunt,
@@ -28,6 +28,7 @@ import {
   buyCheapBait,
 } from './deterministic/index.js';
 import { ConsoleJev, StubJev, type JevAdvisor } from './jev/index.js';
+import type { HuntState } from './types.js';
 
 const HEARTH_QUEST = 'Wood for the Hearth';
 const OAK_LOG = 'Oak Log';
@@ -158,14 +159,27 @@ async function runGather(verbose: boolean): Promise<void> {
   await runSkillLoop('woodcutting', OAK_LOG, verbose);
 }
 
-async function runCombat(verbose: boolean, maxRounds = 10): Promise<void> {
+interface CombatOptions {
+  forceInterrupt?: boolean;
+}
+
+async function runCombat(
+  verbose: boolean,
+  maxRounds = 10,
+  combatOptions: CombatOptions = {},
+): Promise<void> {
   const config = loadConfig();
+  const forceInterrupt = combatOptions.forceInterrupt ?? config.forceInterrupt;
   const jev = createJev(verbose);
   const session = await launchBrowser(config);
   const huntBackoffMs = Math.max(config.pollMs * 6, 30_000);
 
   console.log('[combat] Starting hunt → battle loop');
-  console.log('[combat] Replace dialog: Close keeps gather; Start anyway only when Jev allows interrupt');
+  console.log(
+    forceInterrupt
+      ? '[combat] FORCE_INTERRUPT enabled — will click Start anyway on replace dialog'
+      : '[combat] Replace dialog: Close keeps gather; Start anyway only when Jev allows interrupt',
+  );
 
   try {
     let rounds = 0;
@@ -174,9 +188,10 @@ async function runCombat(verbose: boolean, maxRounds = 10): Promise<void> {
       console.log(`[combat] Round ${rounds}/${maxRounds}`);
 
       const gatherSnapshot = await readGatherState(session.page, config);
-      const allowInterrupt = await jev.shouldInterruptGather(gatherSnapshot);
-      const huntResult = await startHunt(session.page, config, allowInterrupt);
-      console.log(`[combat] startHunt → ${huntResult}`);
+      const allowInterrupt =
+        forceInterrupt || (await jev.shouldInterruptGather(gatherSnapshot));
+      const huntResult = await ensureHuntActive(session.page, config, allowInterrupt);
+      console.log(`[combat] ensureHuntActive → ${huntResult}`);
 
       if (huntResult === 'no_action') {
         console.log(
@@ -188,21 +203,38 @@ async function runCombat(verbose: boolean, maxRounds = 10): Promise<void> {
       }
 
       if (huntResult === 'failed') {
-        console.log('[combat] startHunt failed — Start Hunt button not available');
+        console.log('[combat] ensureHuntActive failed — no Start Hunt, Hunt More, Stop, or enemy cards');
         await sleep(config.pollMs);
         continue;
       }
 
-      await waitForEnemies(session.page);
+      let huntState: HuntState;
+      const skipHuntPolling = huntResult === 'enemy_select_ready';
 
-      let huntState = await readHuntState(session.page);
-      while (!(await jev.decideHuntStop(huntState))) {
-        await sleep(config.pollMs);
+      if (skipHuntPolling) {
+        console.log('[combat] Post-hunt enemy selection ready — skipping Stop/poll');
+        huntState = await readHuntState(session.page);
+      } else {
+        const huntStateAfterWait = await waitForEnemies(session.page);
+        if (
+          huntStateAfterWait.enemies.length === 0 &&
+          huntStateAfterWait.defeatedCount === 0
+        ) {
+          console.log('[combat] Hunt active but no enemies detected yet — polling');
+          await sleep(config.pollMs);
+          continue;
+        }
+
+        huntState = huntStateAfterWait;
+        while (!(await jev.decideHuntStop(huntState))) {
+          await sleep(config.pollMs);
+          huntState = await readHuntState(session.page);
+        }
+
+        const stopResult = await stopHunt(session.page);
+        console.log(`[combat] stopHunt → ${stopResult}`);
         huntState = await readHuntState(session.page);
       }
-
-      const stopResult = await stopHunt(session.page);
-      console.log(`[combat] stopHunt → ${stopResult}`);
 
       if (huntState.enemies.length === 0) {
         console.log('[combat] No enemies visible — waiting');
@@ -234,7 +266,7 @@ async function runCombat(verbose: boolean, maxRounds = 10): Promise<void> {
         await sleep(config.pollMs);
       }
 
-      const moreResult = await huntMore(session.page);
+      const moreResult = await huntMore(session.page, allowInterrupt);
       console.log(`[combat] huntMore → ${moreResult}`);
       await sleep(config.pollMs);
     }
@@ -399,9 +431,16 @@ program
   .command('combat')
   .description('Hunt → battle loop with Jev decision points')
   .option('-r, --rounds <n>', 'Max hunt rounds', '10')
+  .option(
+    '--interrupt',
+    'Click Start anyway on replace dialog (also FORCE_INTERRUPT env)',
+    false,
+  )
   .action(async (opts, cmd) => {
     const verbose = cmd.parent?.opts().verbose ?? false;
-    await runCombat(verbose, Number.parseInt(opts.rounds, 10));
+    await runCombat(verbose, Number.parseInt(opts.rounds, 10), {
+      forceInterrupt: opts.interrupt,
+    });
   });
 
 program

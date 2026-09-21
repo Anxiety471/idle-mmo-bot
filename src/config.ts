@@ -20,6 +20,8 @@ export interface AppConfig {
   storageStatePath: string | undefined;
   /** When true, fishing may buy Cheap Bait at /merchants before retrying. Off by default. */
   buyBait: boolean;
+  /** When true, combat/gather may click Start anyway on replace dialog. Off by default. */
+  forceInterrupt: boolean;
 }
 
 export function loadConfig(): AppConfig {
@@ -29,5 +31,6 @@ export function loadConfig(): AppConfig {
     headless: parseBool(process.env.HEADLESS, true),
     storageStatePath: process.env.STORAGE_STATE?.trim() || undefined,
     buyBait: parseBool(process.env.BUY_BAIT, false),
+    forceInterrupt: parseBool(process.env.FORCE_INTERRUPT, false),
   };
 }

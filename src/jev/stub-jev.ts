@@ -15,7 +15,7 @@ const LOW_HP_THRESHOLD = 25;
  * StubJev — conservative defaults for unattended runs.
  *
  * - Never interrupt an active gather
- * - Stop hunt after 1 defeated enemy
+ * - Stop hunt when at least one enemy card is visible
  * - Balanced stance, max 1 enemy
  * - Flee only when HP is detectably low
  * - Prefer "Wood for the Hearth" quest
@@ -26,7 +26,7 @@ export class StubJev implements JevAdvisor {
   }
 
   async decideHuntStop(state: HuntState): Promise<boolean> {
-    return state.defeatedCount >= 1;
+    return state.enemies.length >= 1;
   }
 
   async chooseStance(_enemy: EnemyInfo): Promise<Stance> {
