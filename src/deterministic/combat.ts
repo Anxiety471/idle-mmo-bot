@@ -116,6 +116,62 @@ function extractEnemyName(text: string): string | null {
   return null;
 }
 
+/** Dedicated locator for the ENEMIES NEARBY sidebar widget (not main content). */
+async function getEnemiesNearbyWidget(page: Page): Promise<Locator | null> {
+  const heading = page.getByText(ENEMIES_NEARBY_LABEL_PATTERN).first();
+  if (await heading.count() === 0 || !(await heading.isVisible().catch(() => false))) {
+    return null;
+  }
+
+  const containers = page.locator('section, div, article').filter({
+    has: page.getByText(ENEMIES_NEARBY_LABEL_PATTERN),
+  });
+
+  const count = await containers.count();
+  let best: Locator | null = null;
+  let bestArea = Infinity;
+
+  for (let i = 0; i < count; i++) {
+    const container = containers.nth(i);
+    if (!(await container.isVisible().catch(() => false))) continue;
+
+    const tagName = await container.evaluate((el) => el.tagName.toLowerCase()).catch(() => '');
+    if (tagName === 'main' || tagName === 'body') continue;
+
+    const buttons = container.getByRole('button');
+    const btnCount = await buttons.count();
+    let hasNumericBadge = false;
+    for (let j = 0; j < btnCount; j++) {
+      const btn = buttons.nth(j);
+      if (!(await btn.isVisible().catch(() => false))) continue;
+      const text = (await btn.innerText()).trim();
+      if (PURE_NUMERIC_PATTERN.test(text)) {
+        hasNumericBadge = true;
+        break;
+      }
+    }
+    if (!hasNumericBadge) continue;
+
+    const box = await container.boundingBox();
+    if (!box) continue;
+    const area = box.width * box.height;
+    if (area < bestArea) {
+      bestArea = area;
+      best = container;
+    }
+  }
+
+  if (best) return best;
+
+  const fallback = heading.locator('xpath=./parent::div | ./parent::section');
+  if (await fallback.count() > 0) {
+    const tag = await fallback.first().evaluate((el) => el.tagName.toLowerCase()).catch(() => 'main');
+    if (tag !== 'main' && tag !== 'body') return fallback.first();
+  }
+
+  return null;
+}
+
 /** Prefer the ENEMIES NEARBY panel; fall back to main content. */
 async function getEnemySearchRoot(page: Page): Promise<Locator> {
   const label = page.getByText(/ENEMIES\s+NEARBY/i).first();
@@ -129,6 +185,10 @@ async function getEnemySearchRoot(page: Page): Promise<Locator> {
       const cardCount = await container.locator('button.h-24, button.h-20, button.h-28').count();
       if (cardCount > 0) return container;
     }
+
+    const widget = await getEnemiesNearbyWidget(page);
+    if (widget) return widget;
+
     if (count > 0) return containers.last();
   }
 
@@ -221,8 +281,10 @@ async function isEnemyDetailPanelOpen(page: Page): Promise<boolean> {
 
 /** Numeric count button in ENEMIES NEARBY (e.g. "40") — opens enemy detail panel. */
 async function findEnemiesNearbyCountButton(page: Page): Promise<Locator | null> {
-  const root = await getEnemySearchRoot(page);
-  const buttons = root.getByRole('button');
+  const widget = await getEnemiesNearbyWidget(page);
+  if (!widget) return null;
+
+  const buttons = widget.getByRole('button');
   const count = await buttons.count();
   for (let i = 0; i < count; i++) {
     const btn = buttons.nth(i);
@@ -231,6 +293,25 @@ async function findEnemiesNearbyCountButton(page: Page): Promise<Locator | null>
     if (PURE_NUMERIC_PATTERN.test(text)) return btn;
   }
   return null;
+}
+
+async function dismissBlockingOverlays(page: Page): Promise<void> {
+  await page.keyboard.press('Escape').catch(() => undefined);
+
+  const overlays = page.locator('div.absolute.inset-0.bg-immo');
+  const overlayCount = await overlays.count();
+  for (let i = 0; i < overlayCount; i++) {
+    await overlays.nth(i).waitFor({ state: 'hidden', timeout: 2000 }).catch(() => undefined);
+  }
+
+  const closeBtn = page.getByRole('button', { name: 'Close', exact: true });
+  const closeCount = await closeBtn.count();
+  for (let i = 0; i < closeCount; i++) {
+    const btn = closeBtn.nth(i);
+    if (await btn.isVisible().catch(() => false)) {
+      await btn.click({ timeout: 2000 }).catch(() => undefined);
+    }
+  }
 }
 
 /** Read enemy name from open detail panel (e.g. Rabbit). */
@@ -350,27 +431,32 @@ async function setMaxEnemies(page: Page, maxEnemies: number): Promise<void> {
  * Post-Stop UI shows a numeric badge (e.g. 40), not creature card buttons.
  */
 export async function openEnemiesNearbyPanel(page: Page): Promise<CombatStepResult> {
-  if (await isEnemyDetailPanelOpen(page)) {
-    return 'enemy_selected';
-  }
+  try {
+    if (await isEnemyDetailPanelOpen(page)) {
+      return 'enemy_selected';
+    }
 
-  const countBtn = await findEnemiesNearbyCountButton(page);
-  if (!countBtn) {
+    const countBtn = await findEnemiesNearbyCountButton(page);
+    if (!countBtn) {
+      return 'failed';
+    }
+
+    await dismissBlockingOverlays(page);
+    await countBtn.click({ force: true, timeout: 5000 }).catch(() => undefined);
+    await page
+      .getByText(/^STANCE$/i)
+      .first()
+      .waitFor({ state: 'visible', timeout: COMBAT_UI_SETTLE_MS })
+      .catch(() => undefined);
+
+    if (await isEnemyDetailPanelOpen(page)) {
+      return 'enemy_selected';
+    }
+
+    return 'failed';
+  } catch {
     return 'failed';
   }
-
-  await countBtn.click();
-  await page
-    .getByText(/^STANCE$/i)
-    .first()
-    .waitFor({ state: 'visible', timeout: COMBAT_UI_SETTLE_MS })
-    .catch(() => undefined);
-
-  if (await isEnemyDetailPanelOpen(page)) {
-    return 'enemy_selected';
-  }
-
-  return 'failed';
 }
 
 async function hasEnemySelectionReady(page: Page): Promise<boolean> {
