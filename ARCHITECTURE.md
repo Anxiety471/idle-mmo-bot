@@ -5,7 +5,8 @@
 ```
 ┌─────────────┐     decisions      ┌──────────────┐
 │   cli.ts    │ ◄────────────────► │  JevAdvisor  │
-│  (commands) │                    │ stub/console │
+│  (commands) │                    │ stub/http/   │
+│             │                    │   console    │
 └──────┬──────┘                    └──────────────┘
        │ clicks / reads
        ▼
@@ -61,8 +62,26 @@ Comments in each file note that UI selectors are live-tested but may drift.
 
 #### Implementations
 
-- **`StubJev`** — production default in CLI; conservative, no logging overhead.
-- **`ConsoleJev`** — same defaults but logs every decision; enabled with `-v`.
+- **`StubJev`** — CLI default when no API token is set; conservative, no network calls.
+- **`HttpJev`** — real advisor via TypeSafe System One API (`POST /v1/systemone`). Enabled when `JEV_API_TOKEN` or `TYPESAFE_API_KEY` is set. On API error, falls back to StubJev and logs.
+- **`ConsoleJev`** — wraps any inner advisor and logs every decision; enabled with `-v`.
+
+#### TypeSafe API mapping (`HttpJev`)
+
+Each `JevAdvisor` method sends one System One request with structured JSON state (from `GatherState`, `HuntState`, `BattleState`, `EnemyInfo`, or `QuestInfo` — no `pageText`, no screenshots).
+
+| Method | State payload | Question key | Type | Result |
+|--------|---------------|--------------|------|--------|
+| `shouldInterruptGather` | `{ context, busy, busyElsewhere, skill, ... }` | `interrupt` | noul | `noul >= JEV_NOUL_THRESHOLD` |
+| `decideHuntStop` | hunt metrics + enemies | `stop` | noul | `noul >= threshold` |
+| `chooseStance` | `{ enemy }` | `stance` | choice | winning stance label |
+| `chooseMaxEnemies` | `{ enemy }` | `maxEnemies` | score | `round(score) + 1`, clamped 1–5 |
+| `shouldFlee` | `{ inBattle, playerHpPercent, ... }` | `flee` | noul | `noul >= threshold` |
+| `pickQuestPriority` | quest list | `priority` | choice | chosen title first; `keep_gathering` → `[]` |
+
+Config (`src/jev/jev-config.ts`): `JEV_API_TOKEN` / `TYPESAFE_API_KEY`, `JEV_MODEL` (default `jev-latest`), `JEV_NOUL_THRESHOLD` (default `0.6`).
+
+Smoke test: `npm run jev-smoke` (`src/jev-smoke.ts`).
 
 ### `src/cli.ts`
 
@@ -75,6 +94,7 @@ Comments in each file note that UI selectors are live-tested but may drift.
 | `quest` | Jev priority → talk → turn in if enabled |
 | `farm-hearth` | Gather until hearth quest turn-in |
 | `combat` | Hunt loop; `--interrupt` / `FORCE_INTERRUPT` for replace dialog; backs off when blocked |
+| `autopilot` | Forever loop: quest → combat → gather → sell junk; session relaunch on crash |
 
 ## Replace-dialog policy
 

@@ -28,15 +28,12 @@ import {
   turnInQuestWhenReady,
   buyCheapBait,
 } from './deterministic/index.js';
-import { ConsoleJev, StubJev, type JevAdvisor } from './jev/index.js';
+import { createJev } from './jev/index.js';
+import { runAutopilot } from './autopilot.js';
 import type { HuntState } from './types.js';
 
 const HEARTH_QUEST = 'Wood for the Hearth';
 const OAK_LOG = 'Oak Log';
-
-function createJev(verbose: boolean): JevAdvisor {
-  return verbose ? new ConsoleJev() : new StubJev();
-}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -411,7 +408,7 @@ const program = new Command();
 program
   .name('idle-mmo-bot')
   .description('Idle MMO web automation (Playwright + Jev advisor hooks)')
-  .option('-v, --verbose', 'Use ConsoleJev (logs decisions) instead of StubJev', false);
+  .option('-v, --verbose', 'Log every Jev decision (wraps HttpJev or StubJev)', false);
 
 program
   .command('gather')
@@ -476,6 +473,19 @@ program
   .action(async (_opts, cmd) => {
     const verbose = cmd.parent?.opts().verbose ?? false;
     await runFarmHearth(verbose);
+  });
+
+program
+  .command('autopilot')
+  .description('Forever loop: quest → combat → gather → sell junk (overnight mode)')
+  .option(
+    '--interrupt',
+    'Click Start anyway on replace dialog (also FORCE_INTERRUPT env)',
+    false,
+  )
+  .action(async (opts, cmd) => {
+    const verbose = cmd.parent?.opts().verbose ?? false;
+    await runAutopilot({ verbose, forceInterrupt: opts.interrupt });
   });
 
 program.parse();

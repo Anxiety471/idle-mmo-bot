@@ -107,3 +107,5 @@ export type QuestStepResult =
   | 'failed';
 
 export type MerchantStepResult = 'purchased' | 'failed' | 'no_action';
+
+export type InventoryStepResult = 'sold' | 'no_action' | 'failed';

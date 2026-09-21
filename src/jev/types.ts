@@ -19,7 +19,7 @@ import type {
  * 1. Create a class that implements `JevAdvisor`.
  * 2. In each method, pass the current `state` snapshot (page text + parsed fields).
  * 3. Return conservative defaults on uncertainty (same as StubJev).
- * 4. Wire it in `cli.ts` via a `--jev` flag or env var (e.g. `JEV_PROVIDER=openai`).
+ * 4. Wire it in `cli.ts` — see `HttpJev` when `JEV_API_TOKEN` / `TYPESAFE_API_KEY` is set.
  * 5. Log every decision for post-hoc review.
  *
  * Example skeleton:

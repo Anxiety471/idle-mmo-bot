@@ -15,7 +15,9 @@
     "combat": "tsx src/cli.ts combat",
     "quest": "tsx src/cli.ts quest",
     "quest-turnin": "tsx src/cli.ts quest-turnin",
-    "farm-hearth": "tsx src/cli.ts farm-hearth"
+    "farm-hearth": "tsx src/cli.ts farm-hearth",
+    "jev-smoke": "tsx src/jev-smoke.ts",
+    "autopilot": "tsx src/cli.ts autopilot"
   },
   "dependencies": {
     "commander": "^12.1.0",

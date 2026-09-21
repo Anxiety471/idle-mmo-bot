@@ -36,6 +36,9 @@ Set `STORAGE_STATE=./storage-state.json` in `.env`. This file is gitignored — 
 | `STORAGE_STATE` | _(unset)_ | Path to saved session JSON |
 | `BUY_BAIT` | `false` | Auto-buy Cheap Bait when fishing (off by default) |
 | `FORCE_INTERRUPT` | `false` | Click Start anyway on replace dialog for combat |
+| `JEV_API_TOKEN` | _(unset)_ | TypeSafe API key for **HttpJev** (alias: `TYPESAFE_API_KEY`) |
+| `JEV_MODEL` | `jev-latest` | Jev model sent to TypeSafe System One API |
+| `JEV_NOUL_THRESHOLD` | `0.6` | Noul yes threshold for interrupt / stop hunt / flee |
 
 ## Commands
 
@@ -101,6 +104,21 @@ npm run quest
 npm run farm-hearth
 ```
 
+### Autopilot (overnight)
+
+Forever loop rotating soft goals: **quest → combat → gather → sell junk**. Uses **HttpJev** when `JEV_API_TOKEN` is set; relaunches the browser on session errors.
+
+```bash
+export JEV_API_TOKEN=your-key
+export STORAGE_STATE=./storage-state.json
+npm run autopilot
+
+# Log every Jev decision
+npm run autopilot -- -v
+```
+
+Optional: `AUTOPILOT_GATHER_SKILL` (default `woodcutting`), `AUTOPILOT_GATHER_RESOURCE` (default skill default).
+
 ### Combat
 
 ```bash
@@ -116,18 +134,40 @@ Combat uses `ensureHuntActive`: **Start Hunt** if idle, **Hunt More** if post-hu
 
 If a gather action is running, **Start Hunt** shows the replace dialog. With default Jev (no interrupt), the bot closes the dialog, logs clearly, and backs off 30s+ instead of spinning forever. Use `--interrupt` to click **Start anyway**.
 
-Add `-v` / `--verbose` to any command to use **ConsoleJev** (logs every decision):
+Add `-v` / `--verbose` to any command to log every Jev decision (wraps HttpJev or StubJev):
 
 ```bash
 npm run gather -- -v
 ```
 
+### Jev (TypeSafe API)
+
+When `JEV_API_TOKEN` or `TYPESAFE_API_KEY` is set, the CLI uses **HttpJev** — a real advisor that calls `POST https://api.typesafe.ai/v1/systemone` with structured JSON state (no screenshots). Without a token, **StubJev** provides conservative defaults.
+
+| Advisor method | TypeSafe question | Decision rule |
+|----------------|-------------------|---------------|
+| `shouldInterruptGather` | noul | `true` when noul ≥ `JEV_NOUL_THRESHOLD` |
+| `decideHuntStop` | noul | `true` when noul ≥ threshold |
+| `chooseStance` | choice | Balanced / Offensive / Defensive / Agile / Dexterous |
+| `chooseMaxEnemies` | score | 1–5 enemies from ordered rubric |
+| `shouldFlee` | noul | `true` when noul ≥ threshold |
+| `pickQuestPriority` | choice | quest title or `keep_gathering` (empty list) |
+
+On API failure, HttpJev logs the error and falls back to StubJev behavior.
+
+Smoke-test the API without launching the browser:
+
+```bash
+export JEV_API_TOKEN=your-key
+npm run jev-smoke
+```
+
 ## Architecture
 
 - **`src/deterministic/`** — pure Playwright click paths (gather, combat, quest, merchant). UI selectors may need updates when the game changes.
-- **`src/jev/`** — `JevAdvisor` decision hooks. Default **StubJev** is conservative; **ConsoleJev** logs choices for local debugging.
+- **`src/jev/`** — `JevAdvisor` decision hooks. **StubJev** (default), **HttpJev** (TypeSafe API), **ConsoleJev** (verbose wrapper).
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for Jev hook details and how to plug in a real AI agent.
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for Jev hook details and TypeSafe API mapping.
 
 ## Deterministic vs Jev
 
