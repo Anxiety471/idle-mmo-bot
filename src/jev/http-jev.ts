@@ -13,7 +13,9 @@ import type { JevConfig } from './jev-config.js';
 import { actionCriteria } from './action-descriptions.js';
 import { ProgressiveStubJev } from './progressive-stub.js';
 import type { SupervisorAdvisor } from './supervisor-advisor.js';
+import type { Answer, Question, SystemOneResponse } from './typesafe-client.js';
 import { TypeSafeClient } from './typesafe-client.js';
+import { logJevCall, type JevMethodName } from '../logging/jev-log.js';
 
 const STANCES: Stance[] = ['Balanced', 'Offensive', 'Defensive', 'Agile', 'Dexterous'];
 
@@ -95,11 +97,6 @@ function isStance(value: string): value is Stance {
   return STANCES.includes(value as Stance);
 }
 
-/**
- * HttpJev — real Jev advisor backed by the TypeSafe System One API.
- *
- * On API failure, falls back to StubJev behavior and logs the error.
- */
 function snapshotPayload(snapshot: GameSnapshot, context: AutopilotContext): Record<string, unknown> {
   return {
     context: 'autopilot_supervisor',
@@ -125,6 +122,10 @@ function snapshotPayload(snapshot: GameSnapshot, context: AutopilotContext): Rec
   };
 }
 
+/**
+ * HttpJev — real Jev advisor backed by the TypeSafe System One API.
+ * Appends structured lines to logs/jev.jsonl for every call.
+ */
 export class HttpJev implements SupervisorAdvisor {
   private readonly client: TypeSafeClient;
   private readonly fallback = new ProgressiveStubJev();
@@ -138,43 +139,100 @@ export class HttpJev implements SupervisorAdvisor {
     console.error(`[Jev:Http] ${method} failed, using ProgressiveStubJev fallback: ${message}`);
   }
 
+  private async logLocal(method: JevMethodName, result: unknown): Promise<void> {
+    await logJevCall({
+      method,
+      provider: 'HttpJev',
+      model: this.config.model,
+      result,
+      fallback: false,
+    });
+  }
+
+  private async withApiLog<T>(
+    method: JevMethodName,
+    state: unknown,
+    questions: Record<string, Question>,
+    answerKey: string,
+    parse: (response: SystemOneResponse) => T,
+    fallbackFn: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      const response = await this.client.systemOne(state, questions);
+      const answer: Answer | undefined = response.answers[answerKey];
+      const result = parse(response);
+      await logJevCall({
+        method,
+        provider: 'HttpJev',
+        model: response.model ?? this.config.model,
+        usage: response.usage,
+        answer,
+        answers: response.answers,
+        result,
+        fallback: false,
+      });
+      return result;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const result = await fallbackFn();
+      await logJevCall({
+        method,
+        provider: 'HttpJev',
+        model: this.config.model,
+        result,
+        fallback: true,
+        error: errorMessage,
+      });
+      this.logError(method, error);
+      return result;
+    }
+  }
+
   async chooseNextAction(
     snapshot: GameSnapshot,
     allowed: AutopilotAction[],
     context: AutopilotContext,
   ): Promise<AutopilotAction> {
-    if (allowed.length === 0) return 'idle';
-    if (allowed.length === 1) return allowed[0];
+    if (allowed.length === 0) {
+      await this.logLocal('chooseNextAction', 'idle');
+      return 'idle';
+    }
+    if (allowed.length === 1) {
+      await this.logLocal('chooseNextAction', allowed[0]);
+      return allowed[0];
+    }
 
-    try {
-      const response = await this.client.systemOne(snapshotPayload(snapshot, context), {
+    return this.withApiLog(
+      'chooseNextAction',
+      snapshotPayload(snapshot, context),
+      {
         action: {
           type: 'choice',
           instructions:
             'Choose the single best next action to advance this Idle MMO account (quests, combat XP, skill training, crafting, selling junk). Prefer progress over passive waiting.',
           criteria: actionCriteria(allowed),
         },
-      });
-
-      const answer = response.answers.action;
-      if (!answer || answer.type !== 'choice') {
-        throw new Error('Missing choice answer for action');
-      }
-
-      if (allowed.includes(answer.choice as AutopilotAction)) {
+      },
+      'action',
+      (response) => {
+        const answer = response.answers.action;
+        if (!answer || answer.type !== 'choice') {
+          throw new Error('Missing choice answer for action');
+        }
+        if (!allowed.includes(answer.choice as AutopilotAction)) {
+          throw new Error(`Jev chose disallowed action: ${answer.choice}`);
+        }
         return answer.choice as AutopilotAction;
-      }
-
-      throw new Error(`Jev chose disallowed action: ${answer.choice}`);
-    } catch (error) {
-      this.logError('chooseNextAction', error);
-      return this.fallback.chooseNextAction(snapshot, allowed, context);
-    }
+      },
+      () => this.fallback.chooseNextAction(snapshot, allowed, context),
+    );
   }
 
   async shouldInterruptGather(state: GatherState): Promise<boolean> {
-    try {
-      const response = await this.client.systemOne(gatherPayload(state), {
+    return this.withApiLog(
+      'shouldInterruptGather',
+      gatherPayload(state),
+      {
         interrupt: {
           type: 'noul',
           instructions:
@@ -184,23 +242,24 @@ export class HttpJev implements SupervisorAdvisor {
             false: 'Keep the current gather/craft running; do not replace it',
           },
         },
-      });
-
-      const answer = response.answers.interrupt;
-      if (!answer || answer.type !== 'noul') {
-        throw new Error('Missing noul answer for interrupt');
-      }
-
-      return noulYes(answer, this.config.noulThreshold);
-    } catch (error) {
-      this.logError('shouldInterruptGather', error);
-      return this.fallback.shouldInterruptGather(state);
-    }
+      },
+      'interrupt',
+      (response) => {
+        const answer = response.answers.interrupt;
+        if (!answer || answer.type !== 'noul') {
+          throw new Error('Missing noul answer for interrupt');
+        }
+        return noulYes(answer, this.config.noulThreshold);
+      },
+      () => this.fallback.shouldInterruptGather(state),
+    );
   }
 
   async decideHuntStop(state: HuntState): Promise<boolean> {
-    try {
-      const response = await this.client.systemOne(huntPayload(state), {
+    return this.withApiLog(
+      'decideHuntStop',
+      huntPayload(state),
+      {
         stop: {
           type: 'noul',
           instructions:
@@ -210,71 +269,73 @@ export class HttpJev implements SupervisorAdvisor {
             false: 'Keep hunting to find more enemies before stopping',
           },
         },
-      });
-
-      const answer = response.answers.stop;
-      if (!answer || answer.type !== 'noul') {
-        throw new Error('Missing noul answer for stop');
-      }
-
-      return noulYes(answer, this.config.noulThreshold);
-    } catch (error) {
-      this.logError('decideHuntStop', error);
-      return this.fallback.decideHuntStop(state);
-    }
+      },
+      'stop',
+      (response) => {
+        const answer = response.answers.stop;
+        if (!answer || answer.type !== 'noul') {
+          throw new Error('Missing noul answer for stop');
+        }
+        return noulYes(answer, this.config.noulThreshold);
+      },
+      () => this.fallback.decideHuntStop(state),
+    );
   }
 
   async chooseStance(enemy: EnemyInfo): Promise<Stance> {
-    try {
-      const response = await this.client.systemOne(enemyPayload(enemy), {
+    return this.withApiLog(
+      'chooseStance',
+      enemyPayload(enemy),
+      {
         stance: {
           type: 'choice',
           instructions: `Choose the best combat stance against ${enemy.name}.`,
           criteria: STANCE_CRITERIA,
         },
-      });
-
-      const answer = response.answers.stance;
-      if (!answer || answer.type !== 'choice') {
-        throw new Error('Missing choice answer for stance');
-      }
-
-      if (isStance(answer.choice)) {
+      },
+      'stance',
+      (response) => {
+        const answer = response.answers.stance;
+        if (!answer || answer.type !== 'choice') {
+          throw new Error('Missing choice answer for stance');
+        }
+        if (!isStance(answer.choice)) {
+          throw new Error(`Unknown stance choice: ${answer.choice}`);
+        }
         return answer.choice;
-      }
-
-      throw new Error(`Unknown stance choice: ${answer.choice}`);
-    } catch (error) {
-      this.logError('chooseStance', error);
-      return this.fallback.chooseStance(enemy);
-    }
+      },
+      () => this.fallback.chooseStance(enemy),
+    );
   }
 
   async chooseMaxEnemies(enemy: EnemyInfo): Promise<number> {
-    try {
-      const response = await this.client.systemOne(enemyPayload(enemy), {
+    return this.withApiLog(
+      'chooseMaxEnemies',
+      enemyPayload(enemy),
+      {
         maxEnemies: {
           type: 'score',
           instructions: `How many enemies should the bot fight at once against ${enemy.name}?`,
           criteria: MAX_ENEMIES_CRITERIA,
         },
-      });
-
-      const answer = response.answers.maxEnemies;
-      if (!answer || answer.type !== 'score') {
-        throw new Error('Missing score answer for maxEnemies');
-      }
-
-      return parseMaxEnemies(answer.score);
-    } catch (error) {
-      this.logError('chooseMaxEnemies', error);
-      return this.fallback.chooseMaxEnemies(enemy);
-    }
+      },
+      'maxEnemies',
+      (response) => {
+        const answer = response.answers.maxEnemies;
+        if (!answer || answer.type !== 'score') {
+          throw new Error('Missing score answer for maxEnemies');
+        }
+        return parseMaxEnemies(answer.score);
+      },
+      () => this.fallback.chooseMaxEnemies(enemy),
+    );
   }
 
   async shouldFlee(battleState: BattleState): Promise<boolean> {
-    try {
-      const response = await this.client.systemOne(battlePayload(battleState), {
+    return this.withApiLog(
+      'shouldFlee',
+      battlePayload(battleState),
+      {
         flee: {
           type: 'noul',
           instructions: 'Should the bot run away from this battle to avoid defeat?',
@@ -283,64 +344,62 @@ export class HttpJev implements SupervisorAdvisor {
             false: 'Stay and continue fighting',
           },
         },
-      });
-
-      const answer = response.answers.flee;
-      if (!answer || answer.type !== 'noul') {
-        throw new Error('Missing noul answer for flee');
-      }
-
-      return noulYes(answer, this.config.noulThreshold);
-    } catch (error) {
-      this.logError('shouldFlee', error);
-      return this.fallback.shouldFlee(battleState);
-    }
+      },
+      'flee',
+      (response) => {
+        const answer = response.answers.flee;
+        if (!answer || answer.type !== 'noul') {
+          throw new Error('Missing noul answer for flee');
+        }
+        return noulYes(answer, this.config.noulThreshold);
+      },
+      () => this.fallback.shouldFlee(battleState),
+    );
   }
 
   async pickQuestPriority(quests: QuestInfo[]): Promise<string[]> {
     if (quests.length === 0) return [];
 
-    try {
-      const criteria: Record<string, string> = {
-        keep_gathering: 'Continue gathering/crafting; defer quest work for now',
-      };
-      for (const quest of quests) {
-        const detail = [
-          quest.canTurnIn ? 'ready to turn in' : 'in progress',
-          quest.progress ? `progress: ${quest.progress}` : null,
-        ]
-          .filter(Boolean)
-          .join('; ');
-        criteria[quest.title] = `Work on quest "${quest.title}" (${detail})`;
-      }
+    const criteria: Record<string, string> = {
+      keep_gathering: 'Continue gathering/crafting; defer quest work for now',
+    };
+    for (const quest of quests) {
+      const detail = [
+        quest.canTurnIn ? 'ready to turn in' : 'in progress',
+        quest.progress ? `progress: ${quest.progress}` : null,
+      ]
+        .filter(Boolean)
+        .join('; ');
+      criteria[quest.title] = `Work on quest "${quest.title}" (${detail})`;
+    }
 
-      const response = await this.client.systemOne(questPayload(quests), {
+    return this.withApiLog(
+      'pickQuestPriority',
+      questPayload(quests),
+      {
         priority: {
           type: 'choice',
           instructions: 'Which quest should the bot work on first?',
           criteria,
         },
-      });
-
-      const answer = response.answers.priority;
-      if (!answer || answer.type !== 'choice') {
-        throw new Error('Missing choice answer for priority');
-      }
-
-      if (answer.choice === 'keep_gathering') {
-        return [];
-      }
-
-      const chosen = quests.find((q) => q.title === answer.choice);
-      if (!chosen) {
-        throw new Error(`Unknown quest choice: ${answer.choice}`);
-      }
-
-      const rest = quests.filter((q) => q.title !== chosen.title).map((q) => q.title);
-      return [chosen.title, ...rest];
-    } catch (error) {
-      this.logError('pickQuestPriority', error);
-      return this.fallback.pickQuestPriority(quests);
-    }
+      },
+      'priority',
+      (response) => {
+        const answer = response.answers.priority;
+        if (!answer || answer.type !== 'choice') {
+          throw new Error('Missing choice answer for priority');
+        }
+        if (answer.choice === 'keep_gathering') {
+          return [];
+        }
+        const chosen = quests.find((q) => q.title === answer.choice);
+        if (!chosen) {
+          throw new Error(`Unknown quest choice: ${answer.choice}`);
+        }
+        const rest = quests.filter((q) => q.title !== chosen.title).map((q) => q.title);
+        return [chosen.title, ...rest];
+      },
+      () => this.fallback.pickQuestPriority(quests),
+    );
   }
 }
