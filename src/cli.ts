@@ -28,14 +28,16 @@ import {
   turnInQuestWhenReady,
   buyCheapBait,
 } from './deterministic/index.js';
-import { ConsoleJev, StubJev, type JevAdvisor } from './jev/index.js';
+import { ConsoleJev, HttpJev, StubJev, loadJevConfig, type JevAdvisor } from './jev/index.js';
 import type { HuntState } from './types.js';
 
 const HEARTH_QUEST = 'Wood for the Hearth';
 const OAK_LOG = 'Oak Log';
 
 function createJev(verbose: boolean): JevAdvisor {
-  return verbose ? new ConsoleJev() : new StubJev();
+  const jevConfig = loadJevConfig();
+  const base = jevConfig ? new HttpJev(jevConfig) : new StubJev();
+  return verbose ? new ConsoleJev(base) : base;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -411,7 +413,7 @@ const program = new Command();
 program
   .name('idle-mmo-bot')
   .description('Idle MMO web automation (Playwright + Jev advisor hooks)')
-  .option('-v, --verbose', 'Use ConsoleJev (logs decisions) instead of StubJev', false);
+  .option('-v, --verbose', 'Log every Jev decision (wraps HttpJev or StubJev)', false);
 
 program
   .command('gather')

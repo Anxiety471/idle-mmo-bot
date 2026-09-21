@@ -7,51 +7,57 @@ import type {
   QuestInfo,
   Stance,
 } from '../types.js';
+import { StubJev } from './stub-jev.js';
 
 function log(method: string, detail: string): void {
   console.log(`[Jev:Console] ${method} → ${detail}`);
 }
 
 /**
- * ConsoleJev — logs every decision and returns safe defaults for local testing.
+ * ConsoleJev — logs every decision from an inner advisor (HttpJev or StubJev).
  */
 export class ConsoleJev implements JevAdvisor {
+  constructor(private readonly inner: JevAdvisor = new StubJev()) {}
+
   async shouldInterruptGather(state: GatherState): Promise<boolean> {
-    log('shouldInterruptGather', `busy=${state.busy} → false (safe default)`);
-    return false;
+    const result = await this.inner.shouldInterruptGather(state);
+    log(
+      'shouldInterruptGather',
+      `busy=${state.busy}, elsewhere=${state.busyElsewhere?.skill ?? 'none'} → ${result}`,
+    );
+    return result;
   }
 
   async decideHuntStop(state: HuntState): Promise<boolean> {
-    const stop = (state.totalEnemiesFound ?? 0) >= 1;
+    const result = await this.inner.decideHuntStop(state);
     log(
       'decideHuntStop',
-      `found=${state.totalEnemiesFound ?? 0}, remaining=${state.enemiesRemaining ?? '?'}, cards=${state.enemies.length} → ${stop}`,
+      `found=${state.totalEnemiesFound ?? 0}, remaining=${state.enemiesRemaining ?? '?'}, cards=${state.enemies.length} → ${result}`,
     );
-    return stop;
+    return result;
   }
 
   async chooseStance(enemy: EnemyInfo): Promise<Stance> {
-    log('chooseStance', `enemy="${enemy.name}" → Balanced`);
-    return 'Balanced';
+    const result = await this.inner.chooseStance(enemy);
+    log('chooseStance', `enemy="${enemy.name}" → ${result}`);
+    return result;
   }
 
   async chooseMaxEnemies(enemy: EnemyInfo): Promise<number> {
-    log('chooseMaxEnemies', `enemy="${enemy.name}" → 1`);
-    return 1;
+    const result = await this.inner.chooseMaxEnemies(enemy);
+    log('chooseMaxEnemies', `enemy="${enemy.name}" → ${result}`);
+    return result;
   }
 
   async shouldFlee(battleState: BattleState): Promise<boolean> {
-    const flee = (battleState.playerHpPercent ?? 100) < 20;
-    log('shouldFlee', `hp=${battleState.playerHpPercent ?? '?'}% → ${flee}`);
-    return flee;
+    const result = await this.inner.shouldFlee(battleState);
+    log('shouldFlee', `hp=${battleState.playerHpPercent ?? '?'}% → ${result}`);
+    return result;
   }
 
   async pickQuestPriority(quests: QuestInfo[]): Promise<string[]> {
-    const hearth = quests.find((q) => q.title.includes('Wood for the Hearth'));
-    const ordered = hearth
-      ? [hearth.title, ...quests.filter((q) => q !== hearth).map((q) => q.title)]
-      : quests.map((q) => q.title);
-    log('pickQuestPriority', ordered.join(', '));
-    return ordered;
+    const result = await this.inner.pickQuestPriority(quests);
+    log('pickQuestPriority', result.length > 0 ? result.join(', ') : '(keep gathering)');
+    return result;
   }
 }
