@@ -22,8 +22,8 @@ export class ConsoleJev implements JevAdvisor {
   }
 
   async decideHuntStop(state: HuntState): Promise<boolean> {
-    const stop = state.defeatedCount >= 1;
-    log('decideHuntStop', `defeated=${state.defeatedCount}, enemies=${state.enemies.length} → ${stop}`);
+    const stop = state.enemies.length >= 1;
+    log('decideHuntStop', `enemies=${state.enemies.length}, defeated=${state.defeatedCount} → ${stop}`);
     return stop;
   }
 

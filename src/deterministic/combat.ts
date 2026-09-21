@@ -23,6 +23,14 @@ const ENEMY_CARD_HEIGHT_CLASSES = ['h-24', 'h-20', 'h-28', 'h-32'];
 const ACTION_BUTTON_PATTERN =
   /^(Start Hunt|Stop|Battle|Run Away|Hunt More|Close|Start anyway|Create|Invites|Talk|Overview|Turn In)$/i;
 
+/** Nav/chrome labels that are not enemy cards. */
+const NAV_CHROME_PATTERN =
+  /^(Windy|Search|Map|Party|Skills|Combat|Inventory|Quests|Merchants|Profile|Character|Settings|Menu|Playing|Equipment|Bank|Market|Woodcutting|Mining|Fishing|Alchemy|Smelting|Cooking|Forge|Construction|Meditation|show-map)$/i;
+
+const PURE_NUMERIC_PATTERN = /^\d+$/;
+const PLAYER_PROFILE_PATTERN = /\bTotal\s*Lv\.?\s*\d+/i;
+const ENEMIES_NEARBY_LABEL_PATTERN = /^ENEMIES\s+NEARBY/i;
+
 async function pageText(page: Page): Promise<string> {
   return page.locator('body').innerText();
 }
@@ -77,33 +85,56 @@ async function handleReplaceDialog(
   return 'failed';
 }
 
-/** Collect visible enemy card buttons using layered selectors (legacy h-24 → Lv. text → heuristic). */
-async function collectEnemyCardButtons(page: Page): Promise<Locator[]> {
-  for (const cls of ENEMY_CARD_HEIGHT_CLASSES) {
-    const cards = page.locator(`button.${cls}`);
-    const visible = await filterVisibleEnemyButtons(cards);
-    if (visible.length > 0) return visible;
+function isExcludedEnemyButton(text: string): boolean {
+  const trimmed = text.trim();
+  const firstLine = trimmed.split('\n')[0]?.trim() ?? '';
+  if (!firstLine) return true;
+  if (PURE_NUMERIC_PATTERN.test(firstLine)) return true;
+  if (ACTION_BUTTON_PATTERN.test(firstLine)) return true;
+  if (NAV_CHROME_PATTERN.test(firstLine)) return true;
+  if (ENEMIES_NEARBY_LABEL_PATTERN.test(firstLine)) return true;
+  if (PLAYER_PROFILE_PATTERN.test(trimmed)) return true;
+  if (/^[\d,.\s]+$/.test(firstLine)) return true;
+  return false;
+}
+
+/** Extract creature name from a card; null when chrome/profile/count badge. */
+function extractEnemyName(text: string): string | null {
+  if (isExcludedEnemyButton(text)) return null;
+
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  for (const line of lines) {
+    if (PURE_NUMERIC_PATTERN.test(line)) continue;
+    if (/^Lv\.?\s*\d+/i.test(line)) continue;
+    if (ENEMIES_NEARBY_LABEL_PATTERN.test(line)) continue;
+    if (ACTION_BUTTON_PATTERN.test(line)) continue;
+    if (NAV_CHROME_PATTERN.test(line)) continue;
+    if (PLAYER_PROFILE_PATTERN.test(line)) continue;
+    return line;
   }
 
-  const withLevel = page.getByRole('button').filter({ hasText: /\bLv\.?\s*\d+/i });
-  const levelVisible = await filterVisibleEnemyButtons(withLevel);
-  if (levelVisible.length > 0) return levelVisible;
+  return null;
+}
 
-  // Heuristic: multi-line stat cards on hunt screen (exclude known action buttons).
-  const buttons = page.getByRole('button');
-  const count = await buttons.count();
-  const heuristic: Locator[] = [];
-  for (let i = 0; i < count; i++) {
-    const btn = buttons.nth(i);
-    if (!(await btn.isVisible())) continue;
-    const text = (await btn.innerText()).trim();
-    const firstLine = text.split('\n')[0]?.trim() ?? '';
-    if (!firstLine || ACTION_BUTTON_PATTERN.test(firstLine)) continue;
-    const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
-    if (lines.length < 2 && !/\d/.test(text)) continue;
-    heuristic.push(btn);
+/** Prefer the ENEMIES NEARBY panel; fall back to main content. */
+async function getEnemySearchRoot(page: Page): Promise<Locator> {
+  const label = page.getByText(/ENEMIES\s+NEARBY/i).first();
+  if (await label.count() > 0 && await label.isVisible().catch(() => false)) {
+    const containers = page.locator('section, div, article').filter({
+      has: page.getByText(/ENEMIES\s+NEARBY/i),
+    });
+    const count = await containers.count();
+    for (let i = count - 1; i >= 0; i--) {
+      const container = containers.nth(i);
+      const cardCount = await container.locator('button.h-24, button.h-20, button.h-28').count();
+      if (cardCount > 0) return container;
+    }
+    if (count > 0) return containers.last();
   }
-  return heuristic;
+
+  const main = page.locator('main');
+  if (await main.count() > 0) return main.first();
+  return page.locator('body');
 }
 
 async function filterVisibleEnemyButtons(locator: Locator): Promise<Locator[]> {
@@ -112,19 +143,64 @@ async function filterVisibleEnemyButtons(locator: Locator): Promise<Locator[]> {
   for (let i = 0; i < count; i++) {
     const btn = locator.nth(i);
     if (!(await btn.isVisible())) continue;
-    const firstLine = (await btn.innerText()).trim().split('\n')[0]?.trim() ?? '';
-    if (firstLine && ACTION_BUTTON_PATTERN.test(firstLine)) continue;
+    const text = (await btn.innerText()).trim();
+    if (isExcludedEnemyButton(text)) continue;
+    if (!extractEnemyName(text)) continue;
     visible.push(btn);
   }
   return visible;
+}
+
+async function collectCardsInScope(scope: Locator): Promise<Locator[]> {
+  for (const cls of ENEMY_CARD_HEIGHT_CLASSES) {
+    const cards = scope.locator(`button.${cls}`);
+    const visible = await filterVisibleEnemyButtons(cards);
+    if (visible.length > 0) return visible;
+  }
+
+  const withLevel = scope.getByRole('button').filter({ hasText: /\bLv\.?\s*\d+/i });
+  const levelVisible = await filterVisibleEnemyButtons(withLevel);
+  if (levelVisible.length > 0) return levelVisible;
+
+  const buttons = scope.getByRole('button');
+  const count = await buttons.count();
+  const heuristic: Locator[] = [];
+  for (let i = 0; i < count; i++) {
+    const btn = buttons.nth(i);
+    if (!(await btn.isVisible())) continue;
+    const text = (await btn.innerText()).trim();
+    if (isExcludedEnemyButton(text)) continue;
+    const name = extractEnemyName(text);
+    if (!name) continue;
+    const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+    if (lines.length < 2 && !/\bLv\.?\s*\d+/i.test(text)) continue;
+    heuristic.push(btn);
+  }
+  return heuristic;
+}
+
+/** Collect visible enemy card buttons; scoped to ENEMIES NEARBY when present. */
+async function collectEnemyCardButtons(page: Page): Promise<Locator[]> {
+  const root = await getEnemySearchRoot(page);
+  const scoped = await collectCardsInScope(root);
+  if (scoped.length > 0) return scoped;
+
+  const main = page.locator('main');
+  if (await main.count() > 0) {
+    const fromMain = await collectCardsInScope(main.first());
+    if (fromMain.length > 0) return fromMain;
+  }
+
+  return [];
 }
 
 async function enemyInfosFromButtons(buttons: Locator[]): Promise<EnemyInfo[]> {
   const enemies: EnemyInfo[] = [];
   for (let i = 0; i < buttons.length; i++) {
     const text = (await buttons[i].innerText()).trim();
-    const name = text.split('\n')[0]?.trim() ?? `Enemy ${i}`;
-    enemies.push({ name, index: i });
+    const name = extractEnemyName(text);
+    if (!name) continue;
+    enemies.push({ name, index: enemies.length });
   }
   return enemies;
 }
