@@ -49,6 +49,8 @@ export interface PlaybookProgress {
   counts: PlaybookCounts;
   /** True after a successful Cheap Bait purchase (inventory scrape is often empty/icon-only). */
   baitOwned: boolean;
+  /** ISO time of last successful buy_bait; used for repurchase cooldown. */
+  lastBaitPurchaseAt?: string;
   targets: {
     coalMin: number;
     coalMax: number;
@@ -67,7 +69,10 @@ interface PersistedPlaybook {
   version: 1;
   stage: EarlyStageId;
   counts: PlaybookCounts;
-  /** Sticky trust that bait was purchased; cleared only on fishing missing_requirement. */
+  /**
+   * Sticky trust that bait was purchased.
+   * NEVER cleared on fish_cod missing_requirement/failed — those are UI/start failures.
+   */
   baitOwned?: boolean;
   lastBaitPurchaseAt?: string;
   completedAt?: string;
@@ -97,6 +102,8 @@ const COAL_BUSY_TARGET = 90;
 const COD_BUSY_TARGET = 90;
 /** Grace window after restartSkillGather before re-injecting interrupt gathers. */
 export const GATHER_GRACE_MS = 30_000;
+/** After buy_bait success, refuse another purchase for this long (or until stage advances). */
+export const BAIT_PURCHASE_COOLDOWN_MS = 15 * 60_000;
 
 /** Resolved at call time so AUTOPILOT_LOG_DIR is honored after env load. */
 export function resolvePlaybookStatePath(): string {
@@ -202,6 +209,15 @@ function trustHasBait(snapshot: GameSnapshot, baitOwned: boolean, stage: EarlySt
   if (idx > STAGE_ORDER.indexOf('buy_bait')) return true;
   return false;
 }
+
+
+/** True when a successful buy_bait is still within the repurchase cooldown window. */
+function recentBaitPurchase(lastBaitPurchaseAt: string | undefined): boolean {
+  if (!lastBaitPurchaseAt) return false;
+  const elapsed = Date.now() - new Date(lastBaitPurchaseAt).getTime();
+  return Number.isFinite(elapsed) && elapsed >= 0 && elapsed < BAIT_PURCHASE_COOLDOWN_MS;
+}
+
 
 function syncCountsFromSnapshot(
   counts: PlaybookCounts,
@@ -335,10 +351,13 @@ function stageMeta(stage: EarlyStageId, baitOwned = false): {
     case 'buy_bait':
       return {
         goal: 'Buy Cheap Bait at Melriel General Goods (gold only)',
-        preferred: ['buy_bait'],
-        deprioritized: ['gather_oak', 'gather_yew', 'mine_coal'],
-        interrupt: ['buy_bait'],
-        hint: 'EARLY PLAYBOOK stage buy_bait: buy Cheap Bait with gold only (Purchase for N). No tokens/membership.',
+        // If bait is already trusted (sticky), never prefer/interrupt into buy_bait.
+        preferred: baitOwned ? ['fish_cod', 'continue_current'] : ['buy_bait'],
+        deprioritized: ['gather_oak', 'gather_yew', 'mine_coal', ...(baitOwned ? (['buy_bait'] as AutopilotAction[]) : [])],
+        interrupt: baitOwned ? ['fish_cod'] : ['buy_bait'],
+        hint: baitOwned
+          ? 'EARLY PLAYBOOK stage buy_bait but baitOwned=true — skip repurchase; fish Cod instead.'
+          : 'EARLY PLAYBOOK stage buy_bait: buy Cheap Bait with gold only (Purchase for N). No tokens/membership.',
       };
     case 'fish_cod':
       return {
@@ -493,6 +512,7 @@ export function evaluatePlaybook(
     interruptActions: meta.interrupt,
     counts,
     baitOwned,
+    lastBaitPurchaseAt: persisted.lastBaitPurchaseAt,
     targets: { coalMin: COAL_MIN, coalMax: COAL_MAX, codMin: COD_MIN, codMax: COD_MAX },
     curriculumHint: meta.hint,
     complete,
@@ -534,13 +554,23 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
       stage = 'fish_cod';
     }
   }
-  if (action === 'fish_cod' && /missing_requirement/i.test(outcome)) {
-    baitOwned = false;
-    lastGatherRestartAt = undefined;
-    lastGatherSkill = undefined;
-    lastGatherResource = undefined;
+  if (action === 'fish_cod' && /missing_requirement|fishing_start_failed/i.test(outcome)) {
+    // Do NOT clear baitOwned or retreat to buy_bait. Inventory scrape / Start UI / captcha
+    // often false-flags missing bait while Cheap Bait is already owned.
+    if (baitOwned || STAGE_ORDER.indexOf(stage) > STAGE_ORDER.indexOf('buy_bait')) {
+      console.warn(
+        '[playbook] fish_cod missing_requirement with bait trusted — treating as fishing-start failure ' +
+          '(UI/captcha/Start/quantity), NOT missing bait. baitOwned stays true.',
+      );
+    } else {
+      console.warn(
+        '[playbook] fish_cod missing_requirement before bait trust — staying on current stage; ' +
+          'will not auto-retreat to buy_bait from this signal alone.',
+      );
+    }
+    // Keep stage on fish_cod when we were fishing; leave gather grace alone so retries can settle.
     if (STAGE_ORDER.indexOf(stage) >= STAGE_ORDER.indexOf('fish_cod')) {
-      stage = 'buy_bait';
+      stage = 'fish_cod';
     }
   }
   if (action === 'fish_cod' && /restarted|already_busy/i.test(outcome)) {
@@ -587,9 +617,11 @@ export function filterAllowedByPlaybook(
 
   let next = allowed.filter((a) => !playbook.deprioritizedActions.includes(a));
 
-  // Stop endless buy_bait once bait is trusted or stage is already fishing/cooking.
+  // NEVER allow buy_bait when bait is trusted, stage is past buy_bait, or purchase cooldown active —
+  // even if stage was incorrectly reset to buy_bait or inventory scrape is empty.
   const pastBuyBait = STAGE_ORDER.indexOf(playbook.stage) > STAGE_ORDER.indexOf('buy_bait');
-  if ((baitTrusted || pastBuyBait) && playbook.stage !== 'buy_bait') {
+  const baitCooldown = recentBaitPurchase(playbook.lastBaitPurchaseAt);
+  if (baitTrusted || pastBuyBait || baitCooldown || playbook.baitOwned) {
     next = next.filter((a) => a !== 'buy_bait');
   }
 
@@ -617,6 +649,12 @@ export function filterAllowedByPlaybook(
         playbook.gatherGraceActive &&
         playbook.stage === 'fish_cod' &&
         id === 'fish_cod'
+      ) {
+        continue;
+      }
+      if (
+        id === 'buy_bait' &&
+        (baitTrusted || pastBuyBait || baitCooldown || playbook.baitOwned)
       ) {
         continue;
       }

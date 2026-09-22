@@ -208,10 +208,25 @@ function gatherAction(
         allowInterrupt: ctx.forceInterrupt || allowInterrupt,
         knownState: skillState,
       });
-      const backoffMs = /restarted|already_busy/i.test(result) ? ctx.config.pollMs * 2 : undefined;
+      let outcome: string = result;
+      // fish_cod missing_requirement is often a false bait signal (Start/UI/captcha) when bait is trusted.
+      if (
+        id === 'fish_cod' &&
+        result === 'missing_requirement' &&
+        (Boolean(playbook?.baitOwned) ||
+          ctx.snapshot.flags.hasBait ||
+          (playbook?.enabled === true && playbook.stage === 'fish_cod'))
+      ) {
+        console.warn(
+          '[fish_cod] missing_requirement while bait trusted — treating as fishing_start_failed ' +
+            '(UI/captcha/Start/quantity), NOT missing bait',
+        );
+        outcome = 'fishing_start_failed';
+      }
+      const backoffMs = /restarted|already_busy/i.test(outcome) ? ctx.config.pollMs * 2 : undefined;
       return {
         action: id,
-        outcome: result,
+        outcome,
         ...(backoffMs !== undefined ? { backoffMs } : {}),
       };
     },
@@ -317,7 +332,7 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
       const playbook = getPlaybookFromSnapshot(ctx.snapshot);
       const playbookWantsBait =
         Boolean(playbook?.enabled && !playbook.complete && playbook.stage === 'buy_bait');
-      // Never repurchase while playbook trusts bait or has already moved to fish/cook stages.
+      // Never repurchase while playbook trusts bait, stage past buy_bait, or purchase cooldown active.
       const baitTrusted =
         ctx.snapshot.flags.hasBait ||
         Boolean(playbook?.baitOwned) ||
@@ -326,9 +341,15 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
           playbook.stage !== 'buy_bait' &&
           playbook.stage !== 'mine_coal' &&
           playbook.stage !== 'sell_half');
+      let baitCooldown = false;
+      if (playbook?.lastBaitPurchaseAt) {
+        const elapsed = Date.now() - new Date(playbook.lastBaitPurchaseAt).getTime();
+        baitCooldown = Number.isFinite(elapsed) && elapsed >= 0 && elapsed < 15 * 60_000;
+      }
       return (
         ctx.snapshot.flags.sessionValid &&
         !baitTrusted &&
+        !baitCooldown &&
         (ctx.snapshot.gold ?? 0) >= 2 &&
         (ctx.config.buyBait || hasKillQuest(ctx) || combatLagging || playbookWantsBait)
       );

@@ -9,3 +9,6 @@ playwright-report/
 test-results/
 
 logs/
+
+storage-state-hitoriidle.json
+logs-hitoriidle/

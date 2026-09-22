@@ -352,14 +352,17 @@ async function checkStartReadiness(page: Page, skill: SkillConfig): Promise<Star
 
   const startButton = page.getByRole('button', { name: 'Start', exact: true });
   if (await startButton.count() === 0) {
-    if (skill.requiresBait && !canPerform) {
+    // No Start without explicit bait-missing copy → UI/panel failure, not missing bait.
+    if (skill.requiresBait && !canPerform && detectMissingBait(pageText)) {
       return 'missing_requirement';
     }
     return 'failed';
   }
 
   if (await startButton.first().isDisabled()) {
-    if (skill.requiresBait) {
+    // Disabled Start: only treat as missing bait when the page explicitly says so
+    // (or can-perform is absent AND bait-missing copy is present). Otherwise UI glitch.
+    if (skill.requiresBait && detectMissingBait(pageText)) {
       return 'missing_requirement';
     }
     return 'failed';

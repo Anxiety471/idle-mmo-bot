@@ -120,6 +120,7 @@ export class ProgressiveStubJev implements SupervisorAdvisor {
         !snapshot.flags.hasBait &&
         !(playbook?.baitOwned) &&
         playbook?.stage !== 'fish_cod' &&
+        playbook?.stage === 'buy_bait' &&
         (snapshot.gold ?? 0) >= 2
       ) {
         return def.id;
