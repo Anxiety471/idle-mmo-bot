@@ -296,10 +296,24 @@ function trustHasBait(snapshot: GameSnapshot, baitOwned: boolean, stage: EarlySt
 
 
 /** True when a successful buy_bait is still within the repurchase cooldown window. */
-function recentBaitPurchase(lastBaitPurchaseAt: string | undefined): boolean {
+export function recentBaitPurchase(lastBaitPurchaseAt: string | undefined): boolean {
   if (!lastBaitPurchaseAt) return false;
   const elapsed = Date.now() - new Date(lastBaitPurchaseAt).getTime();
   return Number.isFinite(elapsed) && elapsed >= 0 && elapsed < BAIT_PURCHASE_COOLDOWN_MS;
+}
+
+/**
+ * Prefer bait restock on fish_cod when scrape shows <15 Cheap Bait/Bait.
+ * After a successful buy_bait, trust purchased stock until cooldown expires even if scrape undercounts.
+ */
+export function shouldPreferBaitRestock(
+  stage: EarlyStageId | string | undefined,
+  baitStock: number,
+  lastBaitPurchaseAt: string | undefined,
+): boolean {
+  if (stage !== 'fish_cod') return false;
+  if (recentBaitPurchase(lastBaitPurchaseAt)) return false;
+  return baitStock < 15;
 }
 
 
@@ -681,7 +695,12 @@ export function evaluatePlaybook(
 
   const baitStock =
     (snapshot.inventory['Cheap Bait'] ?? 0) + (snapshot.inventory['Bait'] ?? 0);
-  const needsBaitRestockNow = stage === 'fish_cod' && baitStock < 15;
+  // Trust recent purchase during cooldown — scrape often undercounts after buy_bait.
+  const needsBaitRestockNow = shouldPreferBaitRestock(
+    stage,
+    baitStock,
+    persisted.lastBaitPurchaseAt,
+  );
   if (needsBaitRestockNow) {
     preferredActions = [
       'buy_bait',
@@ -712,8 +731,11 @@ export function evaluatePlaybook(
     }
   }
 
+  const baitPurchaseRecent = recentBaitPurchase(persisted.lastBaitPurchaseAt);
   let curriculumHint = needsBaitRestockNow
     ? `EARLY PLAYBOOK fish_cod needs bait restock (Cheap Bait=${baitStock} < 15) — choose buy_bait before fish_cod.`
+    : baitPurchaseRecent && stage === 'fish_cod' && baitStock < 15
+      ? `EARLY PLAYBOOK fish_cod: scrape Cheap Bait=${baitStock} < 15 but recent buy_bait still in cooldown — trust purchased stock; do NOT repurchase.`
     : backoffActive
       ? `EARLY PLAYBOOK fish_cod backoff (${fishBackoff.failures} failures) until ${fishBackoff.until ?? 'cooldown'} — ` +
         `prefer ${FISH_COD_BACKOFF_FALLBACKS.join('/')} instead of hammering fish_cod. baitOwned stays true.`
@@ -900,12 +922,18 @@ export function filterAllowedByPlaybook(
 
   // NEVER allow buy_bait when bait is trusted, stage is past buy_bait, or purchase cooldown active —
   // even if stage was incorrectly reset to buy_bait or inventory scrape is empty.
-  // Exception: fish_cod with low Cheap Bait stock needs restock for the 100-fish batch.
+  // Exception: fish_cod with low Cheap Bait stock needs restock for the 100-fish batch,
+  // but only after purchase cooldown expires (scrape often undercounts right after buy_bait).
   const baitCount =
     (snapshot.inventory['Cheap Bait'] ?? 0) + (snapshot.inventory['Bait'] ?? 0);
-  const needsBaitRestock = playbook.stage === 'fish_cod' && baitCount < 15;
-  const pastBuyBait = STAGE_ORDER.indexOf(playbook.stage) > STAGE_ORDER.indexOf('buy_bait');
   const baitCooldown = recentBaitPurchase(playbook.lastBaitPurchaseAt);
+  // Scrape <15 alone must not force restock while purchase cooldown is active.
+  const needsBaitRestock = shouldPreferBaitRestock(
+    playbook.stage,
+    baitCount,
+    playbook.lastBaitPurchaseAt,
+  );
+  const pastBuyBait = STAGE_ORDER.indexOf(playbook.stage) > STAGE_ORDER.indexOf('buy_bait');
   if (!needsBaitRestock && (baitTrusted || pastBuyBait || baitCooldown || playbook.baitOwned)) {
     next = next.filter((a) => a !== 'buy_bait');
   } else if (needsBaitRestock) {
