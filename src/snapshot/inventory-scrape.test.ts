@@ -80,6 +80,11 @@ Sell to Vendor`;
 });
 
 describe('sanitizeInventoryCounts', () => {
+  it('returns an empty map for null scrape results', () => {
+    assert.deepEqual(sanitizeInventoryCounts(null), {});
+    assert.deepEqual(sanitizeInventoryCounts(undefined), {});
+  });
+
   it('drops Code of Conduct false positives and huge Cod stacks', () => {
     const counts = sanitizeInventoryCounts({
       Cod: 500,
@@ -98,6 +103,10 @@ describe('sanitizeInventoryCounts', () => {
 });
 
 describe('buildInventoryMap', () => {
+  it('returns an empty map when text and DOM inventory are null', () => {
+    assert.deepEqual(buildInventoryMap(null, null), {});
+  });
+
   it('merges text and DOM counts for common early-game items', () => {
     const text = 'Inventory\nSort by';
     const dom = {
@@ -113,6 +122,10 @@ describe('buildInventoryMap', () => {
 });
 
 describe('detectHasBait', () => {
+  it('treats null inventory as empty', () => {
+    assert.equal(detectHasBait(null, null), false);
+  });
+
   it('detects bait from inventory map or visible text', () => {
     assert.equal(detectHasBait({ 'Cheap Bait': 3 }, ''), true);
     assert.equal(detectHasBait({}, 'You have Cheap Bait'), true);
