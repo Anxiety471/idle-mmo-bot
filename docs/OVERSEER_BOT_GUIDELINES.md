@@ -347,6 +347,8 @@ When `EARLY_PLAYBOOK` is enabled (default), `evaluatePlaybook()` advances throug
 
 Quest flow still runs when allowed: `quest_turnin` → `quest_talk_accept` alongside playbook stages.
 
+**Pending accept (Hearth 150/150):** `quest_talk_accept` ranks pending cards by progress-met first (e.g. Wood for the Hearth 150/150 beats Goblin Menace), opens the card, waits for detail, then tries **Accept** / **Talk** plus known Hearth dialogue. Easy-complete pending quests interrupt busy gather (replace dialog → Start anyway) so `/quests` is reachable; playbook/Jev drop `continue_current` while that accept is allowed. If Talk enables Turn In, the same execute path or next `quest_turnin` tick finishes the quest.
+
 ProgressiveStubJev respects playbook hints when no API token. HttpJev receives `curriculumHint` and playbook metadata in the snapshot.
 
 ---

@@ -12,6 +12,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getLogDir } from '../logging/jsonl-writer.js';
+import { hasEasyCompletePendingQuest } from '../deterministic/quest-accept.js';
 import type { AutopilotAction, AutopilotContext, GameSnapshot } from '../types.js';
 
 export type EarlyStageId =
@@ -711,6 +712,18 @@ export function filterAllowedByPlaybook(
   const baitCooldown = recentBaitPurchase(playbook.lastBaitPurchaseAt);
   if (baitTrusted || pastBuyBait || baitCooldown || playbook.baitOwned) {
     next = next.filter((a) => a !== 'buy_bait');
+  }
+
+  // Easy-complete pending quests (e.g. Hearth 150/150) should win over continue_current.
+  if (
+    busy &&
+    allowed.includes('quest_talk_accept') &&
+    hasEasyCompletePendingQuest(snapshot.pendingQuests)
+  ) {
+    next = next.filter((a) => a !== 'continue_current');
+    if (!next.includes('quest_talk_accept')) {
+      next.push('quest_talk_accept');
+    }
   }
 
   // While on a mismatched gather, drop continue_current so Jev can pick the stage action.

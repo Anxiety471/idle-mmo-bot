@@ -45,7 +45,7 @@ export async function waitForQuestTabsSettled(page: Page, timeoutMs = QUEST_UI_S
 }
 
 /** Wait for a quest card button (substring name match) to appear in the current list. */
-async function waitForQuestCard(
+export async function waitForQuestCard(
   page: Page,
   title: string,
   timeoutMs = QUEST_UI_SETTLE_MS,
@@ -203,34 +203,100 @@ export async function turnInQuestWhenReady(
   return { result: 'in_progress', progress };
 }
 
+/** Wait for quest detail controls after opening a card. */
+export async function waitForQuestDetail(
+  page: Page,
+  timeoutMs = QUEST_UI_SETTLE_MS,
+): Promise<boolean> {
+  const detail = page
+    .getByRole('button', { name: 'Talk', exact: true })
+    .or(page.getByRole('button', { name: 'Accept', exact: true }))
+    .or(page.getByRole('button', { name: 'Overview', exact: true }));
+
+  try {
+    await detail.first().waitFor({ state: 'visible', timeout: timeoutMs });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Navigate to /quests and confirm replacing an active gather when needed. */
+export async function navigateToQuestsInterrupting(
+  page: Page,
+  config: AppConfig,
+): Promise<'ok' | 'blocked'> {
+  await navigateTo(page, config, QUESTS_PATH);
+
+  const dialog = page.getByText('Start a new action?');
+  if (!(await dialog.isVisible({ timeout: 2000 }).catch(() => false))) {
+    return 'ok';
+  }
+
+  const startAnyway = page.getByRole('button', { name: 'Start anyway', exact: true });
+  if (await startAnyway.count() > 0) {
+    await startAnyway.click();
+    return 'ok';
+  }
+
+  const closeButton = page.getByRole('button', { name: 'Close', exact: true });
+  if (await closeButton.count() > 0) {
+    await closeButton.click();
+    return 'blocked';
+  }
+
+  return 'blocked';
+}
+
+const KNOWN_ACCEPT_DIALOGUES = [
+  "Right. I'll fetch the logs.",
+  "I'll help with the hearth.",
+] as const;
+
+async function clickDialogueLine(page: Page, line: string): Promise<boolean> {
+  const option = page
+    .getByRole('button', { name: line, exact: true })
+    .or(page.getByText(line, { exact: true }));
+  if (await option.count() === 0) return false;
+  await option.first().click();
+  return true;
+}
+
 /** Click Talk and select a dialogue option if a picker is shown. */
 export async function talkQuest(
   page: Page,
   dialogueOption?: string,
 ): Promise<QuestStepResult> {
+  const acceptBtn = page.getByRole('button', { name: 'Accept', exact: true });
+  if (await acceptBtn.count() > 0 && !(await acceptBtn.first().isDisabled())) {
+    await acceptBtn.click();
+    return 'talked';
+  }
+
   const talkBtn = page.getByRole('button', { name: 'Talk', exact: true });
   if (await talkBtn.count() === 0) {
     return 'no_action';
   }
   await talkBtn.click();
+  await page.waitForTimeout(TAB_SWITCH_SETTLE_MS);
 
-  if (dialogueOption) {
-    const option = page.getByRole('button', { name: dialogueOption, exact: true })
-      .or(page.getByText(dialogueOption, { exact: true }));
-    if (await option.count() > 0) {
-      await option.first().click();
+  const dialogueLines = [
+    ...(dialogueOption ? [dialogueOption] : []),
+    ...KNOWN_ACCEPT_DIALOGUES.filter((line) => line !== dialogueOption),
+  ];
+
+  for (const line of dialogueLines) {
+    if (await clickDialogueLine(page, line)) {
       return 'talked';
     }
   }
 
-  // Default dialogue for Wood for the Hearth
-  const defaultLine = page.getByText("Right. I'll fetch the logs.", { exact: true });
-  if (await defaultLine.count() > 0) {
-    await defaultLine.click();
+  const talkStillVisible = await page.getByRole('button', { name: 'Talk', exact: true }).count();
+  if (talkStillVisible === 0) {
     return 'talked';
   }
 
-  return 'talked';
+  return 'no_action';
 }
 
 /** Click Turn In only when the button is enabled. */

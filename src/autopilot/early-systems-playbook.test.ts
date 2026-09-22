@@ -117,6 +117,34 @@ describe('gather grace', () => {
     }
   });
 
+  it('filterAllowedByPlaybook drops continue_current for easy-complete pending accept', () => {
+    const playbook = fishCodPlaybook();
+    const snapshot = minimalSnapshot({
+      flags: {
+        hasBait: true,
+        bankNearby: false,
+        gatherBusy: true,
+        inBattle: false,
+        sessionValid: true,
+      },
+      currentAction: { busy: true, skill: 'woodcutting', resource: 'Oak Log' },
+      pendingQuests: [
+        {
+          title: 'Wood for the Hearth',
+          progress: '150 / 150',
+          canTurnIn: false,
+          tab: 'pending',
+        },
+      ],
+    });
+    const allowed: string[] = ['continue_current', 'quest_talk_accept', 'fish_cod', 'idle'];
+
+    const filtered = filterAllowedByPlaybook(allowed, snapshot, playbook);
+
+    assert.ok(filtered.includes('quest_talk_accept'));
+    assert.ok(!filtered.includes('continue_current'));
+  });
+
   it('filterAllowedByPlaybook skips fish_cod re-injection during grace', () => {
     const playbook = fishCodPlaybook();
     const snapshot = minimalSnapshot();
