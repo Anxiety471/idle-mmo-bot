@@ -22,14 +22,19 @@ export const KNOWN_INV_ITEMS = [
 export const ITEM_SLUG_MAP: Record<string, string> = {
   'oak-log': 'Oak Log',
   oak_log: 'Oak Log',
+  oak: 'Oak Log',
   'coal-ore': 'Coal Ore',
   coal_ore: 'Coal Ore',
+  // IdleMMO CDN meta decodes to coal.png (not coal-ore.png).
+  coal: 'Coal Ore',
   'cheap-bait': 'Cheap Bait',
   cheap_bait: 'Cheap Bait',
+  bait: 'Cheap Bait',
   'raw-cod': 'Raw Cod',
   raw_cod: 'Raw Cod',
   'cooked-cod': 'Cooked Cod',
   cooked_cod: 'Cooked Cod',
+  'cooked cod': 'Cooked Cod',
   'burnt-cod': 'Burnt Cod',
   burnt_cod: 'Burnt Cod',
   'cooked-salmon': 'Cooked Salmon',
@@ -40,8 +45,8 @@ export const ITEM_SLUG_MAP: Record<string, string> = {
   cooked_tuna: 'Cooked Tuna',
   'yew-log': 'Yew Log',
   yew_log: 'Yew Log',
+  yew: 'Yew Log',
   cod: 'Cod',
-  coal: 'Coal',
   salmon: 'Salmon',
   tuna: 'Tuna',
 };
@@ -50,14 +55,37 @@ const CHROME_ITEM_DENY = /code of conduct|cookies|credits|monetisation/i;
 const SLOT_SKIP_LABEL =
   /^(empty|sort|filter|sell|vendor|bank|market|quest|profile|combat|close|cancel|confirm|yes|no|ok)$/i;
 
-/** Parse stack counts like `25`, `1.2K`, `1,234`. */
+/**
+ * Parse stack counts like `25`, `1.2K`, `1,234`.
+ * Also accepts compound badge text such as `6.1K 1` (qty + quality pip) by
+ * taking the first quantity-like token.
+ */
 export function parseQuantityString(raw: string | null | undefined): number {
   if (!raw) return 0;
   const t = String(raw).trim().replace(/,/g, '');
-  const mk = t.match(/^(\d+(?:\.\d+)?)[kK]$/);
+  const token = t.match(/(\d+(?:\.\d+)?[kK]?)/);
+  if (!token) return 0;
+  const piece = token[1];
+  const mk = piece.match(/^(\d+(?:\.\d+)?)[kK]$/);
   if (mk) return Math.round(Number.parseFloat(mk[1]) * 1000);
-  const m = t.match(/^(\d+)$/);
+  const m = piece.match(/^(\d+)$/);
   return m ? Number.parseInt(m[1], 10) : 0;
+}
+
+/**
+ * IdleMMO CDN skins embed the real filename as base64 after `meta`, e.g.
+ * `…-metaY29hbC5wbmc=-.png` → `coal.png`.
+ */
+export function decodeIdleMmoMetaSlug(src: string): string | undefined {
+  const m = String(src).match(/meta([A-Za-z0-9+/]+=*)/i);
+  if (!m?.[1]) return undefined;
+  try {
+    const decoded = Buffer.from(m[1], 'base64').toString('utf8').trim().toLowerCase();
+    if (!decoded) return undefined;
+    return decoded.replace(/\.[\w]+$/i, '').replace(/[_\s]+/g, ' ').trim();
+  } catch {
+    return undefined;
+  }
 }
 
 /** Match a scraped label to a known inventory item. */
@@ -77,17 +105,33 @@ export function matchKnownItem(
   return undefined;
 }
 
-/** Infer item name from an image URL path segment. */
+/** Resolve a bare slug / decoded meta name through ITEM_SLUG_MAP. */
+function itemNameFromSlug(slug: string): string | undefined {
+  const key = slug.trim().toLowerCase();
+  if (!key) return undefined;
+  if (ITEM_SLUG_MAP[key]) return ITEM_SLUG_MAP[key];
+  const underscored = key.replace(/\s+/g, '_');
+  if (ITEM_SLUG_MAP[underscored]) return ITEM_SLUG_MAP[underscored];
+  const hyphenated = key.replace(/\s+/g, '-');
+  if (ITEM_SLUG_MAP[hyphenated]) return ITEM_SLUG_MAP[hyphenated];
+  for (const [mapSlug, name] of Object.entries(ITEM_SLUG_MAP)) {
+    if (mapSlug.length <= 3) continue;
+    if (key.includes(mapSlug)) return name;
+  }
+  if (key === 'cod') return 'Cod';
+  return undefined;
+}
+
+/** Infer item name from an image URL path segment (incl. IdleMMO meta base64 skins). */
 export function itemNameFromImageSrc(src: string): string | undefined {
+  const meta = decodeIdleMmoMetaSlug(src);
+  if (meta) {
+    const fromMeta = itemNameFromSlug(meta);
+    if (fromMeta) return fromMeta;
+  }
   const filename = src.split('/').pop()?.replace(/\.\w+$/i, '').toLowerCase() ?? '';
   if (!filename) return undefined;
-  if (ITEM_SLUG_MAP[filename]) return ITEM_SLUG_MAP[filename];
-  for (const [slug, name] of Object.entries(ITEM_SLUG_MAP)) {
-    if (slug.length <= 3) continue;
-    if (filename.includes(slug)) return name;
-  }
-  if (filename === 'cod') return 'Cod';
-  return undefined;
+  return itemNameFromSlug(filename);
 }
 
 /** Regex parse of visible inventory text (`Item x 25`, line-ending counts). */
@@ -206,9 +250,12 @@ export const INVENTORY_DOM_STATIC_SCRIPT = String.raw`([known, slugMap]) => {
   const parseQty = (raw) => {
     if (!raw) return 0;
     const t = String(raw).trim().replace(/,/g, '');
-    const mk = t.match(/^(\d+(?:\.\d+)?)[kK]$/);
+    const token = t.match(/(\d+(?:\.\d+)?[kK]?)/);
+    if (!token) return 0;
+    const piece = token[1];
+    const mk = piece.match(/^(\d+(?:\.\d+)?)[kK]$/);
     if (mk) return Math.round(Number.parseFloat(mk[1]) * 1000);
-    const m = t.match(/^(\d+)$/);
+    const m = piece.match(/^(\d+)$/);
     return m ? Number.parseInt(m[1], 10) : 0;
   };
   const matchKnown = (label) => {
@@ -224,15 +271,33 @@ export const INVENTORY_DOM_STATIC_SCRIPT = String.raw`([known, slugMap]) => {
     return null;
   };
   const itemFromSrc = (src) => {
+    const resolve = (key) => {
+      const k = String(key || '').trim().toLowerCase();
+      if (!k) return null;
+      if (slugMap[k]) return slugMap[k];
+      const underscored = k.replace(/\s+/g, '_');
+      if (slugMap[underscored]) return slugMap[underscored];
+      const hyphenated = k.replace(/\s+/g, '-');
+      if (slugMap[hyphenated]) return slugMap[hyphenated];
+      for (const [slug, name] of Object.entries(slugMap)) {
+        if (String(slug).length <= 3) continue;
+        if (k.includes(slug)) return name;
+      }
+      if (k === 'cod') return 'Cod';
+      return null;
+    };
+    // IdleMMO CDN: …-meta<base64(filename)>=-.png → coal.png / oak.png / …
+    const meta = String(src || '').match(/meta([A-Za-z0-9+/]+=*)/i);
+    if (meta && meta[1]) {
+      try {
+        const decoded = atob(meta[1]).trim().toLowerCase().replace(/\.\w+$/i, '').replace(/[_\s]+/g, ' ').trim();
+        const fromMeta = resolve(decoded);
+        if (fromMeta) return fromMeta;
+      } catch (_) {}
+    }
     const filename = String(src || '').split('/').pop().replace(/\.\w+$/i, '').toLowerCase();
     if (!filename) return null;
-    if (slugMap[filename]) return slugMap[filename];
-    for (const [slug, name] of Object.entries(slugMap)) {
-      if (slug.length <= 3) continue;
-      if (filename.includes(slug)) return name;
-    }
-    if (filename === 'cod') return 'Cod';
-    return null;
+    return resolve(filename);
   };
   const qtyNear = (el) => {
     const root = el.closest('button, [role="button"], a, li, div') || el.parentElement;

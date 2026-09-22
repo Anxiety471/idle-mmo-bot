@@ -350,7 +350,13 @@ function syncCountsFromSnapshot(
   const coal = invCount(snapshot, ['Coal Ore', 'Coal']);
   const rawCod = invCount(snapshot, ['Cod', 'Raw Cod']);
   const cooked = invCount(snapshot, ['Cooked Cod']);
+  // CURRENT ACTION "+N" is a live floor while icon inventory under-reports.
+  const produced =
+    /coal/i.test(snapshot.currentAction?.resource ?? snapshot.currentAction?.label ?? '')
+      ? snapshot.currentAction?.producedCount ?? 0
+      : 0;
   if (coal > 0) next.coal = Math.max(next.coal, coal);
+  if (produced > 0) next.coal = Math.max(next.coal, produced);
   if (rawCod > 0) next.rawCod = Math.max(next.rawCod, rawCod);
   if (cooked > 0) next.cookedCod = Math.max(next.cookedCod, cooked);
 

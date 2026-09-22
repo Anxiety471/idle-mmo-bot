@@ -1,3 +1,4 @@
+import { parseCurrentActionProducedCount } from '../deterministic/gather.js';
 import type { Page } from 'playwright';
 import type { AppConfig } from '../config.js';
 import type { CombatPhase, GameSnapshot, SnapshotQuest, SkillId } from '../types.js';
@@ -117,7 +118,8 @@ export async function readGameSnapshot(page: Page, config: AppConfig): Promise<G
   const pendingQuests = await readQuestsForTab(page, config, 'Pending Nearby', 'pending');
 
   await navigateTo(page, config, '/inventory');
-  await page.waitForTimeout(400);
+  // Icon grid + CDN skins need a beat before badge text/img src are stable.
+  await page.waitForTimeout(1_800);
   const inventoryText = await bodyText(page);
   const domInventory = await scrapeInventoryFromDom(page).catch(() => ({}));
   const inventory = buildInventoryMap(inventoryText, domInventory);
@@ -147,6 +149,9 @@ export async function readGameSnapshot(page: Page, config: AppConfig): Promise<G
   const skillLevels = parseSkillLevels(text);
   const bankNearby = !/No Bank Nearby/i.test(text);
 
+  const producedCount = gatherState.busy
+    ? gatherState.producedCount ?? parseCurrentActionProducedCount(gatherState.pageText)
+    : gatherState.busyElsewhere?.producedCount;
   const currentAction = gatherBusy
     ? {
         busy: true,
@@ -157,6 +162,7 @@ export async function readGameSnapshot(page: Page, config: AppConfig): Promise<G
         label: gatherState.busyElsewhere
           ? `${gatherState.busyElsewhere.skill} active`
           : gatherState.currentResource,
+        producedCount,
       }
     : combatPhase !== 'none' || inBattle
       ? { busy: true, label: inBattle ? 'battle' : `combat:${combatPhase}` }

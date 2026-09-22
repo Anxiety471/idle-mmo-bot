@@ -20,6 +20,8 @@ export type SkillId =
 export interface ActiveGatherElsewhere {
   skill: SkillId;
   resource?: string;
+  /** "+N" produced counter when readable from that skill's CURRENT ACTION. */
+  producedCount?: number;
 }
 
 export interface GatherState {
@@ -31,6 +33,8 @@ export interface GatherState {
   currentResource?: string;
   /** Skill page this state was read from. */
   skill?: SkillId;
+  /** "+N" produced counter from CURRENT ACTION when this page owns the gather. */
+  producedCount?: number;
   /** Raw page text snapshot for advisor context. */
   pageText: string;
 }
@@ -154,6 +158,8 @@ export interface CurrentActionInfo {
   skill?: SkillId;
   resource?: string;
   label?: string;
+  /** "+N" produced counter from CURRENT ACTION when the UI shows it. */
+  producedCount?: number;
 }
 
 export interface SnapshotZone {

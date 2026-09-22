@@ -76,6 +76,42 @@ function parseCurrentResource(pageText: string, resources: string[]): string | u
   return undefined;
 }
 
+/** Slice of page text that describes the active CURRENT ACTION panel. */
+function currentActionSection(pageText: string): string {
+  if (!pageText.includes(CURRENT_ACTION_MARKER)) return '';
+  const start = pageText.indexOf(CURRENT_ACTION_MARKER);
+  return pageText.slice(start, start + 900);
+}
+
+/**
+ * True when CURRENT ACTION looks like a real producing gather (not a stuck banner).
+ * IdleMMO shows "Next item in M:SS" and a "+N" produced counter while mining.
+ */
+export function isHealthyProducingGather(
+  pageText: string,
+  resourceLabel?: string,
+): boolean {
+  const section = currentActionSection(pageText);
+  if (!section) return false;
+  if (resourceLabel && !section.toLowerCase().includes(resourceLabel.toLowerCase())) {
+    return false;
+  }
+  return /next item in\s*\d/i.test(section) || /\+\d+(?:\.\d+)?[kK]?\b/.test(section);
+}
+
+/** Parse the "+N" produced counter from CURRENT ACTION when present. */
+export function parseCurrentActionProducedCount(pageText: string): number | undefined {
+  const section = currentActionSection(pageText);
+  if (!section) return undefined;
+  const m = section.match(/\+(\d+(?:\.\d+)?[kK]?)\b/);
+  if (!m?.[1]) return undefined;
+  const raw = m[1];
+  const mk = raw.match(/^(\d+(?:\.\d+)?)[kK]$/i);
+  if (mk) return Math.round(Number.parseFloat(mk[1]) * 1000);
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 function detectMissingBait(pageText: string): boolean {
   return BAIT_REQUIREMENT_PATTERNS.some((pattern) => pattern.test(pageText));
 }
@@ -312,6 +348,7 @@ export async function findActiveGatherOnOtherSkill(
       return {
         skill: skillId,
         resource: parseCurrentResource(pageText, otherSkill.resources),
+        producedCount: parseCurrentActionProducedCount(pageText),
       };
     }
   }
@@ -337,6 +374,7 @@ export async function readSkillState(
   const pageText = await page.locator('body').innerText();
   const busy = pageText.includes(CURRENT_ACTION_MARKER);
   const currentResource = busy ? parseCurrentResource(pageText, skill.resources) : undefined;
+  const producedCount = busy ? parseCurrentActionProducedCount(pageText) : undefined;
 
   let busyElsewhere: ActiveGatherElsewhere | undefined;
   if (!busy && options.probeOtherSkills) {
@@ -347,7 +385,7 @@ export async function readSkillState(
     }
   }
 
-  return { busy, busyElsewhere, currentResource, pageText, skill: skill.id };
+  return { busy, busyElsewhere, currentResource, producedCount, pageText, skill: skill.id };
 }
 
 /** Backward-compatible woodcutting state reader. */
@@ -576,10 +614,24 @@ async function attemptGatherStart(
 /** Stop an active gather CURRENT ACTION when present (needed to force-restart stale mining). */
 async function tryStopCurrentGather(page: Page): Promise<boolean> {
   const stopBtn = page.getByRole('button', { name: 'Stop', exact: true });
-  if ((await stopBtn.count()) === 0) return false;
-  if (!(await stopBtn.first().isVisible().catch(() => false))) return false;
-  await stopBtn.first().click({ force: true }).catch(() => undefined);
-  await page.waitForTimeout(400);
+  let clicked = false;
+  if ((await stopBtn.count()) > 0 && (await stopBtn.first().isVisible().catch(() => false))) {
+    await stopBtn.first().click({ force: true }).catch(() => undefined);
+    clicked = true;
+    await page.waitForTimeout(400);
+  } else {
+    // IdleMMO CURRENT ACTION panel often uses an X / Cancel rather than "Stop".
+    const cancel = page.getByRole('button', { name: /^(Cancel|Close|×|✕)$/i });
+    for (let i = 0; i < Math.min(await cancel.count(), 4); i++) {
+      if (await cancel.nth(i).isVisible().catch(() => false)) {
+        await cancel.nth(i).click({ force: true }).catch(() => undefined);
+        clicked = true;
+        await page.waitForTimeout(300);
+        break;
+      }
+    }
+  }
+  if (!clicked) return false;
   // Confirm dialog often repeats the Stop label.
   const confirm = page.getByRole('button', { name: /^(Stop|Confirm|Yes)$/i });
   for (let i = 0; i < (await confirm.count()); i++) {
@@ -642,6 +694,12 @@ export async function restartSkillGather(
       return 'already_busy';
     }
     if (onTarget && forceRestart) {
+      // Inventory scrape can under-count while mining is healthy (Next item in / +N).
+      // Do not tear down a producing gather — that resets the long idle timer.
+      const liveText = await page.locator('body').innerText().catch(() => state.pageText);
+      if (isHealthyProducingGather(liveText, resourceLabel)) {
+        return 'already_busy';
+      }
       await tryStopCurrentGather(page);
       await waitForSkillUiSettled(page, skill);
       state = await readSkillState(page, config, skill.id);
