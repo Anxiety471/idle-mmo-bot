@@ -12,7 +12,10 @@ import type {
 import { listActions } from '../autopilot/action-registry.js';
 import { huntFoundCap } from './hunt-cap.js';
 import type { SupervisorAdvisor } from './supervisor-advisor.js';
-import { getPlaybookFromSnapshot } from '../autopilot/early-systems-playbook.js';
+import {
+  EARLY_GOLD_SELL_ACTIONS,
+  getPlaybookFromSnapshot,
+} from '../autopilot/early-systems-playbook.js';
 import { parseSellGoldThreshold } from '../deterministic/sell-junk-for-gold.js';
 
 const HEARTH_QUEST = 'Wood for the Hearth';
@@ -95,6 +98,12 @@ export class ProgressiveStubJev implements SupervisorAdvisor {
           : (['fish_cod', 'buy_bait'] as AutopilotAction[]);
         const fish = pickAllowed(allowed, prefer);
         if (fish) return fish;
+      }
+      const turnIn = pickAllowed(allowed, ['quest_turnin']);
+      if (turnIn) return turnIn;
+      if (preferredHit && EARLY_GOLD_SELL_ACTIONS.includes(preferredHit)) {
+        const accept = pickAllowed(allowed, ['quest_talk_accept']);
+        if (accept) return accept;
       }
       if (preferredHit && preferredHit !== 'continue_current') return preferredHit;
     }

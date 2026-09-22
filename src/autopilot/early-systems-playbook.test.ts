@@ -368,3 +368,122 @@ describe('sticky baitOwned (no repurchase loop)', () => {
     assert.equal(saved.counts?.sells, 1);
   });
 });
+
+describe('missions-first early gold', () => {
+  const envSnapshot = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
+  let statePath: string;
+
+  afterEach(() => {
+    restoreEnv(envSnapshot);
+    if (statePath) rmSync(statePath, { force: true });
+  });
+
+  function sellHalfPlaybook(overrides: Partial<PlaybookProgress> = {}): PlaybookProgress {
+    return {
+      enabled: true,
+      stage: 'sell_half',
+      stageIndex: 1,
+      stageGoal: 'Sell half',
+      preferredActions: ['sell_junk_for_gold', 'market_sell_half', 'sell_junk'],
+      deprioritizedActions: ['gather_oak', 'gather_yew', 'mine_coal'],
+      interruptActions: ['sell_junk_for_gold', 'market_sell_half', 'sell_junk'],
+      counts: emptyPlaybookCounts(),
+      baitOwned: false,
+      targets: { coalMin: 30, coalMax: 50, codMin: 30, codMax: 50 },
+      curriculumHint: 'sell',
+      complete: false,
+      gatherGraceActive: false,
+      fishCodBackoffActive: false,
+      consecutiveFishCodFailures: 0,
+      ...overrides,
+    };
+  }
+
+  it('filterAllowedByPlaybook puts quest_turnin before sell_junk_for_gold when turn-in ready and both allowed', () => {
+    const playbook = sellHalfPlaybook({
+      preferredActions: [
+        'quest_turnin',
+        'sell_junk_for_gold',
+        'market_sell_half',
+        'sell_junk',
+      ],
+    });
+    const snapshot = minimalSnapshot({
+      acceptedQuests: [{ title: 'Wood for the Hearth', canTurnIn: true, tab: 'accepted' }],
+      pendingQuests: [],
+    });
+    const allowed = ['sell_junk_for_gold', 'quest_turnin', 'idle'];
+
+    const filtered = filterAllowedByPlaybook(allowed, snapshot, playbook);
+
+    assert.equal(filtered[0], 'quest_turnin');
+    assert.ok(filtered.indexOf('quest_turnin') < filtered.indexOf('sell_junk_for_gold'));
+  });
+
+  it('filterAllowedByPlaybook puts quest_talk_accept before market_sell_half when pending quests', () => {
+    const playbook = sellHalfPlaybook({
+      preferredActions: [
+        'quest_talk_accept',
+        'sell_junk_for_gold',
+        'market_sell_half',
+        'sell_junk',
+      ],
+    });
+    const snapshot = minimalSnapshot({
+      acceptedQuests: [],
+      pendingQuests: [{ title: 'Goblin Menace', canTurnIn: false, tab: 'pending' }],
+    });
+    const allowed = ['market_sell_half', 'quest_talk_accept', 'idle'];
+
+    const filtered = filterAllowedByPlaybook(allowed, snapshot, playbook);
+
+    assert.equal(filtered[0], 'quest_talk_accept');
+    assert.ok(filtered.indexOf('quest_talk_accept') < filtered.indexOf('market_sell_half'));
+  });
+
+  it('when only sell_* in allowed set, sell still sorted first (no quests)', () => {
+    const playbook = sellHalfPlaybook();
+    const snapshot = minimalSnapshot({
+      acceptedQuests: [],
+      pendingQuests: [],
+    });
+    const allowed = ['idle', 'market_sell_half', 'sell_junk_for_gold'];
+
+    const filtered = filterAllowedByPlaybook(allowed, snapshot, playbook);
+
+    assert.equal(filtered[0], 'sell_junk_for_gold');
+    assert.ok(filtered.indexOf('sell_junk_for_gold') < filtered.indexOf('market_sell_half'));
+  });
+
+  it('evaluatePlaybook advances past sell_half to buy_bait when gold >= 2 without sells (seed state at sell_half)', () => {
+    statePath = join('/tmp', `playbook-missions-skip-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'sell_half',
+        counts: { ...emptyPlaybookCounts(), coal: 35 },
+        baitOwned: false,
+      })}\n`,
+    );
+
+    const progress = evaluatePlaybook(
+      minimalSnapshot({
+        gold: 2,
+        inventory: { 'Coal Ore': 35 },
+        flags: {
+          hasBait: false,
+          bankNearby: false,
+          gatherBusy: false,
+          inBattle: false,
+          sessionValid: true,
+        },
+      }),
+    );
+
+    assert.equal(progress.stage, 'buy_bait');
+    assert.equal(progress.counts.sells, 0);
+  });
+});

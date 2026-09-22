@@ -5,6 +5,8 @@
  *  - tracks stage progress (coal → sell → bait → fish → cook → sell → hunt → map)
  *  - exposes preferred / deprioritized actions into the snapshot for Jev
  *  - filters allowed actions so endless Oak woodcutting loses priority until the run completes
+ *  - missions-first early gold: quest_turnin / quest_talk_accept before market sell when quests
+ *    are available; sell actions remain fallback when quests are dry or unavailable
  *
  * Hard constraints (huntFoundCap, no membership spend, gold Cheap Bait only) stay elsewhere.
  */
@@ -105,6 +107,18 @@ const COAL_MIN = 30;
 const COAL_MAX = 50;
 const COD_MIN = 30;
 const COD_MAX = 50;
+
+/** Quest actions preferred over market sell for early gold while playbook is active. */
+export const EARLY_GOLD_QUEST_ACTIONS: AutopilotAction[] = ['quest_turnin', 'quest_talk_accept'];
+/** Sell actions demoted when quests can fund early progression. */
+export const EARLY_GOLD_SELL_ACTIONS: AutopilotAction[] = [
+  'sell_junk_for_gold',
+  'market_sell_half',
+  'sell_junk',
+];
+export const BAIT_GOLD_COST = 2;
+
+const EARLY_GOLD_SELL_SET = new Set<AutopilotAction>(EARLY_GOLD_SELL_ACTIONS);
 /** Busy-cycle heuristic when inventory scrape is empty (~5s poll → ~2–3 cycles/ore). */
 const COAL_BUSY_TARGET = 90;
 const COD_BUSY_TARGET = 90;
@@ -311,6 +325,43 @@ function effectiveCod(counts: PlaybookCounts): number {
   return Math.max(counts.rawCod, Math.min(COD_MAX, estimate));
 }
 
+export function hasTurnInReady(snapshot: GameSnapshot): boolean {
+  return snapshot.acceptedQuests.some((q) => q.canTurnIn);
+}
+
+export function hasPendingQuestAccept(snapshot: GameSnapshot): boolean {
+  return snapshot.pendingQuests.length > 0;
+}
+
+export function questsAvailableForEarlyGold(snapshot: GameSnapshot): boolean {
+  return hasTurnInReady(snapshot) || hasPendingQuestAccept(snapshot);
+}
+
+/** Skip sell_half when bait is already affordable or quests can fund bait instead of market sell. */
+export function canSkipSellHalfForQuestFunding(snapshot: GameSnapshot): boolean {
+  if ((snapshot.gold ?? 0) >= BAIT_GOLD_COST) return true;
+  return questsAvailableForEarlyGold(snapshot);
+}
+
+function buildPreferredActions(
+  meta: ReturnType<typeof stageMeta>,
+  snapshot: GameSnapshot,
+): AutopilotAction[] {
+  const preferred = [...meta.preferred];
+  if (!questsAvailableForEarlyGold(snapshot)) {
+    return preferred;
+  }
+
+  const questActions: AutopilotAction[] = [];
+  if (hasTurnInReady(snapshot)) questActions.push('quest_turnin');
+  if (hasPendingQuestAccept(snapshot)) questActions.push('quest_talk_accept');
+
+  const nonSell = preferred.filter((a) => !EARLY_GOLD_SELL_SET.has(a));
+  const sellPreferred = preferred.filter((a) => EARLY_GOLD_SELL_SET.has(a));
+
+  return [...questActions, ...nonSell, ...sellPreferred];
+}
+
 function deriveStage(
   counts: PlaybookCounts,
   snapshot: GameSnapshot,
@@ -332,8 +383,11 @@ function deriveStage(
     return 'mine_coal';
   }
   if (counts.sells < 1 && atLeast('sell_half')) {
-    // After coal target, require one careful sell pass before bait.
-    if (persisted === 'mine_coal' || persisted === 'sell_half') return 'sell_half';
+    // After coal target, sell for bait gold unless quests / wallet already fund bait.
+    if (persisted === 'mine_coal' || persisted === 'sell_half') {
+      if (canSkipSellHalfForQuestFunding(snapshot)) return 'buy_bait';
+      return 'sell_half';
+    }
   }
   if (!hasBait && (persisted === 'sell_half' || persisted === 'buy_bait' || idx <= STAGE_ORDER.indexOf('buy_bait'))) {
     if (coal >= COAL_MIN || counts.coalBusyCycles >= COAL_BUSY_TARGET || counts.sells >= 1) {
@@ -385,7 +439,7 @@ function stageMeta(stage: EarlyStageId, baitOwned = false): {
         deprioritized: ['gather_oak', 'gather_yew', 'mine_coal'],
         interrupt: ['sell_junk_for_gold', 'market_sell_half', 'sell_junk'],
         hint:
-          'EARLY PLAYBOOK stage sell_half: sell ~half excess mats in small batches. Keep enough Coal for cooking. Do not membership-spend. Prefer sell_junk_for_gold when gold is low.',
+          'EARLY PLAYBOOK stage sell_half: missions-first — quest_turnin / quest_talk_accept before market sell when quests are available. Sell ~half excess mats only as fallback. Keep enough Coal for cooking. Do not membership-spend.',
       };
     case 'buy_bait':
       return {
@@ -426,7 +480,7 @@ function stageMeta(stage: EarlyStageId, baitOwned = false): {
         deprioritized: ['gather_oak', 'gather_yew'],
         interrupt: ['sell_junk_for_gold', 'market_sell_half', 'sell_junk'],
         hint:
-          'EARLY PLAYBOOK stage sell_extras: sell junk/extras in small batches. Never sell all Cooked Cod / Cod needed for fights.',
+          'EARLY PLAYBOOK stage sell_extras: missions-first — quest_turnin / quest_talk_accept before market sell when quests are available. Sell junk/extras only as fallback. Never sell all Cooked Cod / Cod needed for fights.',
       };
     case 'hunt_rabbits':
       return {
@@ -505,7 +559,12 @@ export function evaluatePlaybook(
   if (stage === 'mine_coal' && (effectiveCoal(counts) >= COAL_MIN || counts.coalBusyCycles >= COAL_BUSY_TARGET)) {
     stage = 'sell_half';
   }
-  if (stage === 'sell_half' && counts.sells >= 1) stage = 'buy_bait';
+  if (
+    stage === 'sell_half' &&
+    (counts.sells >= 1 || canSkipSellHalfForQuestFunding(snapshot))
+  ) {
+    stage = 'buy_bait';
+  }
   if (stage === 'buy_bait' && trustHasBait(snapshot, baitOwned, stage)) {
     stage = 'fish_cod';
     baitOwned = true;
@@ -534,7 +593,7 @@ export function evaluatePlaybook(
   const backoffActive = stage === 'fish_cod' && fishBackoff.active;
   const preferredActions = backoffActive
     ? [...FISH_COD_BACKOFF_FALLBACKS]
-    : meta.preferred;
+    : buildPreferredActions(meta, snapshot);
   const interruptActions = backoffActive
     ? meta.interrupt.filter((a) => a !== 'fish_cod')
     : meta.interrupt;
@@ -755,16 +814,57 @@ export function filterAllowedByPlaybook(
     }
   }
 
+  const questsAvailable = questsAvailableForEarlyGold(snapshot);
+  if (questsAvailable) {
+    if (hasTurnInReady(snapshot) && allowed.includes('quest_turnin') && !next.includes('quest_turnin')) {
+      next.push('quest_turnin');
+    }
+    if (
+      hasPendingQuestAccept(snapshot) &&
+      allowed.includes('quest_talk_accept') &&
+      !next.includes('quest_talk_accept')
+    ) {
+      next.push('quest_talk_accept');
+    }
+  }
+
   // Ensure idle remains available.
   if (!next.includes('idle') && allowed.includes('idle')) next.push('idle');
   if (next.length === 0) return allowed.includes('idle') ? ['idle'] : allowed;
 
-  // Stable sort: preferred first, then original order.
   const preferred = new Set(playbook.preferredActions);
+  const missionFirstTier = (action: AutopilotAction): number => {
+    if (action === 'quest_turnin') return 0;
+    if (action === 'quest_talk_accept') return 1;
+    const isSell = EARLY_GOLD_SELL_SET.has(action);
+    if (preferred.has(action) && !isSell) return 2;
+    if (!preferred.has(action) && !isSell) return 3;
+    if (questsAvailable && preferred.has(action) && isSell) return 4;
+    if (isSell) return 5;
+    return 3;
+  };
+
+  const preferredOrder = new Map(playbook.preferredActions.map((action, index) => [action, index]));
   next.sort((a, b) => {
-    const ap = preferred.has(a) ? 0 : 1;
-    const bp = preferred.has(b) ? 0 : 1;
-    return ap - bp;
+    if (questsAvailable) {
+      const tierDiff = missionFirstTier(a) - missionFirstTier(b);
+      if (tierDiff !== 0) return tierDiff;
+    } else {
+      const ap = preferred.has(a) ? 0 : 1;
+      const bp = preferred.has(b) ? 0 : 1;
+      if (ap !== bp) return ap - bp;
+    }
+    const aPref = preferredOrder.get(a) ?? 999;
+    const bPref = preferredOrder.get(b) ?? 999;
+    if (aPref !== bPref) return aPref - bPref;
+    const aAllowed = allowed.indexOf(a);
+    const bAllowed = allowed.indexOf(b);
+    if (aAllowed !== -1 || bAllowed !== -1) {
+      const aIdx = aAllowed === -1 ? 999 : aAllowed;
+      const bIdx = bAllowed === -1 ? 999 : bAllowed;
+      if (aIdx !== bIdx) return aIdx - bIdx;
+    }
+    return 0;
   });
 
   return next;
