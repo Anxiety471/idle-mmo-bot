@@ -225,16 +225,14 @@ function gatherAction(
         knownState: skillState,
       });
       let outcome: string = result;
-      // fish_cod missing_requirement is often a false bait signal (Start/UI/captcha) when bait is trusted.
-      if (
-        id === 'fish_cod' &&
-        result === 'missing_requirement' &&
-        (Boolean(playbook?.baitOwned) ||
-          ctx.snapshot.flags.hasBait ||
-          (playbook?.enabled === true && playbook.stage === 'fish_cod'))
-      ) {
+      // fish_cod missing_requirement/failed is often a UI/start/captcha issue when bait is trusted.
+      const baitTrustedForFish =
+        Boolean(playbook?.baitOwned) ||
+        ctx.snapshot.flags.hasBait ||
+        (playbook?.enabled === true && playbook.stage === 'fish_cod');
+      if (id === 'fish_cod' && baitTrustedForFish && (result === 'missing_requirement' || result === 'failed')) {
         console.warn(
-          '[fish_cod] missing_requirement while bait trusted — treating as fishing_start_failed ' +
+          `[fish_cod] ${result} while bait trusted — treating as fishing_start_failed ` +
             '(UI/captcha/Start/quantity), NOT missing bait',
         );
         outcome = 'fishing_start_failed';

@@ -283,6 +283,35 @@ Even with PR #17 grace, restarts fail when quantity is too short, the wrong Star
 
 **What overseers should watch:** `fish_cod` → `failed` or immediate idle after `restarted`; check overlays, quantity field, captcha prompts, and whether Start was disabled (missing bait — see §4.7).
 
+### 4.11 fish_cod failure backoff (PR #24 — stop hammering failed starts)
+
+When `fish_cod` returns `failed` or `fishing_start_failed` every tick (bait trusted, stage `fish_cod`), the bot used to re-inject `fish_cod` indefinitely. Gather grace (§4.8) only applies after `restarted`/`already_busy`, not after hard `failed`.
+
+**Rules (implemented in `early-systems-playbook.ts`, `gather.ts`, `bootstrap-actions.ts`):**
+
+| Mechanism | Behavior |
+|-----------|----------|
+| **Trusted-bait remap** | `failed` and `missing_requirement` → `fishing_start_failed` when `baitOwned`/`hasBait`/stage `fish_cod` — **never clears `baitOwned`** |
+| **Failure counter** | `consecutiveFishCodFailures` increments on `failed`/`fishing_start_failed`; resets on `restarted`/`already_busy` |
+| **Backoff threshold** | After **4** consecutive failures, enter **3 min** backoff (`fishCodBackoffUntil`) |
+| **Fallback actions** | During backoff: prefer `continue_current`, `cook_cod`, `mine_coal`, `sell_junk_for_gold`, `idle` — **no `fish_cod` re-injection** |
+| **Stage unchanged** | Stage stays `fish_cod`; backoff expires and retries resume automatically |
+| **Gather retry** | `restartSkillGather` re-navigates to fishing, waits for resource panel, retries start once on fishing |
+
+**What overseers should watch:** endless `→ fish_cod` with `result: failed` and flat `codBusyCycles` — confirm backoff kicks in (`fishCodBackoffActive=true` in decisions/playbook state) and fallbacks run. After cooldown, one `fish_cod` retry is normal. If failures persist, check §4.9 (overlays, captcha, wrong Start).
+
+**Restarting stuck bots:** stop autopilot, verify per-character paths (§7.2), then:
+
+```bash
+# IdleBocchi example — adjust paths per character
+export STORAGE_STATE=./storage-state-idlebocchi.json
+export AUTOPILOT_LOG_DIR=./logs/idlebocchi
+export PLAYBOOK_STATE_PATH=./logs/idlebocchi/playbook-state.json
+npm run autopilot -- -v --interrupt
+```
+
+Do **not** delete `playbook-state.json` unless resetting the whole early run — `baitOwned` and stage counters live there.
+
 ### 4.10 Inventory scrape reliability (`src/snapshot/inventory-scrape.ts`)
 
 The live `/inventory` UI is mostly **icon + quantity badge** with item names in tooltips or click-through detail panels. `readGameSnapshot()` merges:
