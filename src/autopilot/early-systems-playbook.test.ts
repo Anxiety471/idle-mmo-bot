@@ -6,10 +6,13 @@ import { getLogDir } from '../logging/jsonl-writer.js';
 import type { GameSnapshot } from '../types.js';
 import {
   coalTargetMet,
+  cookTargetMet,
   evaluatePlaybook,
   filterAllowedByPlaybook,
+  fishTargetMet,
   FISH_COD_BACKOFF_MS,
   FISH_COD_FAILURE_THRESHOLD,
+  huntTargetMet,
   notePlaybookOutcome,
   recentBaitPurchase,
   resolvePlaybookStatePath,
@@ -81,7 +84,7 @@ function fishCodPlaybook(overrides: Partial<PlaybookProgress> = {}): PlaybookPro
     interruptActions: ['fish_cod'],
     counts: emptyPlaybookCounts(),
     baitOwned: true,
-    targets: { coalMin: 100, coalMax: 100, codMin: 100, codMax: 100, cookMin: 100, huntMin: 50 },
+    targets: { coalMin: 100, coalMax: 100, codMin: 100, codMax: 100, cookMin: 100, huntMin: 120 },
     curriculumHint: 'fish',
     complete: false,
     gatherGraceActive: true,
@@ -427,7 +430,7 @@ describe('missions-first early gold', () => {
       interruptActions: ['sell_junk_for_gold', 'market_sell_half', 'sell_junk'],
       counts: emptyPlaybookCounts(),
       baitOwned: false,
-      targets: { coalMin: 100, coalMax: 100, codMin: 100, codMax: 100, cookMin: 100, huntMin: 50 },
+      targets: { coalMin: 100, coalMax: 100, codMin: 100, codMax: 100, cookMin: 100, huntMin: 120 },
       curriculumHint: 'sell',
       complete: false,
       gatherGraceActive: false,
@@ -533,7 +536,7 @@ describe('batch leveling playbook targets', () => {
     restoreEnv(envSnapshot);
   });
 
-  it('defaults to 100/100/100/50 targets and loops after pets', () => {
+  it('defaults to 100/100/100/120 targets and loops after pets', () => {
     for (const key of ENV_KEYS) envSnapshot[key] = process.env[key];
     const dir = join(getLogDir(), `pb-batch-${Date.now()}`);
     mkdirSync(dir, { recursive: true });
@@ -555,7 +558,7 @@ describe('batch leveling playbook targets', () => {
           rawCod: 100,
           cookedCod: 100,
           sells: 2,
-          rabbitHunts: 50,
+          rabbitHunts: 120,
           mapPeeks: 1,
           petManages: 0,
           batchCycles: 1,
@@ -576,7 +579,7 @@ describe('batch leveling playbook targets', () => {
     assert.equal(progress.targets.coalMin, 100);
     assert.equal(progress.targets.codMin, 100);
     assert.equal(progress.targets.cookMin, 100);
-    assert.equal(progress.targets.huntMin, 50);
+    assert.equal(progress.targets.huntMin, 120);
     assert.equal(progress.complete, false);
     assert.equal(progress.stage, 'mine_coal');
     assert.ok(progress.counts.batchCycles >= 2);
@@ -921,4 +924,236 @@ describe('coal before fish gate', () => {
     assert.equal(progress.targets.coalMin, 100);
     assert.equal(progress.stage, 'mine_coal');
   });
+  it('does NOT treat high coalBusyCycles alone as coal target met (Bocchi snap-back)', () => {
+    statePath = join('/tmp', `playbook-coal-busy-only-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'fish_cod',
+        counts: { ...emptyPlaybookCounts(), coal: 4, coalBusyCycles: 552 },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const snapshot = minimalSnapshot({
+      inventory: { 'Cheap Bait': 20, 'Coal Ore': 4 },
+      gold: 50,
+      flags: {
+        hasBait: true,
+        bankNearby: false,
+        gatherBusy: false,
+        inBattle: false,
+        sessionValid: true,
+      },
+    });
+    const progress = evaluatePlaybook(snapshot);
+
+    assert.equal(coalTargetMet(progress.counts), false);
+    assert.equal(progress.stage, 'mine_coal');
+    assert.ok(
+      progress.curriculumHint.includes('coal gate') || progress.curriculumHint.includes('snapped'),
+      `hint should mention coal snap-back, got: ${progress.curriculumHint}`,
+    );
+
+    const filtered = filterAllowedByPlaybook(
+      ['fish_cod', 'mine_coal', 'cook_cod', 'hunt_battle', 'idle'],
+      snapshot,
+      progress,
+    );
+    assert.equal(filtered[0], 'mine_coal');
+    assert.ok(!filtered.includes('fish_cod'));
+  });
+
+  it('syncs inventory Coal Ore into counts for the hard coal gate', () => {
+    statePath = join('/tmp', `playbook-coal-inv-sync-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'mine_coal',
+        counts: emptyPlaybookCounts(),
+        baitOwned: false,
+      })}\n`,
+    );
+
+    const progress = evaluatePlaybook(
+      minimalSnapshot({
+        inventory: { 'Coal Ore': 100 },
+        gold: 50,
+        flags: {
+          hasBait: false,
+          bankNearby: false,
+          gatherBusy: false,
+          inBattle: false,
+          sessionValid: true,
+        },
+      }),
+    );
+    assert.ok(progress.counts.coal >= 100);
+    assert.equal(coalTargetMet(progress.counts), true);
+    assert.notEqual(progress.stage, 'mine_coal');
+  });
 });
+
+describe('strict sequential real-count gates', () => {
+  const envSnapshot = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
+  let statePath = '';
+
+  afterEach(() => {
+    restoreEnv(envSnapshot);
+    if (statePath) rmSync(statePath, { force: true });
+  });
+
+  it('does NOT advance fish_cod via codBusyCycles alone', () => {
+    statePath = join('/tmp', `playbook-fish-busy-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'fish_cod',
+        counts: { ...coalMetCounts({ sells: 1 }), rawCod: 10, codBusyCycles: 500 },
+        baitOwned: true,
+        lastBaitPurchaseAt: new Date().toISOString(),
+      })}\n`,
+    );
+
+    const progress = evaluatePlaybook(
+      minimalSnapshot({
+        inventory: { 'Cheap Bait': 20, 'Coal Ore': 100, Cod: 10 },
+        gold: 50,
+      }),
+    );
+    assert.equal(fishTargetMet(progress.counts), false);
+    assert.equal(progress.stage, 'fish_cod');
+  });
+
+  it('snaps cook_cod back to fish_cod when rawCod below target', () => {
+    statePath = join('/tmp', `playbook-fish-snap-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'cook_cod',
+        counts: { ...coalMetCounts({ sells: 1 }), rawCod: 12, cookedCod: 5, codBusyCycles: 400 },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const progress = evaluatePlaybook(
+      minimalSnapshot({
+        inventory: { 'Cheap Bait': 20, 'Coal Ore': 100, Cod: 12, 'Cooked Cod': 5 },
+        gold: 50,
+      }),
+    );
+    assert.equal(progress.stage, 'fish_cod');
+    assert.ok(
+      progress.curriculumHint.includes('fish gate') || progress.curriculumHint.includes('snapped'),
+      `hint: ${progress.curriculumHint}`,
+    );
+  });
+
+  it('snaps hunt_rabbits back to cook_cod when cookedCod below target', () => {
+    statePath = join('/tmp', `playbook-cook-snap-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'hunt_rabbits',
+        counts: {
+          ...coalMetCounts({ sells: 2 }),
+          rawCod: 100,
+          cookedCod: 8,
+          rabbitHunts: 3,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const progress = evaluatePlaybook(
+      minimalSnapshot({
+        inventory: { 'Cheap Bait': 20, 'Coal Ore': 100, Cod: 100, 'Cooked Cod': 8 },
+        gold: 50,
+      }),
+    );
+    assert.equal(cookTargetMet(progress.counts), false);
+    assert.equal(progress.stage, 'cook_cod');
+    assert.ok(progress.curriculumHint.includes('cook gate'), progress.curriculumHint);
+  });
+
+  it('snaps manage_pets back to hunt_rabbits when rabbitHunts below target', () => {
+    statePath = join('/tmp', `playbook-hunt-snap-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'manage_pets',
+        counts: {
+          ...coalMetCounts({ sells: 2 }),
+          rawCod: 100,
+          cookedCod: 100,
+          rabbitHunts: 40,
+          petManages: 0,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const progress = evaluatePlaybook(
+      minimalSnapshot({
+        inventory: { 'Cheap Bait': 20, 'Coal Ore': 100, Cod: 100, 'Cooked Cod': 100 },
+        gold: 50,
+      }),
+    );
+    assert.equal(huntTargetMet(progress.counts), false);
+    assert.equal(progress.stage, 'hunt_rabbits');
+    assert.equal(progress.targets.huntMin, 120);
+    assert.ok(progress.curriculumHint.includes('hunt gate'), progress.curriculumHint);
+  });
+
+  it('advances fish→cook→hunt only when real counts meet targets', () => {
+    statePath = join('/tmp', `playbook-seq-advance-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'fish_cod',
+        counts: {
+          ...coalMetCounts({ sells: 2 }),
+          rawCod: 100,
+          cookedCod: 100,
+          rabbitHunts: 120,
+        },
+        baitOwned: true,
+        lastBaitPurchaseAt: new Date().toISOString(),
+      })}\n`,
+    );
+
+    const progress = evaluatePlaybook(
+      minimalSnapshot({
+        inventory: { 'Cheap Bait': 20, 'Coal Ore': 100, Cod: 100, 'Cooked Cod': 100 },
+        gold: 50,
+      }),
+    );
+    assert.equal(coalTargetMet(progress.counts), true);
+    assert.equal(fishTargetMet(progress.counts), true);
+    assert.equal(cookTargetMet(progress.counts), true);
+    assert.equal(huntTargetMet(progress.counts), true);
+    assert.equal(progress.stage, 'manage_pets');
+  });
+});
+
