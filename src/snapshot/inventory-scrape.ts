@@ -91,8 +91,9 @@ export function itemNameFromImageSrc(src: string): string | undefined {
 }
 
 /** Regex parse of visible inventory text (`Item x 25`, line-ending counts). */
-export function parseInventoryCounts(text: string): Record<string, number> {
+export function parseInventoryCounts(text: string | null | undefined): Record<string, number> {
   const counts: Record<string, number> = {};
+  if (!text) return counts;
   const patterns = [
     /([A-Za-z][A-Za-z' -]{1,40})\s+x\s*(\d+(?:[.,]\d+)?[kK]?)/g,
     /(\d+(?:[.,]\d+)?[kK]?)\s*x\s+([A-Za-z][A-Za-z' -]{1,40})/gi,
@@ -122,9 +123,10 @@ export function parseInventoryCounts(text: string): Record<string, number> {
 
 /** Extract known item quantities from detail panels / modals / tooltip text. */
 export function extractItemQuantitiesFromText(
-  text: string,
+  text: string | null | undefined,
   knownItems: readonly string[] = KNOWN_INV_ITEMS,
 ): Record<string, number> {
+  if (!text) return {};
   const counts = { ...parseInventoryCounts(text) };
   for (const name of knownItems) {
     const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -152,8 +154,11 @@ export function extractItemQuantitiesFromText(
 }
 
 /** Drop page-chrome false positives (e.g. Code of Conduct → Cod). */
-export function sanitizeInventoryCounts(raw: Record<string, number>): Record<string, number> {
+export function sanitizeInventoryCounts(
+  raw: Record<string, number> | null | undefined,
+): Record<string, number> {
   const inventory: Record<string, number> = {};
+  if (!raw || typeof raw !== 'object') return inventory;
   for (const [key, qty] of Object.entries(raw)) {
     if (/^cod$/i.test(key) && !/raw\s*cod|cooked\s*cod|burnt\s*cod/i.test(key) && qty >= 200) {
       continue;
@@ -167,21 +172,23 @@ export function sanitizeInventoryCounts(raw: Record<string, number>): Record<str
 }
 
 export function detectHasBait(
-  inventory: Record<string, number>,
-  inventoryText: string,
+  inventory: Record<string, number> | null | undefined,
+  inventoryText: string | null | undefined,
 ): boolean {
+  const safeInventory = inventory ?? {};
   return (
-    (inventory['Cheap Bait'] ?? 0) > 0 ||
-    /Cheap\s*Bait/i.test(inventoryText) ||
-    /\b(?:cheap\s+)?bait\b/i.test(inventoryText) ||
-    Object.keys(inventory).some((k) => /cheap\s*bait|^bait$/i.test(k))
+    (safeInventory['Cheap Bait'] ?? 0) > 0 ||
+    /Cheap\s*Bait/i.test(inventoryText ?? '') ||
+    /\b(?:cheap\s+)?bait\b/i.test(inventoryText ?? '') ||
+    Object.keys(safeInventory).some((k) => /cheap\s*bait|^bait$/i.test(k))
   );
 }
 
 function mergeCounts(
   target: Record<string, number>,
-  patch: Record<string, number>,
+  patch: Record<string, number> | null | undefined,
 ): Record<string, number> {
+  if (!patch || typeof patch !== 'object') return target;
   for (const [key, qty] of Object.entries(patch)) {
     if (!qty || qty <= 0) continue;
     target[key] = Math.max(target[key] ?? 0, qty);
@@ -285,10 +292,12 @@ export const INVENTORY_DOM_STATIC_SCRIPT = String.raw`([known, slugMap]) => {
 
 async function scrapeStaticDom(page: Page): Promise<Record<string, number>> {
   try {
-    return (await page.evaluate(INVENTORY_DOM_STATIC_SCRIPT, [
-      KNOWN_INV_ITEMS,
-      ITEM_SLUG_MAP,
-    ] as [string[], Record<string, string>])) as Record<string, number>;
+    // Playwright evaluates string page functions as expressions; unlike a JS function argument,
+    // an arrow-function string is not invoked. Build an IIFE so the DOM pass returns its map.
+    const payload = JSON.stringify([KNOWN_INV_ITEMS, ITEM_SLUG_MAP]);
+    const result = await page.evaluate(`(${INVENTORY_DOM_STATIC_SCRIPT})(${payload})`);
+    if (!result || typeof result !== 'object' || Array.isArray(result)) return {};
+    return result as Record<string, number>;
   } catch {
     return {};
   }
@@ -379,12 +388,12 @@ export async function scrapeInventoryFromDom(page: Page): Promise<Record<string,
 
 /** Merge text + DOM scrapes and drop false positives. */
 export function buildInventoryMap(
-  inventoryText: string,
-  domCounts: Record<string, number>,
+  inventoryText: string | null | undefined,
+  domCounts: Record<string, number> | null | undefined,
 ): Record<string, number> {
   return sanitizeInventoryCounts({
-    ...parseInventoryCounts(inventoryText),
-    ...extractItemQuantitiesFromText(inventoryText),
-    ...domCounts,
+    ...parseInventoryCounts(inventoryText ?? ''),
+    ...extractItemQuantitiesFromText(inventoryText ?? ''),
+    ...(domCounts ?? {}),
   });
 }

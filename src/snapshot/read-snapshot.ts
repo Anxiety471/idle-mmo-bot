@@ -114,7 +114,8 @@ export async function readGameSnapshot(page: Page, config: AppConfig): Promise<G
   await navigateTo(page, config, '/inventory');
   await page.waitForTimeout(400);
   const inventoryText = await bodyText(page);
-  const inventory = buildInventoryMap(inventoryText, await scrapeInventoryFromDom(page));
+  const domInventory = await scrapeInventoryFromDom(page).catch(() => ({}));
+  const inventory = buildInventoryMap(inventoryText, domInventory);
   const hasBait = detectHasBait(inventory, inventoryText);
 
   const gatherState = await readSkillState(page, config, 'woodcutting', {
