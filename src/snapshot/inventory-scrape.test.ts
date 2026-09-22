@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   buildInventoryMap,
+  decodeIdleMmoMetaSlug,
   detectHasBait,
   extractItemQuantitiesFromText,
   itemNameFromImageSrc,
@@ -17,6 +18,12 @@ describe('parseQuantityString', () => {
     assert.equal(parseQuantityString('1.2K'), 1200);
     assert.equal(parseQuantityString('1,234'), 1234);
     assert.equal(parseQuantityString(''), 0);
+  });
+
+  it('parses compound badge text like 6.1K 1 (qty + quality pip)', () => {
+    assert.equal(parseQuantityString('6.1K 1'), 6100);
+    assert.equal(parseQuantityString('495'), 495);
+    assert.equal(parseQuantityString('2.9K'), 2900);
   });
 });
 
@@ -35,6 +42,23 @@ describe('itemNameFromImageSrc', () => {
     assert.equal(itemNameFromImageSrc('https://cdn.idle-mmo.com/items/oak-log.png'), 'Oak Log');
     assert.equal(itemNameFromImageSrc('/storage/items/cheap-bait.webp'), 'Cheap Bait');
     assert.equal(itemNameFromImageSrc('/icons/cooked_cod.png'), 'Cooked Cod');
+  });
+
+  it('decodes IdleMMO meta-base64 CDN skins (coal.png → Coal Ore)', () => {
+    const coalSrc =
+      'https://cdn.idle-mmo.com/cdn-cgi/image/width=150,height=150,format=auto/uploaded/skins/8tpdC3JzngzulwN5Sd5L6l711jyGO6-metaY29hbC5wbmc=-.png';
+    assert.equal(decodeIdleMmoMetaSlug(coalSrc), 'coal');
+    assert.equal(itemNameFromImageSrc(coalSrc), 'Coal Ore');
+
+    const oakSrc =
+      'https://cdn.idle-mmo.com/cdn-cgi/image/width=150/uploaded/skins/xWOBaimvLZD0AnHX2ErXz5UzcOI3Q2-metab2FrLnBuZw==-.png';
+    assert.equal(decodeIdleMmoMetaSlug(oakSrc), 'oak');
+    assert.equal(itemNameFromImageSrc(oakSrc), 'Oak Log');
+
+    const cookedSrc =
+      'https://cdn.idle-mmo.com/uploaded/skins/abc-metaY29va2VkIGNvZC5wbmc=-.png';
+    assert.equal(decodeIdleMmoMetaSlug(cookedSrc), 'cooked cod');
+    assert.equal(itemNameFromImageSrc(cookedSrc), 'Cooked Cod');
   });
 });
 
