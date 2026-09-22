@@ -347,6 +347,8 @@ When `EARLY_PLAYBOOK` is enabled (default), `evaluatePlaybook()` advances throug
 
 **Missions-first early gold:** While the early playbook is active, prefer `quest_turnin` and `quest_talk_accept` over `market_sell_half`, `sell_junk_for_gold`, and `sell_junk` when quests are available. Market sell remains fallback when quests are unavailable or dry. At `sell_half`, the playbook skips straight to `buy_bait` when gold is already ≥ 2g (bait cost) or quests can fund bait without a sell pass.
 
+**Quest curriculum (difficulty vs ability):** `evaluateQuestCurriculum()` in `src/autopilot/quest-curriculum.ts` scores each visible quest from snapshot `acceptedQuests` / `pendingQuests` (progress, combat level, inventory). HttpJev receives `questCurriculum` in the snapshot payload plus `[QUEST HIGH/LOW PRIORITY]` tags in action criteria. When an easy gather quest is finishable (e.g. **Wood for the Hearth** → accept → `gather_oak` to 150 → `quest_turnin`), playbook filters deprioritize `fish_cod` and hard hunts (`hunt_battle`) until it completes. Hard kill quests (e.g. Goblin Menace 0/30 at combat 1) stay accepted but do not block easy gather preference.
+
 ProgressiveStubJev respects playbook hints when no API token. HttpJev receives `curriculumHint` and playbook metadata in the snapshot.
 
 ---
