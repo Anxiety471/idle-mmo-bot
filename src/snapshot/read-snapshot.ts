@@ -8,8 +8,8 @@ import {
   waitForQuestTabsSettled,
 } from '../deterministic/index.js';
 import { mapEnricher } from '../autopilot/snapshot-enrichers.js';
-import {
 import { isQuestProgressMet } from '../deterministic/quest-accept.js';
+import {
   buildInventoryMap,
   detectHasBait,
   scrapeInventoryFromDom,
