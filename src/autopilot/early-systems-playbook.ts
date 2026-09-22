@@ -15,6 +15,14 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getLogDir } from '../logging/jsonl-writer.js';
 import type { AutopilotAction, AutopilotContext, GameSnapshot } from '../types.js';
+import {
+  evaluateQuestCurriculum,
+  getQuestCurriculumFromSnapshot,
+  type QuestCurriculum,
+} from './quest-curriculum.js';
+
+export type { QuestCurriculum, ScoredQuest } from './quest-curriculum.js';
+export { evaluateQuestCurriculum, getQuestCurriculumFromSnapshot } from './quest-curriculum.js';
 
 export type EarlyStageId =
   | 'mine_coal'
@@ -71,6 +79,8 @@ export interface PlaybookProgress {
   fishCodBackoffUntil?: string;
   /** Consecutive fish_cod failed/fishing_start_failed outcomes (resets on success). */
   consecutiveFishCodFailures: number;
+  /** Per-tick quest difficulty/importance scoring for HttpJev + filters. */
+  questCurriculum?: QuestCurriculum;
 }
 
 interface PersistedPlaybook {
@@ -589,18 +599,39 @@ export function evaluatePlaybook(
   }
 
   const meta = stageMeta(stage, baitOwned);
+  const questCurriculum = evaluateQuestCurriculum(snapshot);
   const complete = stage === 'complete';
   const backoffActive = stage === 'fish_cod' && fishBackoff.active;
-  const preferredActions = backoffActive
+  let preferredActions = backoffActive
     ? [...FISH_COD_BACKOFF_FALLBACKS]
     : buildPreferredActions(meta, snapshot);
-  const interruptActions = backoffActive
+  let deprioritizedActions = [...meta.deprioritized];
+  let interruptActions = backoffActive
     ? meta.interrupt.filter((a) => a !== 'fish_cod')
-    : meta.interrupt;
-  const curriculumHint = backoffActive
+    : [...meta.interrupt];
+
+  if (questCurriculum.hasEasyFinishableQuest) {
+    deprioritizedActions = deprioritizedActions.filter(
+      (a) => !questCurriculum.preferredActions.includes(a),
+    );
+    deprioritizedActions = [
+      ...new Set([...deprioritizedActions, ...questCurriculum.deprioritizedActions]),
+    ];
+    for (const action of questCurriculum.preferredActions) {
+      if (!preferredActions.includes(action)) preferredActions.unshift(action);
+    }
+    for (const action of questCurriculum.interruptActions) {
+      if (!interruptActions.includes(action)) interruptActions.push(action);
+    }
+  }
+
+  let curriculumHint = backoffActive
     ? `EARLY PLAYBOOK fish_cod backoff (${fishBackoff.failures} failures) until ${fishBackoff.until ?? 'cooldown'} — ` +
       `prefer ${FISH_COD_BACKOFF_FALLBACKS.join('/')} instead of hammering fish_cod. baitOwned stays true.`
     : meta.hint;
+  if (questCurriculum.hint) {
+    curriculumHint = `${curriculumHint} ${questCurriculum.hint}`.trim();
+  }
 
   savePersisted({
     version: 1,
@@ -622,7 +653,7 @@ export function evaluatePlaybook(
     stageIndex: STAGE_ORDER.indexOf(stage),
     stageGoal: meta.goal,
     preferredActions,
-    deprioritizedActions: meta.deprioritized,
+    deprioritizedActions,
     interruptActions,
     counts,
     baitOwned,
@@ -636,6 +667,7 @@ export function evaluatePlaybook(
     fishCodBackoffActive: backoffActive,
     fishCodBackoffUntil: fishBackoff.until,
     consecutiveFishCodFailures: fishBackoff.failures,
+    questCurriculum,
   };
 }
 
@@ -774,12 +806,18 @@ export function filterAllowedByPlaybook(
 
   // While on a mismatched gather, drop continue_current so Jev can pick the stage action.
   const preferredGather = playbook.preferredActions.find((a) => GATHER_RESOURCE[a]);
-  if (busy && preferredGather) {
-    const want = GATHER_RESOURCE[preferredGather];
+  const questGather = playbook.questCurriculum?.interruptActions.find((a) => GATHER_RESOURCE[a]);
+  const interruptGather = preferredGather ?? questGather;
+  if (busy && interruptGather) {
+    const want = GATHER_RESOURCE[interruptGather];
     const onPreferred = want?.test(resource) ?? false;
     if (!onPreferred) {
       next = next.filter((a) => a !== 'continue_current');
-      for (const id of playbook.interruptActions) {
+      const inject = new Set([
+        ...playbook.interruptActions,
+        ...(playbook.questCurriculum?.interruptActions ?? []),
+      ]);
+      for (const id of inject) {
         if (!next.includes(id)) next.push(id);
       }
     }
@@ -808,6 +846,9 @@ export function filterAllowedByPlaybook(
       ) {
         continue;
       }
+      if (playbook.deprioritizedActions.includes(id)) {
+        continue;
+      }
       if (!next.includes(id) && ['mine_coal', 'fish_cod', 'cook_cod', 'market_sell_half', 'sell_junk_for_gold', 'explore_map', 'hunt_rabbits', 'buy_bait', 'sell_junk'].includes(id)) {
         next.push(id);
       }
@@ -815,6 +856,7 @@ export function filterAllowedByPlaybook(
   }
 
   const questsAvailable = questsAvailableForEarlyGold(snapshot);
+  const questCurriculum = playbook.questCurriculum;
   if (questsAvailable) {
     if (hasTurnInReady(snapshot) && allowed.includes('quest_turnin') && !next.includes('quest_turnin')) {
       next.push('quest_turnin');
@@ -827,26 +869,38 @@ export function filterAllowedByPlaybook(
       next.push('quest_talk_accept');
     }
   }
+  if (questCurriculum?.hasEasyFinishableQuest) {
+    for (const action of questCurriculum.preferredActions) {
+      if (allowed.includes(action) && !next.includes(action)) {
+        next.push(action);
+      }
+    }
+  }
 
   // Ensure idle remains available.
   if (!next.includes('idle') && allowed.includes('idle')) next.push('idle');
   if (next.length === 0) return allowed.includes('idle') ? ['idle'] : allowed;
 
   const preferred = new Set(playbook.preferredActions);
+  const questPreferred = new Set(questCurriculum?.preferredActions ?? []);
+  const missionSort = questsAvailable || Boolean(questCurriculum?.hasEasyFinishableQuest);
   const missionFirstTier = (action: AutopilotAction): number => {
     if (action === 'quest_turnin') return 0;
     if (action === 'quest_talk_accept') return 1;
+    if (questPreferred.has(action) && (action.startsWith('gather_') || action === 'gather_oak')) return 2;
     const isSell = EARLY_GOLD_SELL_SET.has(action);
-    if (preferred.has(action) && !isSell) return 2;
-    if (!preferred.has(action) && !isSell) return 3;
-    if (questsAvailable && preferred.has(action) && isSell) return 4;
-    if (isSell) return 5;
-    return 3;
+    if (preferred.has(action) && !isSell) return 3;
+    if (!preferred.has(action) && !isSell && action !== 'fish_cod') return 4;
+    if (missionSort && preferred.has(action) && isSell) return 5;
+    if (action === 'fish_cod' && questCurriculum?.hasEasyFinishableQuest) return 7;
+    if (isSell) return 6;
+    return 4;
   };
 
   const preferredOrder = new Map(playbook.preferredActions.map((action, index) => [action, index]));
+  const questOrder = new Map((questCurriculum?.preferredActions ?? []).map((action, index) => [action, index]));
   next.sort((a, b) => {
-    if (questsAvailable) {
+    if (missionSort) {
       const tierDiff = missionFirstTier(a) - missionFirstTier(b);
       if (tierDiff !== 0) return tierDiff;
     } else {
@@ -854,8 +908,8 @@ export function filterAllowedByPlaybook(
       const bp = preferred.has(b) ? 0 : 1;
       if (ap !== bp) return ap - bp;
     }
-    const aPref = preferredOrder.get(a) ?? 999;
-    const bPref = preferredOrder.get(b) ?? 999;
+    const aPref = questOrder.get(a) ?? preferredOrder.get(a) ?? 999;
+    const bPref = questOrder.get(b) ?? preferredOrder.get(b) ?? 999;
     if (aPref !== bPref) return aPref - bPref;
     const aAllowed = allowed.indexOf(a);
     const bAllowed = allowed.indexOf(b);
@@ -891,6 +945,7 @@ export function attachPlaybookToSnapshot(
     extensions: {
       ...snapshot.extensions,
       earlySystemsPlaybook: playbook,
+      questCurriculum: playbook.questCurriculum,
     },
   };
 }

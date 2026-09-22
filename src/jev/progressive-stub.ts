@@ -16,10 +16,10 @@ import {
   EARLY_GOLD_SELL_ACTIONS,
   getPlaybookFromSnapshot,
 } from '../autopilot/early-systems-playbook.js';
+import { evaluateQuestCurriculum } from '../autopilot/quest-curriculum.js';
 import { parseSellGoldThreshold } from '../deterministic/sell-junk-for-gold.js';
 
 const HEARTH_QUEST = 'Wood for the Hearth';
-const GOBLIN_QUEST = 'Goblin Menace';
 const LOW_HP_THRESHOLD = 25;
 const KILL_QUEST_PATTERN = /goblin|duck|rabbit|menace|fortune|whisper/i;
 
@@ -68,6 +68,16 @@ export class ProgressiveStubJev implements SupervisorAdvisor {
     }
 
     const playbook = getPlaybookFromSnapshot(snapshot);
+    const questCurriculum =
+      playbook?.questCurriculum ?? evaluateQuestCurriculum(snapshot);
+
+    if (questCurriculum.hasEasyFinishableQuest) {
+      const turnIn = pickAllowed(allowed, ['quest_turnin']);
+      if (turnIn) return turnIn;
+      const questPreferred = pickAllowed(allowed, questCurriculum.preferredActions);
+      if (questPreferred) return questPreferred;
+    }
+
     if (playbook && playbook.enabled && !playbook.complete) {
       if (playbook.stage === 'fish_cod' && playbook.gatherGraceActive) {
         const cont = pickAllowed(allowed, ['continue_current']);
@@ -92,6 +102,13 @@ export class ProgressiveStubJev implements SupervisorAdvisor {
         if (fallback) return fallback;
       }
       if (playbook.stage === 'fish_cod' && !onCod) {
+        if (questCurriculum.hasEasyFinishableQuest) {
+          const questGather = pickAllowed(
+            allowed,
+            questCurriculum.preferredActions.filter((a) => a.startsWith('gather_')),
+          );
+          if (questGather) return questGather;
+        }
         // Prefer fishing; only buy_bait when bait is not trusted.
         const prefer = snapshot.flags.hasBait || playbook.baitOwned
           ? (['fish_cod'] as AutopilotAction[])
@@ -130,6 +147,7 @@ export class ProgressiveStubJev implements SupervisorAdvisor {
         return def.id;
       }
       if (def.id === 'hunt_battle' && (hasKillQuest(snapshot) || combatLagging(snapshot))) {
+        if (questCurriculum.hasEasyFinishableQuest) continue;
         return def.id;
       }
       if (def.id === 'quest_talk_accept' && snapshot.pendingQuests.length > 0) {
@@ -201,13 +219,37 @@ export class ProgressiveStubJev implements SupervisorAdvisor {
   }
 
   async pickQuestPriority(quests: QuestInfo[]): Promise<string[]> {
-    const goblin = quests.find((q) => q.title.includes(GOBLIN_QUEST));
-    if (goblin) {
-      return [goblin.title, ...quests.filter((q) => q !== goblin).map((q) => q.title)];
-    }
-    const hearth = quests.find((q) => q.title.includes(HEARTH_QUEST));
-    if (hearth) {
-      return [hearth.title, ...quests.filter((q) => q !== hearth).map((q) => q.title)];
+    const snapshotLike = {
+      acceptedQuests: quests.filter((q) => !q.isOpen).map((q) => ({
+        title: q.title,
+        progress: q.progress,
+        canTurnIn: q.canTurnIn,
+        tab: 'accepted' as const,
+      })),
+      pendingQuests: quests.filter((q) => q.isOpen).map((q) => ({
+        title: q.title,
+        progress: q.progress,
+        canTurnIn: q.canTurnIn,
+        tab: 'pending' as const,
+      })),
+      inventory: {},
+      skillLevels: {},
+      location: '',
+      pagePath: '',
+      combatPhase: 'none' as const,
+      flags: {
+        hasBait: false,
+        bankNearby: false,
+        gatherBusy: false,
+        inBattle: false,
+        sessionValid: true,
+      },
+    };
+    const curriculum = evaluateQuestCurriculum(snapshotLike);
+    if (curriculum.scoredQuests.length > 0) {
+      const ranked = curriculum.scoredQuests.map((q) => q.title);
+      const missing = quests.map((q) => q.title).filter((t) => !ranked.includes(t));
+      return [...ranked, ...missing];
     }
     return quests.map((q) => q.title);
   }

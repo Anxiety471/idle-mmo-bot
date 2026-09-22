@@ -9,5 +9,6 @@ export {
   filterAllowedByPlaybook,
   attachPlaybookToSnapshot,
   formatPlaybookLogLine,
+  evaluateQuestCurriculum,
 } from './early-systems-playbook.js';
-export type { EarlyStageId, PlaybookProgress } from './early-systems-playbook.js';
+export type { EarlyStageId, PlaybookProgress, QuestCurriculum, ScoredQuest } from './early-systems-playbook.js';

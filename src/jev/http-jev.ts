@@ -116,6 +116,7 @@ function snapshotPayload(snapshot: GameSnapshot, context: AutopilotContext): Rec
     inventory: snapshot.inventory,
     acceptedQuests: snapshot.acceptedQuests,
     pendingQuests: snapshot.pendingQuests,
+    questCurriculum: snapshot.extensions?.questCurriculum ?? null,
     combatPhase: snapshot.combatPhase,
     zones: snapshot.zones ?? [],
     features: snapshot.features ?? {},
@@ -212,7 +213,8 @@ export class HttpJev implements SupervisorAdvisor {
       | undefined;
     const playbookHint =
       playbook && !playbook.complete
-        ? ` ${playbook.curriculumHint ?? ''} Prefer among: ${(playbook.preferredActions ?? []).join(', ') || 'n/a'}. Deprioritize endless Oak woodcutting until early playbook completes.`
+        ? ` ${playbook.curriculumHint ?? ''} Prefer among: ${(playbook.preferredActions ?? []).join(', ') || 'n/a'}. ` +
+          `When questCurriculum shows an easy gather quest (e.g. Wood for the Hearth), prefer quest_talk_accept → gather_oak → quest_turnin over fish_cod and hard hunts.`
         : '';
     return this.withApiLog(
       'chooseNextAction',
