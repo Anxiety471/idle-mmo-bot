@@ -117,3 +117,21 @@ describe('evaluateQuestCurriculum', () => {
     assert.equal(ranked[0], 'Wood for the Hearth');
   });
 });
+
+
+describe('progress-met turn-in inference', () => {
+  it('treats accepted 150/150 as turn-in ready even when canTurnIn is false', () => {
+    const curriculum = evaluateQuestCurriculum(
+      minimalSnapshot({
+        acceptedQuests: [
+          { title: 'Wood for the Hearth', progress: '150 / 150', canTurnIn: false, tab: 'accepted' },
+        ],
+        pendingQuests: [],
+      }),
+    );
+    assert.equal(curriculum.topQuest?.canTurnIn, true);
+    assert.ok(curriculum.preferredActions.includes('quest_turnin'));
+    assert.ok(curriculum.interruptActions.includes('quest_turnin'));
+    assert.ok(curriculum.deprioritizedActions.includes('gather_oak'));
+  });
+});

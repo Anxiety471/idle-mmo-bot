@@ -160,16 +160,51 @@ async function setGatherQuantityBatch(page: Page, batch = 8): Promise<void> {
   const canPerformText = await page.locator('body').innerText();
   const m = canPerformText.match(/you can perform this action\s+(\d+)\s+times/i);
   const available = m ? Number(m[1]) : batch;
+  // Max with tiny material stocks can leave Start disabled — only Max when stock is healthy.
   if (available >= 20 && (await maxBtn.count()) > 0) {
     await maxBtn.first().click({ force: true }).catch(() => undefined);
     await page.waitForTimeout(300);
     return;
   }
-  const value = String(Math.max(1, Math.min(batch, available || batch)));
+  const capped = Number.isFinite(available) && available > 0 ? available : batch;
+  const value = String(Math.max(1, Math.min(batch, capped)));
   await qty.first().fill(value).catch(() => undefined);
   await qty.first().dispatchEvent('input').catch(() => undefined);
   await qty.first().dispatchEvent('change').catch(() => undefined);
   await page.waitForTimeout(200);
+}
+
+async function forceQuantityOne(page: Page): Promise<void> {
+  const qty = page.locator('input[name="quantity"]');
+  if ((await qty.count()) === 0) return;
+  await qty.first().fill('1').catch(() => undefined);
+  await qty.first().dispatchEvent('input').catch(() => undefined);
+  await qty.first().dispatchEvent('change').catch(() => undefined);
+  await page.waitForTimeout(200);
+}
+
+async function confirmReplaceDialog(
+  page: Page,
+  allowInterrupt: boolean,
+): Promise<'ok' | 'failed' | 'kept'> {
+  const dialog = page.getByText(/Start a new action\?/i);
+  if (!(await dialog.isVisible({ timeout: 2000 }).catch(() => false))) {
+    return 'ok';
+  }
+  if (!allowInterrupt) {
+    const closeButton = page.getByRole('button', { name: 'Close', exact: true });
+    if ((await closeButton.count()) > 0) {
+      await closeButton.first().click({ force: true }).catch(() => undefined);
+    }
+    return 'kept';
+  }
+  const startAnyway = page.getByRole('button', { name: /start anyway/i });
+  if ((await startAnyway.count()) > 0) {
+    await startAnyway.first().click({ force: true }).catch(() => undefined);
+    await page.waitForTimeout(400);
+    return 'ok';
+  }
+  return 'failed';
 }
 
 /** Prefer the largest visible Start — a 2x2 aria-hidden submit can steal .first(). */
@@ -177,7 +212,7 @@ async function clickStartButton(page: Page): Promise<boolean> {
   const starts = page.getByRole('button', { name: 'Start', exact: true });
   const count = await starts.count();
   if (count === 0) return false;
-  let bestIdx = 0;
+  let bestIdx = -1;
   let bestArea = -1;
   for (let i = 0; i < count; i++) {
     const box = await starts.nth(i).boundingBox().catch(() => null);
@@ -189,6 +224,7 @@ async function clickStartButton(page: Page): Promise<boolean> {
       bestIdx = i;
     }
   }
+  if (bestIdx < 0) return false;
   await starts.nth(bestIdx).click({ force: true, timeout: 5000 });
   return true;
 }
@@ -404,6 +440,7 @@ async function attemptGatherStart(
   allowInterrupt: boolean,
 ): Promise<GatherStartAttempt> {
   await dismissBlockingOverlays(page);
+  await solveHumanCaptchaIfPresent(page);
 
   if (!(await clickResource(page, resourceLabel))) {
     return {
@@ -415,10 +452,13 @@ async function attemptGatherStart(
   }
 
   await waitForResourcePanelReady(page);
-
   await setGatherQuantityBatch(page);
 
-  const startReadiness = await checkStartReadiness(page, skill);
+  let startReadiness = await checkStartReadiness(page, skill);
+  if (startReadiness !== 'ready') {
+    await forceQuantityOne(page);
+    startReadiness = await checkStartReadiness(page, skill);
+  }
   if (startReadiness !== 'ready') {
     const pageText = await page.locator('body').innerText();
     return {
@@ -430,16 +470,20 @@ async function attemptGatherStart(
   }
 
   if (!(await clickStartButton(page))) {
-    const pageText = await page.locator('body').innerText();
-    return {
-      startReadiness: 'failed',
-      afterClickText: pageText,
-      canPerformAfter: /you can perform this action\s+\d+\s+times/i.test(pageText),
-      finalText: pageText,
-    };
+    await forceQuantityOne(page);
+    if (!(await clickStartButton(page))) {
+      const pageText = await page.locator('body').innerText();
+      return {
+        startReadiness: 'failed',
+        afterClickText: pageText,
+        canPerformAfter: /you can perform this action\s+\d+\s+times/i.test(pageText),
+        finalText: pageText,
+      };
+    }
   }
 
   await page.waitForTimeout(500);
+  await solveHumanCaptchaIfPresent(page);
   const afterClickText = await page.locator('body').innerText();
   const canPerformAfter = /you can perform this action\s+\d+\s+times/i.test(afterClickText);
   if (skill.requiresBait && !canPerformAfter && detectMissingBait(afterClickText)) {
@@ -451,74 +495,42 @@ async function attemptGatherStart(
     };
   }
 
-  const dialog = page.getByText('Start a new action?');
-  if (await dialog.isVisible({ timeout: 2000 }).catch(() => false)) {
-    if (allowInterrupt) {
-      const startAnyway = page.getByRole('button', { name: 'Start anyway', exact: true });
-      if (await startAnyway.count() > 0) {
-        await startAnyway.click({ force: true });
-      } else {
-        return {
-          startReadiness: 'failed',
-          afterClickText,
-          canPerformAfter,
-          finalText: afterClickText,
-        };
-      }
-    } else {
-      const closeButton = page.getByRole('button', { name: 'Close', exact: true });
-      if (await closeButton.count() > 0) {
-        await closeButton.click();
-        return {
-          startReadiness: 'kept_current_action',
-          afterClickText,
-          canPerformAfter,
-          finalText: afterClickText,
-        };
-      }
-      return {
-        startReadiness: 'failed',
-        afterClickText,
-        canPerformAfter,
-        finalText: afterClickText,
-      };
-    }
+  const replace = await confirmReplaceDialog(page, allowInterrupt);
+  if (replace === 'kept') {
+    return {
+      startReadiness: 'kept_current_action',
+      afterClickText,
+      canPerformAfter,
+      finalText: afterClickText,
+    };
+  }
+  if (replace === 'failed') {
+    return {
+      startReadiness: 'failed',
+      afterClickText,
+      canPerformAfter,
+      finalText: afterClickText,
+    };
   }
 
   let busyIndicator = page.getByText(CURRENT_ACTION_MARKER);
-  const currentActionWaitMs = skill.requiresBait ? GATHER_UI_SETTLE_MS : 5_000;
   await busyIndicator
     .first()
-    .waitFor({ state: 'visible', timeout: currentActionWaitMs })
+    .waitFor({ state: 'visible', timeout: GATHER_UI_SETTLE_MS })
     .catch(() => undefined);
-
   let finalText = await page.locator('body').innerText();
-  if (!finalText.includes(CURRENT_ACTION_MARKER)) {
-    if (
-      /make sure you're human|\bVerify\b/i.test(finalText) ||
-      (await page.getByRole('button', { name: /^Verify$/i }).count()) > 0
-    ) {
-      await solveHumanCaptchaIfPresent(page);
-      await setGatherQuantityBatch(page);
-      const ready = await checkStartReadiness(page, skill);
-      if (ready === 'ready') {
-        await clickStartButton(page);
-        if (allowInterrupt) {
-          const dialog2 = page.getByText('Start a new action?');
-          if (await dialog2.isVisible({ timeout: 1500 }).catch(() => false)) {
-            const startAnyway = page.getByRole('button', { name: 'Start anyway', exact: true });
-            if ((await startAnyway.count()) > 0) {
-              await startAnyway.click({ force: true });
-            }
-          }
-        }
-        busyIndicator = page.getByText(CURRENT_ACTION_MARKER);
-        await busyIndicator
-          .first()
-          .waitFor({ state: 'visible', timeout: GATHER_UI_SETTLE_MS })
-          .catch(() => undefined);
-        finalText = await page.locator('body').innerText();
-      }
+
+  if (!finalText.includes(CURRENT_ACTION_MARKER) && allowInterrupt) {
+    await forceQuantityOne(page);
+    if (await clickStartButton(page)) {
+      await page.waitForTimeout(400);
+      await confirmReplaceDialog(page, true);
+      busyIndicator = page.getByText(CURRENT_ACTION_MARKER);
+      await busyIndicator
+        .first()
+        .waitFor({ state: 'visible', timeout: GATHER_UI_SETTLE_MS })
+        .catch(() => undefined);
+      finalText = await page.locator('body').innerText();
     }
   }
 
@@ -589,7 +601,7 @@ export async function restartSkillGather(
   await navigateTo(page, config, skill.path);
   await waitForSkillUiSettled(page, skill);
 
-  const maxAttempts = skill.requiresBait ? 2 : 1;
+  const maxAttempts = skill.requiresBait ? 3 : 1;
   let lastResult: GatherRestartResult = 'failed';
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {

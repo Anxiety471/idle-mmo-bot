@@ -6,6 +6,7 @@
  */
 
 import type { AutopilotAction, GameSnapshot, SkillId, SnapshotQuest } from '../types.js';
+import { isQuestProgressMet } from '../deterministic/quest-accept.js';
 
 export type QuestKind = 'gather' | 'kill' | 'unknown';
 export type QuestDifficulty = 'easy' | 'medium' | 'hard';
@@ -165,8 +166,11 @@ function scoreQuest(snapshot: GameSnapshot, quest: SnapshotQuest): ScoredQuest {
     completable = kill.completable;
   }
 
+  const turnInReady =
+    quest.canTurnIn || (quest.tab === 'accepted' && isQuestProgressMet(quest.progress));
+
   let importance = 30;
-  if (quest.canTurnIn) {
+  if (turnInReady) {
     importance = 100;
   } else if (kind === 'gather' && difficulty === 'easy') {
     const ratio =
@@ -186,7 +190,7 @@ function scoreQuest(snapshot: GameSnapshot, quest: SnapshotQuest): ScoredQuest {
     title: quest.title,
     tab: quest.tab,
     progress: quest.progress,
-    canTurnIn: quest.canTurnIn,
+    canTurnIn: turnInReady,
     kind,
     difficulty,
     importance,
@@ -227,7 +231,7 @@ function buildHint(top?: ScoredQuest, scored: ScoredQuest[] = []): string {
   if (!top) return '';
 
   if (top.canTurnIn) {
-    return `QUEST CURRICULUM: ${top.title} ready — quest_turnin first.`;
+    return `QUEST CURRICULUM: ${top.title} ready — quest_turnin first (interrupt gather).`;
   }
 
   if (top.title.includes(HEARTH_QUEST)) {
@@ -276,7 +280,17 @@ export function evaluateQuestCurriculum(snapshot: GameSnapshot): QuestCurriculum
     : [];
 
   const interruptActions: AutopilotAction[] = [];
-  if (hasEasyFinishableQuest && topQuest?.gatherAction) {
+  const anyTurnInReady = ranked.some((q) => q.canTurnIn && q.tab === 'accepted');
+  if (anyTurnInReady) {
+    if (!preferredActions.includes('quest_turnin')) preferredActions.unshift('quest_turnin');
+    interruptActions.push('quest_turnin');
+    // Stop oak loops once progress is met — turn-in wins.
+    if (!deprioritizedActions.includes('gather_oak')) deprioritizedActions.push('gather_oak');
+    if (!deprioritizedActions.includes('gather_yew')) deprioritizedActions.push('gather_yew');
+    if (!deprioritizedActions.includes('continue_current')) {
+      deprioritizedActions.push('continue_current');
+    }
+  } else if (hasEasyFinishableQuest && topQuest?.gatherAction) {
     interruptActions.push(topQuest.gatherAction);
   }
   if (hasEasyFinishableQuest && snapshot.acceptedQuests.some((q) => q.canTurnIn)) {

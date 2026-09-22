@@ -156,6 +156,8 @@ export interface TurnInQuestOptions {
   tab?: string;
   /** Progress item to read from Overview, e.g. "Oak Log". */
   progressItem?: string;
+  /** Skip /quests navigation when caller already interrupted onto the page. */
+  skipNavigate?: boolean;
 }
 
 export interface TurnInQuestOutcome {
@@ -172,7 +174,9 @@ export async function turnInQuestWhenReady(
   config: AppConfig,
   options: TurnInQuestOptions,
 ): Promise<TurnInQuestOutcome> {
-  await navigateTo(page, config, QUESTS_PATH);
+  if (!options.skipNavigate) {
+    await navigateTo(page, config, QUESTS_PATH);
+  }
   await waitForQuestTabsSettled(page);
 
   if (options.tab) {
