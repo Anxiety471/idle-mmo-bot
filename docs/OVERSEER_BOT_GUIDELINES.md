@@ -335,7 +335,7 @@ The live `/inventory` UI is mostly **icon + quantity badge** with item names in 
 
 ## 5. Early-systems playbook stages
 
-When `EARLY_PLAYBOOK` is enabled (default), `evaluatePlaybook()` runs a **repeating batch leveling loop** (`src/autopilot/early-systems-playbook.ts`). Default targets (env-overridable): **100 Coal Ore**, **100 Raw Cod**, **100 Cooked Cod**, **~50 hunt/battle**, then **manage pets**, then loop back to mining. Override with `PLAYBOOK_COAL_TARGET`, `PLAYBOOK_FISH_TARGET`, `PLAYBOOK_COOK_TARGET`, `PLAYBOOK_HUNT_TARGET`.
+When `EARLY_PLAYBOOK` is enabled (default), `evaluatePlaybook()` runs a **repeating batch leveling loop** (`src/autopilot/early-systems-playbook.ts`). Default targets (env-overridable): **100 Coal Ore**, **100 Raw Cod**, **100 Cooked Cod**, **~120 hunt/battle**, then **manage pets**, then loop back to mining. Hard stage gates use **real counts only** (inventory/playbook counters) — busy-cycle estimates never advance past mine_coal / fish_cod / cook_cod / hunt_rabbits. Override with `PLAYBOOK_COAL_TARGET`, `PLAYBOOK_FISH_TARGET`, `PLAYBOOK_COOK_TARGET`, `PLAYBOOK_HUNT_TARGET`.
 
 | Stage ID | Goal | Primary actions |
 |----------|------|-----------------|
@@ -345,7 +345,7 @@ When `EARLY_PLAYBOOK` is enabled (default), `evaluatePlaybook()` runs a **repeat
 | `fish_cod` | Fish ~100 Raw Cod | `fish_cod`, `buy_bait` if missing |
 | `cook_cod` | Cook ~100 Cod → Cooked Cod with Coal | `cook_cod` (`src/deterministic/cook.ts`) |
 | `sell_extras` | Missions-first gold; sell extras as fallback | `quest_turnin`, `quest_talk_accept`, then `market_sell_half`, `sell_junk` |
-| `hunt_rabbits` | Hunt/battle ~50 times with pre-battle FOOD Add | `hunt_rabbits` (calls `selectBattleFood` + combat round); respects `huntFoundCap` |
+| `hunt_rabbits` | Hunt/battle ~120 times with pre-battle FOOD Add | `hunt_rabbits` (calls `selectBattleFood` + combat round); respects `huntFoundCap` |
 | `manage_pets` | Claim / feed / battle / sleep pets | `manage_pets` (`src/deterministic/pets.ts`); `no_pets` still advances the batch |
 | `explore_map` | One map peek on the first cycle | `explore_map` |
 | *(loop)* | Reset batch counters → `mine_coal` again | Does **not** retire to `complete` after the first pass |

@@ -3,8 +3,9 @@
  *
  * HttpJev remains the decision brain. This module only:
  *  - tracks batch loop progress (coal → sell → bait → fish → cook → sell → hunt → pets → repeat)
- *  - hard gate: coal (~PLAYBOOK_COAL_TARGET, default 100) before fish_cod; snap back if stuck ahead
- *  - default batch targets: ~100 coal, ~100 fish, ~100 cook, ~50 hunt/battle (env-overridable)
+ *  - hard sequential gates by real counts only (not busy-cycle estimates):
+ *      coal → fish → cook → hunt; snap back to first unmet stage if stuck ahead
+ *  - default batch targets: ~100 coal, ~100 fish, ~100 cook, ~120 hunt/battle (env-overridable)
  *  - exposes preferred / deprioritized actions into the snapshot for Jev
  *  - filters allowed actions so endless Oak woodcutting loses priority until the run completes
  *  - missions-first early gold: quest_turnin / quest_talk_accept before market sell when quests
@@ -131,13 +132,13 @@ function envInt(name: string, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
 }
 
-/** Batch leveling defaults (user: 100 coal → 100 fish → 100 cook → ~50 hunt). */
+/** Batch leveling defaults (user: 100 coal → 100 fish → 100 cook → ~120 hunt). */
 const COAL_MIN = envInt('PLAYBOOK_COAL_TARGET', 100);
 const COAL_MAX = envInt('PLAYBOOK_COAL_MAX', COAL_MIN);
 const COD_MIN = envInt('PLAYBOOK_FISH_TARGET', 100);
 const COD_MAX = envInt('PLAYBOOK_FISH_MAX', COD_MIN);
 const COOK_MIN = envInt('PLAYBOOK_COOK_TARGET', 100);
-const HUNT_MIN = envInt('PLAYBOOK_HUNT_TARGET', 50);
+const HUNT_MIN = envInt('PLAYBOOK_HUNT_TARGET', 120);
 
 /** Quest actions preferred over market sell for early gold while playbook is active. */
 export const EARLY_GOLD_QUEST_ACTIONS: AutopilotAction[] = ['quest_turnin', 'quest_talk_accept'];
@@ -150,9 +151,6 @@ export const EARLY_GOLD_SELL_ACTIONS: AutopilotAction[] = [
 export const BAIT_GOLD_COST = 2;
 
 const EARLY_GOLD_SELL_SET = new Set<AutopilotAction>(EARLY_GOLD_SELL_ACTIONS);
-/** Busy-cycle heuristic when inventory scrape is empty (~5s poll → ~2–3 cycles/ore). */
-const COAL_BUSY_TARGET = Math.max(90, Math.ceil(COAL_MIN * 2.5));
-const COD_BUSY_TARGET = Math.max(90, Math.ceil(COD_MIN * 2.5));
 /** Grace window after restartSkillGather before re-injecting interrupt gathers. */
 export const GATHER_GRACE_MS = 30_000;
 /** After buy_bait success, refuse another purchase for this long (or until stage advances). */
@@ -375,22 +373,41 @@ function computeGatherGrace(
   return { active: false };
 }
 
-function effectiveCoal(counts: PlaybookCounts): number {
+/** Soft display estimate from busy cycles (never used for hard gates). */
+function displayCoalEstimate(counts: PlaybookCounts): number {
   if (counts.coal >= COAL_MIN) return counts.coal;
-  // Heuristic: ~1 ore per 2–3 busy cycles; clamp to COAL_MAX
   const estimate = Math.floor(counts.coalBusyCycles / 2.5);
   return Math.max(counts.coal, Math.min(COAL_MAX, estimate));
 }
 
-/** Coal inventory/busy heuristic has reached PLAYBOOK_COAL_TARGET (default 100). */
-export function coalTargetMet(counts: PlaybookCounts): boolean {
-  return effectiveCoal(counts) >= COAL_MIN || counts.coalBusyCycles >= COAL_BUSY_TARGET;
-}
-
-function effectiveCod(counts: PlaybookCounts): number {
+/** Soft display estimate from busy cycles (never used for hard gates). */
+function displayCodEstimate(counts: PlaybookCounts): number {
   if (counts.rawCod >= COD_MIN) return counts.rawCod;
   const estimate = Math.floor(counts.codBusyCycles / 2.5);
   return Math.max(counts.rawCod, Math.min(COD_MAX, estimate));
+}
+
+/**
+ * Hard coal gate: real playbook counter and/or inventory sync only.
+ * Busy-cycle estimates must NOT satisfy this.
+ */
+export function coalTargetMet(counts: PlaybookCounts): boolean {
+  return counts.coal >= COAL_MIN;
+}
+
+/** Hard fish gate: rawCod counter / inventory sync only (not codBusyCycles). */
+export function fishTargetMet(counts: PlaybookCounts): boolean {
+  return counts.rawCod >= COD_MIN;
+}
+
+/** Hard cook gate: cookedCod counter / inventory sync only. */
+export function cookTargetMet(counts: PlaybookCounts): boolean {
+  return counts.cookedCod >= COOK_MIN;
+}
+
+/** Hard hunt gate: rabbitHunts outcome counter only. */
+export function huntTargetMet(counts: PlaybookCounts): boolean {
+  return counts.rabbitHunts >= HUNT_MIN;
 }
 
 export function hasTurnInReady(snapshot: GameSnapshot): boolean {
@@ -438,44 +455,34 @@ function deriveStage(
 ): EarlyStageId {
   if (persisted === 'complete') return 'complete';
 
-  const coal = effectiveCoal(counts);
-  const rawCod = effectiveCod(counts);
-  const cooked = counts.cookedCod;
   const hasBait = trustHasBait(snapshot, baitOwned, persisted);
-
-  // Advance monotonically through STAGE_ORDER based on targets.
   const idx = STAGE_ORDER.indexOf(persisted);
-  const atLeast = (stage: EarlyStageId): boolean => STAGE_ORDER.indexOf(stage) <= idx;
 
-  // Hard gate: never leave mine_coal until coal target met (coal first before fishing).
+  // Strict sequential hard gates by real counts (busy-cycles never advance stages).
   if (!coalTargetMet(counts)) {
     return 'mine_coal';
   }
-  if (counts.sells < 1 && atLeast('sell_half')) {
+  if (counts.sells < 1 && (persisted === 'mine_coal' || persisted === 'sell_half')) {
     // After coal target, sell for bait gold unless quests / wallet already fund bait.
-    if (persisted === 'mine_coal' || persisted === 'sell_half') {
-      if (canSkipSellHalfForQuestFunding(snapshot)) return 'buy_bait';
-      return 'sell_half';
-    }
+    if (canSkipSellHalfForQuestFunding(snapshot)) return 'buy_bait';
+    return 'sell_half';
   }
   if (!hasBait && (persisted === 'sell_half' || persisted === 'buy_bait' || idx <= STAGE_ORDER.indexOf('buy_bait'))) {
-    if (coal >= COAL_MIN || counts.coalBusyCycles >= COAL_BUSY_TARGET || counts.sells >= 1) {
-      return 'buy_bait';
-    }
+    return 'buy_bait';
   }
-  if (hasBait && rawCod < COD_MIN && counts.codBusyCycles < COD_BUSY_TARGET) {
-    if (idx >= STAGE_ORDER.indexOf('buy_bait') || hasBait) return 'fish_cod';
+  if (!fishTargetMet(counts)) {
+    if (hasBait || idx >= STAGE_ORDER.indexOf('buy_bait')) return 'fish_cod';
   }
-  if (rawCod >= Math.floor(COD_MIN / 2) && cooked < COOK_MIN) {
-    if (idx >= STAGE_ORDER.indexOf('fish_cod')) return 'cook_cod';
+  if (fishTargetMet(counts) && !cookTargetMet(counts)) {
+    if (idx >= STAGE_ORDER.indexOf('fish_cod') || hasBait) return 'cook_cod';
   }
-  if (cooked >= Math.min(5, Math.floor(COOK_MIN / 4)) && counts.sells < 2 && idx >= STAGE_ORDER.indexOf('cook_cod')) {
-    return 'sell_extras';
+  if (cookTargetMet(counts) && counts.sells < 2 && idx >= STAGE_ORDER.indexOf('cook_cod')) {
+    if (persisted === 'cook_cod' || persisted === 'sell_extras') return 'sell_extras';
   }
-  if (cooked >= Math.min(3, COOK_MIN) && counts.rabbitHunts < HUNT_MIN && idx >= STAGE_ORDER.indexOf('sell_extras')) {
+  if (cookTargetMet(counts) && !huntTargetMet(counts) && idx >= STAGE_ORDER.indexOf('sell_extras')) {
     return 'hunt_rabbits';
   }
-  if (counts.rabbitHunts >= HUNT_MIN && counts.petManages < 1 && idx >= STAGE_ORDER.indexOf('hunt_rabbits')) {
+  if (huntTargetMet(counts) && counts.petManages < 1 && idx >= STAGE_ORDER.indexOf('hunt_rabbits')) {
     return 'manage_pets';
   }
   // Batch loop: after pets (or hunt if pets already done), do not retire to complete — reset happens in evaluatePlaybook.
@@ -484,7 +491,7 @@ function deriveStage(
   }
 
   // Fall through: keep persisted stage if still sensible.
-  return persisted === 'mine_coal' && coal >= COAL_MIN ? 'sell_half' : persisted;
+  return persisted === 'mine_coal' && coalTargetMet(counts) ? 'sell_half' : persisted;
 }
 
 function stageMeta(stage: EarlyStageId, baitOwned = false): {
@@ -645,21 +652,51 @@ export function evaluatePlaybook(
 
   let stage = deriveStage(counts, snapshot, persisted.stage, baitOwned);
   const coalMet = coalTargetMet(counts);
-  const snappedBackForCoal =
-    !coalMet && STAGE_ORDER.indexOf(persisted.stage) >= STAGE_ORDER.indexOf('fish_cod');
+  const fishMet = fishTargetMet(counts);
+  const cookMet = cookTargetMet(counts);
+  const huntMet = huntTargetMet(counts);
+  const persistedIdx = STAGE_ORDER.indexOf(persisted.stage);
 
-  // Hard coal gate: snap back to mine_coal when target unmet (exception to monotonic).
-  // Recovers live bots stuck on fish_cod+ with only a few coal.
+  // Snap back to the first unmet hard-gate stage (real counts only).
+  // Busy-cycle estimates must never keep a bot ahead of unfinished prior stages.
+  let snapBackReason: string | undefined;
   if (!coalMet) {
+    if (persistedIdx > STAGE_ORDER.indexOf('mine_coal')) {
+      snapBackReason =
+        `coal gate: snapped back from ${persisted.stage} to mine_coal ` +
+        `(coal=${counts.coal}/${COAL_MIN}, busyCycles=${counts.coalBusyCycles} ignored for gate)`;
+    }
     stage = 'mine_coal';
+  } else if (!fishMet && persistedIdx > STAGE_ORDER.indexOf('fish_cod')) {
+    if (!trustHasBait(snapshot, baitOwned, persisted.stage)) {
+      stage = counts.sells < 1 && !canSkipSellHalfForQuestFunding(snapshot) ? 'sell_half' : 'buy_bait';
+      snapBackReason =
+        `fish gate: snapped back from ${persisted.stage} toward bait/fish ` +
+        `(rawCod=${counts.rawCod}/${COD_MIN}; bait not trusted)`;
+    } else {
+      snapBackReason =
+        `fish gate: snapped back from ${persisted.stage} to fish_cod ` +
+        `(rawCod=${counts.rawCod}/${COD_MIN}, busyCycles=${counts.codBusyCycles} ignored for gate)`;
+      stage = 'fish_cod';
+      baitOwned = true;
+    }
+  } else if (!cookMet && persistedIdx > STAGE_ORDER.indexOf('cook_cod')) {
+    snapBackReason =
+      `cook gate: snapped back from ${persisted.stage} to cook_cod ` +
+      `(cookedCod=${counts.cookedCod}/${COOK_MIN})`;
+    stage = 'cook_cod';
+  } else if (!huntMet && persistedIdx > STAGE_ORDER.indexOf('hunt_rabbits')) {
+    snapBackReason =
+      `hunt gate: snapped back from ${persisted.stage} to hunt_rabbits ` +
+      `(rabbitHunts=${counts.rabbitHunts}/${HUNT_MIN})`;
+    stage = 'hunt_rabbits';
   } else {
-    // Monotonic advance: never go backwards in STAGE_ORDER once coal is secured.
-    const prevIdx = STAGE_ORDER.indexOf(persisted.stage);
+    // Monotonic advance: never go backwards once prior hard gates are met.
     const nextIdx = STAGE_ORDER.indexOf(stage);
-    if (nextIdx < prevIdx) stage = persisted.stage;
+    if (nextIdx < persistedIdx) stage = persisted.stage;
   }
 
-  // Auto-advance mine_coal → sell_half when coal target met.
+  // Auto-advance within sequence when real targets are met (no busy-cycle shortcuts).
   if (stage === 'mine_coal' && coalMet) {
     stage = 'sell_half';
   }
@@ -673,12 +710,12 @@ export function evaluatePlaybook(
     stage = 'fish_cod';
     baitOwned = true;
   }
-  if (stage === 'fish_cod' && (effectiveCod(counts) >= COD_MIN || counts.codBusyCycles >= COD_BUSY_TARGET)) {
+  if (stage === 'fish_cod' && fishMet) {
     stage = 'cook_cod';
   }
-  if (stage === 'cook_cod' && counts.cookedCod >= COOK_MIN) stage = 'sell_extras';
+  if (stage === 'cook_cod' && cookMet) stage = 'sell_extras';
   if (stage === 'sell_extras' && counts.sells >= 2) stage = 'hunt_rabbits';
-  if (stage === 'hunt_rabbits' && counts.rabbitHunts >= HUNT_MIN) stage = 'manage_pets';
+  if (stage === 'hunt_rabbits' && huntMet) stage = 'manage_pets';
   // One map peek on the first cycle only, then loop the batch forever (never retire to complete).
   if (stage === 'manage_pets' && counts.petManages >= 1) {
     if (counts.mapPeeks < 1 && counts.batchCycles === 0) {
@@ -755,9 +792,8 @@ export function evaluatePlaybook(
   }
 
   const baitPurchaseRecent = recentBaitPurchase(persisted.lastBaitPurchaseAt);
-  let curriculumHint = snappedBackForCoal
-    ? `EARLY PLAYBOOK coal gate: snapped back from ${persisted.stage} to mine_coal ` +
-      `(coal=${counts.coal}/${COAL_MIN}, busyCycles=${counts.coalBusyCycles}). Coal first before fishing.`
+  let curriculumHint = snapBackReason
+    ? `EARLY PLAYBOOK ${snapBackReason}. Strict real-count batch gates.`
     : needsBaitRestockNow
     ? `EARLY PLAYBOOK fish_cod needs bait restock (Cheap Bait=${baitStock} < 15) — choose buy_bait before fish_cod.`
     : baitPurchaseRecent && stage === 'fish_cod' && baitStock < 15
@@ -938,13 +974,21 @@ export function filterAllowedByPlaybook(
 
   let next = allowed.filter((a) => !playbook.deprioritizedActions.includes(a));
 
-  // Coal-first gate: while coal target unmet, prefer mine_coal and drop fish_cod/cook_cod.
+  // Strict sequential gates: drop later-stage actions while earlier real targets unmet.
   const coalIncomplete = !coalTargetMet(playbook.counts);
+  const fishIncomplete = !fishTargetMet(playbook.counts);
+  const cookIncomplete = !cookTargetMet(playbook.counts);
   if (coalIncomplete || playbook.stage === 'mine_coal') {
-    next = next.filter((a) => a !== 'fish_cod' && a !== 'cook_cod');
+    next = next.filter(
+      (a) => a !== 'fish_cod' && a !== 'cook_cod' && a !== 'hunt_rabbits' && a !== 'hunt_battle',
+    );
     if (allowed.includes('mine_coal') && !next.includes('mine_coal')) {
       next.push('mine_coal');
     }
+  } else if (fishIncomplete || playbook.stage === 'fish_cod') {
+    next = next.filter((a) => a !== 'cook_cod' && a !== 'hunt_rabbits' && a !== 'hunt_battle');
+  } else if (cookIncomplete || playbook.stage === 'cook_cod') {
+    next = next.filter((a) => a !== 'hunt_rabbits' && a !== 'hunt_battle');
   }
 
   if (fishBackoff) {
@@ -1154,12 +1198,15 @@ export function getPlaybookFromSnapshot(snapshot: GameSnapshot): PlaybookProgres
 
 export function formatPlaybookLogLine(playbook: PlaybookProgress): string {
   const c = playbook.counts;
+  const softCoal = displayCoalEstimate(c);
+  const softCod = displayCodEstimate(c);
   return (
     `stage=${playbook.stage} goal="${playbook.stageGoal}"` +
-    ` coal=${c.coal}/${playbook.targets.coalMin} (busyCycles=${c.coalBusyCycles})` +
-    ` cod=${c.rawCod}/${playbook.targets.codMin} cooked=${c.cookedCod}` +
+    ` coal=${c.coal}/${playbook.targets.coalMin} (busy=${c.coalBusyCycles}, soft~${softCoal})` +
+    ` cod=${c.rawCod}/${playbook.targets.codMin} (busy=${c.codBusyCycles}, soft~${softCod})` +
+    ` cooked=${c.cookedCod}/${playbook.targets.cookMin}` +
     ` sells=${c.sells} rabbits=${c.rabbitHunts}/${playbook.targets.huntMin}` +
-    ` cookedTarget=${playbook.targets.cookMin} pets=${c.petManages} cycles=${c.batchCycles} map=${c.mapPeeks}` +
+    ` pets=${c.petManages} cycles=${c.batchCycles} map=${c.mapPeeks}` +
     ` baitOwned=${playbook.baitOwned}` +
     ` preferred=[${playbook.preferredActions.join(',')}]`
   );
