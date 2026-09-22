@@ -65,7 +65,7 @@ async function tryFeedOnce(page: Page): Promise<boolean> {
  */
 export async function managePets(page: Page, config: AppConfig): Promise<PetsStepResult> {
   try {
-    await navigateTo(page, '/pets');
+    await navigateTo(page, config, '/pets');
     await sleep(Math.max(800, config.pollMs));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

@@ -575,3 +575,52 @@ describe('batch leveling playbook targets', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 });
+
+
+describe('bait restock preference', () => {
+  const envSnapshot: Record<string, string | undefined> = {};
+  afterEach(() => {
+    restoreEnv(envSnapshot);
+  });
+
+  it('hard-prefers buy_bait and drops fish_cod when Cheap Bait is low on fish_cod', () => {
+    for (const key of ENV_KEYS) envSnapshot[key] = process.env[key];
+    const dir = join(getLogDir(), `pb-bait-${Date.now()}`);
+    mkdirSync(dir, { recursive: true });
+    process.env.AUTOPILOT_LOG_DIR = dir;
+    process.env.PLAYBOOK_STATE_PATH = join(dir, 'playbook-state.json');
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      process.env.PLAYBOOK_STATE_PATH,
+      JSON.stringify({
+        version: 1,
+        stage: 'fish_cod',
+        counts: emptyPlaybookCounts(),
+        baitOwned: true,
+      }),
+    );
+
+    const snapshot = minimalSnapshot({
+      inventory: { 'Cheap Bait': 1 },
+      gold: 50,
+      flags: {
+        hasBait: true,
+        bankNearby: false,
+        gatherBusy: false,
+        inBattle: false,
+        sessionValid: true,
+      },
+    });
+    const playbook = evaluatePlaybook(snapshot);
+    assert.equal(playbook.preferredActions[0], 'buy_bait');
+    const filtered = filterAllowedByPlaybook(
+      ['fish_cod', 'buy_bait', 'craft_if_ready', 'idle'],
+      snapshot,
+      playbook,
+    );
+    assert.equal(filtered[0], 'buy_bait');
+    assert.ok(!filtered.includes('fish_cod'));
+    assert.ok(!filtered.includes('craft_if_ready'));
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

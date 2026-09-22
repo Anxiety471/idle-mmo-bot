@@ -21,6 +21,30 @@ function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/** Click with force to beat Alpine questsInspect overlays intercepting pointer events. */
+async function forceClick(locator: ReturnType<Page['locator']>): Promise<boolean> {
+  try {
+    await locator.first().click({ force: true, timeout: 8_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function dismissQuestUiChrome(page: Page): Promise<void> {
+  await page.keyboard.press('Escape').catch(() => undefined);
+  await page.waitForTimeout(150);
+  // Close common modal/chrome buttons if they sit above the list.
+  for (const name of ['Close', 'Cancel', '×', 'x'] as const) {
+    const btn = page.getByRole('button', { name, exact: true });
+    if ((await btn.count()) > 0 && (await btn.first().isVisible().catch(() => false))) {
+      await btn.first().click({ force: true }).catch(() => undefined);
+      await page.waitForTimeout(150);
+    }
+  }
+}
+
+
 /** Match tab labels like "Accepted" or "Accepted 1", "Pending Nearby 3". */
 function questTabPattern(tabName: string): RegExp {
   return new RegExp(`^${escapeRegex(tabName)}(?:\\s+\\d+)?$`);
@@ -113,11 +137,17 @@ export async function openQuest(
   }
 
   // Substring match on button accessible name (works once tab list is visible).
-  const card = page.getByRole('button', { name: title });
+  await dismissQuestUiChrome(page);
+  const inspect = page.locator('[x-data="questsInspect"]');
+  const cardInInspect = inspect.getByRole('button', { name: title });
+  const card = (await cardInInspect.count()) > 0 ? cardInInspect : page.getByRole('button', { name: title });
   if (await card.count() === 0) {
     return 'failed';
   }
-  await card.first().click();
+  if (!(await forceClick(card))) {
+    return 'failed';
+  }
+  await page.waitForTimeout(300);
   return 'opened';
 }
 
@@ -130,7 +160,7 @@ export async function switchQuestTab(page: Page, tabName: string): Promise<Quest
 
   const tabByRole = page.getByRole('button', { name: pattern });
   if (await tabByRole.count() > 0) {
-    await tabByRole.first().click();
+    await forceClick(tabByRole);
     await page.waitForTimeout(TAB_SWITCH_SETTLE_MS);
     return 'opened';
   }
@@ -141,7 +171,7 @@ export async function switchQuestTab(page: Page, tabName: string): Promise<Quest
   for (let i = 0; i < count; i++) {
     const label = (await buttons.nth(i).innerText()).trim();
     if (pattern.test(label)) {
-      await buttons.nth(i).click();
+      await buttons.nth(i).click({ force: true });
       await page.waitForTimeout(TAB_SWITCH_SETTLE_MS);
       return 'opened';
     }
@@ -305,7 +335,13 @@ export async function talkQuest(
 
 /** Click Turn In only when the button is enabled. */
 export async function turnInQuest(page: Page): Promise<QuestStepResult> {
-  const turnInBtn = page.getByRole('button', { name: 'Turn In', exact: true });
+  await dismissQuestUiChrome(page);
+  const inspect = page.locator('[x-data="questsInspect"]');
+  const inInspect = inspect.getByRole('button', { name: 'Turn In', exact: true });
+  const turnInBtn =
+    (await inInspect.count()) > 0
+      ? inInspect
+      : page.getByRole('button', { name: 'Turn In', exact: true });
   if (await turnInBtn.count() === 0) {
     return 'no_action';
   }
@@ -315,7 +351,9 @@ export async function turnInQuest(page: Page): Promise<QuestStepResult> {
     return 'in_progress';
   }
 
-  await turnInBtn.first().click();
+  if (!(await forceClick(turnInBtn))) {
+    return 'failed';
+  }
   return 'turned_in';
 }
 
@@ -323,7 +361,7 @@ export async function turnInQuest(page: Page): Promise<QuestStepResult> {
 export async function readQuestProgress(page: Page, itemName: string): Promise<string | undefined> {
   const overview = page.getByRole('button', { name: 'Overview', exact: true });
   if (await overview.count() > 0) {
-    await overview.click();
+    await forceClick(overview);
   }
 
   const text = await pageText(page);
@@ -336,7 +374,12 @@ export async function readQuestProgress(page: Page, itemName: string): Promise<s
 
 /** Check whether Turn In is currently enabled. */
 export async function isTurnInEnabled(page: Page): Promise<boolean> {
-  const turnInBtn = page.getByRole('button', { name: 'Turn In', exact: true });
+  const inspect = page.locator('[x-data="questsInspect"]');
+  const inInspect = inspect.getByRole('button', { name: 'Turn In', exact: true });
+  const turnInBtn =
+    (await inInspect.count()) > 0
+      ? inInspect
+      : page.getByRole('button', { name: 'Turn In', exact: true });
   if (await turnInBtn.count() === 0) return false;
   return !(await turnInBtn.first().isDisabled());
 }

@@ -679,6 +679,24 @@ export function evaluatePlaybook(
     ? meta.interrupt.filter((a) => a !== 'fish_cod')
     : [...meta.interrupt];
 
+  const baitStock =
+    (snapshot.inventory['Cheap Bait'] ?? 0) + (snapshot.inventory['Bait'] ?? 0);
+  const needsBaitRestockNow = stage === 'fish_cod' && baitStock < 15;
+  if (needsBaitRestockNow) {
+    preferredActions = [
+      'buy_bait',
+      ...preferredActions.filter((a) => a !== 'buy_bait' && a !== 'fish_cod'),
+    ];
+    interruptActions = [
+      'buy_bait',
+      ...interruptActions.filter((a) => a !== 'buy_bait' && a !== 'fish_cod'),
+    ];
+    if (!deprioritizedActions.includes('fish_cod')) deprioritizedActions.push('fish_cod');
+    if (!deprioritizedActions.includes('craft_if_ready')) {
+      deprioritizedActions.push('craft_if_ready');
+    }
+  }
+
   if (questCurriculum.hasEasyFinishableQuest) {
     deprioritizedActions = deprioritizedActions.filter(
       (a) => !questCurriculum.preferredActions.includes(a),
@@ -694,10 +712,12 @@ export function evaluatePlaybook(
     }
   }
 
-  let curriculumHint = backoffActive
-    ? `EARLY PLAYBOOK fish_cod backoff (${fishBackoff.failures} failures) until ${fishBackoff.until ?? 'cooldown'} — ` +
-      `prefer ${FISH_COD_BACKOFF_FALLBACKS.join('/')} instead of hammering fish_cod. baitOwned stays true.`
-    : meta.hint;
+  let curriculumHint = needsBaitRestockNow
+    ? `EARLY PLAYBOOK fish_cod needs bait restock (Cheap Bait=${baitStock} < 15) — choose buy_bait before fish_cod.`
+    : backoffActive
+      ? `EARLY PLAYBOOK fish_cod backoff (${fishBackoff.failures} failures) until ${fishBackoff.until ?? 'cooldown'} — ` +
+        `prefer ${FISH_COD_BACKOFF_FALLBACKS.join('/')} instead of hammering fish_cod. baitOwned stays true.`
+      : meta.hint;
   if (questCurriculum.hint) {
     curriculumHint = `${curriculumHint} ${questCurriculum.hint}`.trim();
   }
@@ -888,8 +908,11 @@ export function filterAllowedByPlaybook(
   const baitCooldown = recentBaitPurchase(playbook.lastBaitPurchaseAt);
   if (!needsBaitRestock && (baitTrusted || pastBuyBait || baitCooldown || playbook.baitOwned)) {
     next = next.filter((a) => a !== 'buy_bait');
-  } else if (needsBaitRestock && !next.includes('buy_bait') && allowed.includes('buy_bait')) {
-    next.push('buy_bait');
+  } else if (needsBaitRestock) {
+    next = next.filter((a) => a !== 'fish_cod');
+    if (allowed.includes('buy_bait') && !next.includes('buy_bait')) next.push('buy_bait');
+    // Hard-prefer: drop craft spam while bait is the missing requirement.
+    next = next.filter((a) => a !== 'craft_if_ready');
   }
 
   // Easy-complete pending quests (e.g. Hearth 150/150) should win over continue_current.
@@ -981,6 +1004,10 @@ export function filterAllowedByPlaybook(
   // Ensure idle remains available.
   if (!next.includes('idle') && allowed.includes('idle')) next.push('idle');
   if (next.length === 0) return allowed.includes('idle') ? ['idle'] : allowed;
+
+  if (needsBaitRestock && next.includes('buy_bait')) {
+    next = ['buy_bait', ...next.filter((a) => a !== 'buy_bait')];
+  }
 
   const preferred = new Set(playbook.preferredActions);
   const questPreferred = new Set(questCurriculum?.preferredActions ?? []);

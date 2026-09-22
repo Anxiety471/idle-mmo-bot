@@ -168,7 +168,7 @@ async function questTurnIn(
   for (let i = 0; i < count; i++) {
     const label = (await cards.nth(i).innerText()).trim();
     if (label.length < 4 || label === 'Turn In') continue;
-    await cards.nth(i).click();
+    await cards.nth(i).click({ force: true });
     if (await isTurnInEnabled(page)) {
       return `turned_in:${label}:${await turnInQuest(page)}`;
     }
