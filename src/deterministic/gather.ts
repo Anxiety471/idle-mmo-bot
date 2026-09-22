@@ -378,6 +378,11 @@ export interface RestartSkillOptions {
   resourceLabel?: string;
   /** When true, click "Start anyway" on the replace dialog. Default: false (Close). */
   allowInterrupt?: boolean;
+  /**
+   * When true with allowInterrupt, Stop+re-Start even if already busy on the target
+   * resource (stale busy / non-producing gather). Default: false keeps already_busy.
+   */
+  forceRestart?: boolean;
   /** Reuse a recent readSkillState result to avoid duplicate navigation. */
   knownState?: GatherState;
 }
@@ -567,6 +572,32 @@ async function attemptGatherStart(
   };
 }
 
+
+/** Stop an active gather CURRENT ACTION when present (needed to force-restart stale mining). */
+async function tryStopCurrentGather(page: Page): Promise<boolean> {
+  const stopBtn = page.getByRole('button', { name: 'Stop', exact: true });
+  if ((await stopBtn.count()) === 0) return false;
+  if (!(await stopBtn.first().isVisible().catch(() => false))) return false;
+  await stopBtn.first().click({ force: true }).catch(() => undefined);
+  await page.waitForTimeout(400);
+  // Confirm dialog often repeats the Stop label.
+  const confirm = page.getByRole('button', { name: /^(Stop|Confirm|Yes)$/i });
+  for (let i = 0; i < (await confirm.count()); i++) {
+    if (await confirm.nth(i).isVisible().catch(() => false)) {
+      await confirm.nth(i).click({ force: true }).catch(() => undefined);
+      await page.waitForTimeout(300);
+      break;
+    }
+  }
+  // Wait briefly for CURRENT ACTION to clear.
+  const busy = page.getByText(CURRENT_ACTION_MARKER);
+  await busy
+    .first()
+    .waitFor({ state: 'hidden', timeout: 5_000 })
+    .catch(() => undefined);
+  return true;
+}
+
 /**
  * Restart gathering on the given skill/resource when idle.
  * If busy (locally or globally), returns without clicking Start.
@@ -579,9 +610,10 @@ export async function restartSkillGather(
   const skill = getSkillConfig(options.skill);
   const resourceLabel = resolveResource(skill, options.resourceLabel);
   const allowInterrupt = options.allowInterrupt ?? false;
+  const forceRestart = options.forceRestart ?? false;
 
-  const state = options.knownState ?? await readSkillState(page, config, skill.id);
-  if (state.busy) {
+  let state = options.knownState ?? await readSkillState(page, config, skill.id);
+  if (state.busy && !allowInterrupt) {
     return 'already_busy';
   }
 
@@ -601,7 +633,24 @@ export async function restartSkillGather(
   await navigateTo(page, config, skill.path);
   await waitForSkillUiSettled(page, skill);
 
-  const maxAttempts = skill.requiresBait ? 3 : 1;
+  // Same-resource busy: healthy gather → already_busy unless forceRestart (stale coal).
+  // Cross-skill interrupt usually sees this page as idle (CURRENT ACTION elsewhere).
+  if (state.busy && allowInterrupt) {
+    const onTarget =
+      !state.currentResource || state.currentResource === resourceLabel;
+    if (onTarget && !forceRestart) {
+      return 'already_busy';
+    }
+    if (onTarget && forceRestart) {
+      await tryStopCurrentGather(page);
+      await waitForSkillUiSettled(page, skill);
+      state = await readSkillState(page, config, skill.id);
+      // If still busy after Stop, fall through to attemptGatherStart (Start anyway).
+    }
+  }
+
+  // Mining shares fish-style Start flakiness (qty/disabled Start/captcha); retry a few times.
+  const maxAttempts = skill.requiresBait || skill.id === 'mining' ? 3 : 1;
   let lastResult: GatherRestartResult = 'failed';
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {

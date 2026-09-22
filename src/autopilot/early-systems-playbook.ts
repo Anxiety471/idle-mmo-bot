@@ -91,6 +91,13 @@ export interface PlaybookProgress {
   fishCodBackoffUntil?: string;
   /** Consecutive fish_cod failed/fishing_start_failed outcomes (resets on success). */
   consecutiveFishCodFailures: number;
+  /**
+   * True when snapshot claims busy mining coal but inventory/playbook coal has not
+   * increased across several poll cycles (false-busy or non-producing gather).
+   */
+  staleCoalGather: boolean;
+  /** Consecutive flat coal-while-busy cycles (debug / tests). */
+  staleCoalBusyCycles: number;
   /** Per-tick quest difficulty/importance scoring for HttpJev + filters. */
   questCurriculum?: QuestCurriculum;
 }
@@ -111,6 +118,10 @@ interface PersistedPlaybook {
   lastGatherResource?: string;
   consecutiveFishCodFailures?: number;
   fishCodBackoffUntil?: string;
+  /** Last observed effective coal count used for stale-busy detection. */
+  lastCoalProgressSeen?: number;
+  /** Consecutive evaluate ticks busy on coal with flat coal progress. */
+  staleCoalBusyCycles?: number;
 }
 
 /** Sequential batch stages only — manage_pets is async and not in this order. */
@@ -160,6 +171,11 @@ export const BAIT_PURCHASE_COOLDOWN_MS = 15 * 60_000;
 export const FISH_COD_FAILURE_THRESHOLD = 4;
 /** Cooldown before re-injecting fish_cod after backoff (stage stays fish_cod). */
 export const FISH_COD_BACKOFF_MS = 3 * 60_000;
+/**
+ * Busy-on-coal cycles with flat inventory/playbook coal before treating gather as stale.
+ * ~6–8 autopilot polls (~2–10 min depending on pollMs) — real mining should move coal sooner.
+ */
+export const STALE_COAL_BUSY_CYCLES = envInt('PLAYBOOK_STALE_COAL_BUSY_CYCLES', 6);
 /** Fallback actions while fish_cod backoff is active (baitOwned is never cleared). */
 export const FISH_COD_BACKOFF_FALLBACKS: AutopilotAction[] = [
   'continue_current',
@@ -249,6 +265,8 @@ function loadPersisted(): PersistedPlaybook {
       lastGatherResource: parsed.lastGatherResource,
       consecutiveFishCodFailures: parsed.consecutiveFishCodFailures ?? 0,
       fishCodBackoffUntil: parsed.fishCodBackoffUntil,
+      lastCoalProgressSeen: parsed.lastCoalProgressSeen,
+      staleCoalBusyCycles: parsed.staleCoalBusyCycles ?? 0,
     };
   } catch {
     return { version: 1, stage: 'mine_coal', counts: emptyCounts() };
@@ -344,6 +362,57 @@ function syncCountsFromSnapshot(
     next.codBusyCycles += 1;
   }
   return next;
+}
+
+
+/** Busy mining Coal Ore (or label contains coal) for stale-progress detection. */
+function isBusyMiningCoal(snapshot: GameSnapshot): boolean {
+  const busy = Boolean(snapshot.currentAction?.busy || snapshot.flags.gatherBusy);
+  if (!busy) return false;
+  const resource = snapshot.currentAction?.resource ?? snapshot.currentAction?.label ?? '';
+  return /coal/i.test(resource);
+}
+
+/**
+ * Track flat coal while snapshot says busy mining coal.
+ * Returns updated anchor + consecutive flat cycles (does not use busy estimates for gates).
+ */
+export function updateStaleCoalBusyTracking(
+  persisted: {
+    lastCoalProgressSeen?: number;
+    staleCoalBusyCycles?: number;
+  },
+  effectiveCoal: number,
+  busyMiningCoal: boolean,
+): { lastCoalProgressSeen: number; staleCoalBusyCycles: number; stale: boolean } {
+  const prevSeen =
+    typeof persisted.lastCoalProgressSeen === 'number' && Number.isFinite(persisted.lastCoalProgressSeen)
+      ? persisted.lastCoalProgressSeen
+      : effectiveCoal;
+  let staleCycles = persisted.staleCoalBusyCycles ?? 0;
+
+  if (!busyMiningCoal) {
+    return {
+      lastCoalProgressSeen: Math.max(prevSeen, effectiveCoal),
+      staleCoalBusyCycles: 0,
+      stale: false,
+    };
+  }
+
+  if (effectiveCoal > prevSeen) {
+    return {
+      lastCoalProgressSeen: effectiveCoal,
+      staleCoalBusyCycles: 0,
+      stale: false,
+    };
+  }
+
+  staleCycles += 1;
+  return {
+    lastCoalProgressSeen: prevSeen,
+    staleCoalBusyCycles: staleCycles,
+    stale: staleCycles >= STALE_COAL_BUSY_CYCLES,
+  };
 }
 
 function computeFishCodBackoff(persisted: PersistedPlaybook): {
@@ -690,6 +759,8 @@ export function evaluatePlaybook(
       gatherGraceActive: false,
       fishCodBackoffActive: false,
       consecutiveFishCodFailures: 0,
+      staleCoalGather: false,
+      staleCoalBusyCycles: 0,
     };
   }
 
@@ -804,6 +875,16 @@ export function evaluatePlaybook(
     stage = 'mine_coal';
   }
 
+  const busyMiningCoal = isBusyMiningCoal(snapshot);
+  const staleTrack = updateStaleCoalBusyTracking(persisted, counts.coal, busyMiningCoal);
+  const staleCoalGather = staleTrack.stale;
+  if (staleCoalGather) {
+    console.warn(
+      `[playbook] stale coal gather: busy mining coal for ${staleTrack.staleCoalBusyCycles} flat cycles ` +
+        `(coal=${counts.coal}, lastSeen=${staleTrack.lastCoalProgressSeen}) — force re-mine_coal`,
+    );
+  }
+
   const grace = computeGatherGrace(persisted, stage);
   const fishBackoff = computeFishCodBackoff(persisted);
   if (grace.active && stage === 'fish_cod') {
@@ -890,6 +971,18 @@ export function evaluatePlaybook(
     deprioritizedActions = deprioritizedActions.filter((a) => a !== 'equip_pet');
   }
 
+  // Stale coal busy: drop continue_current preference; hard-prefer mine_coal interrupt restart.
+  if (staleCoalGather && (stage === 'mine_coal' || !coalTargetMet(counts))) {
+    preferredActions = [
+      'mine_coal',
+      ...preferredActions.filter((a) => a !== 'mine_coal' && a !== 'continue_current'),
+    ];
+    if (!interruptActions.includes('mine_coal')) interruptActions.unshift('mine_coal');
+    if (!deprioritizedActions.includes('continue_current')) {
+      deprioritizedActions.push('continue_current');
+    }
+  }
+
   const baitPurchaseRecent = recentBaitPurchase(persisted.lastBaitPurchaseAt);
   let curriculumHint = snapBackReason
     ? `EARLY PLAYBOOK ${snapBackReason}. Strict real-count batch gates.`
@@ -915,6 +1008,12 @@ export function evaluatePlaybook(
       `${curriculumHint} EARLY PLAYBOOK pets equip: soft-prefer equip_pet while idle for boost.`
     ).trim();
   }
+  if (staleCoalGather) {
+    curriculumHint = (
+      `${curriculumHint} EARLY PLAYBOOK stale coal gather: inventory/playbook coal flat while busy mining — ` +
+      `interrupt and re-mine_coal (Stop + Start batch) instead of endless continue_current.`
+    ).trim();
+  }
 
   savePersisted({
     version: 1,
@@ -928,6 +1027,8 @@ export function evaluatePlaybook(
     lastGatherResource: persisted.lastGatherResource,
     consecutiveFishCodFailures: fishBackoff.failures,
     fishCodBackoffUntil: fishBackoff.active ? fishBackoff.until : undefined,
+    lastCoalProgressSeen: staleTrack.lastCoalProgressSeen,
+    staleCoalBusyCycles: staleTrack.staleCoalBusyCycles,
   });
 
   return {
@@ -957,6 +1058,8 @@ export function evaluatePlaybook(
     fishCodBackoffActive: backoffActive,
     fishCodBackoffUntil: fishBackoff.until,
     consecutiveFishCodFailures: fishBackoff.failures,
+    staleCoalGather,
+    staleCoalBusyCycles: staleTrack.staleCoalBusyCycles,
     questCurriculum,
   };
 }
@@ -1043,8 +1146,16 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
   if (action === 'cook_cod' && /restarted|already_busy|kept_current/i.test(outcome)) {
     counts.cookedCod = Math.max(counts.cookedCod, counts.cookedCod + 1);
   }
+  let lastCoalProgressSeen = persisted.lastCoalProgressSeen;
+  let staleCoalBusyCycles = persisted.staleCoalBusyCycles ?? 0;
   if (action === 'mine_coal' && /restarted|already_busy/i.test(outcome)) {
-    // Starting coal mining counts as leaving oak.
+    lastGatherRestartAt = new Date().toISOString();
+    lastGatherSkill = 'mining';
+    lastGatherResource = 'Coal Ore';
+    if (/restarted/i.test(outcome)) {
+      // Fresh start — clear stale flat counter so we re-measure production.
+      staleCoalBusyCycles = 0;
+    }
     if (stage === 'mine_coal') {
       /* stay */
     }
@@ -1061,6 +1172,8 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
     lastGatherResource,
     consecutiveFishCodFailures,
     fishCodBackoffUntil,
+    lastCoalProgressSeen,
+    staleCoalBusyCycles,
   });
 }
 
@@ -1150,6 +1263,14 @@ export function filterAllowedByPlaybook(
   // Pets maintenance may run while gatherBusy (equip_pet stays idle-only via isAllowed).
   if (busy && playbook.interruptActions.includes('manage_pets') && allowed.includes('manage_pets')) {
     if (!next.includes('manage_pets')) next.push('manage_pets');
+  }
+
+  // Stale coal busy: never keep polling continue_current — force mine_coal restart path.
+  if (playbook.staleCoalGather && (coalIncomplete || playbook.stage === 'mine_coal')) {
+    next = next.filter((a) => a !== 'continue_current');
+    if (allowed.includes('mine_coal') && !next.includes('mine_coal')) {
+      next.push('mine_coal');
+    }
   }
 
   // While on a mismatched gather, drop continue_current so Jev can pick the stage action.

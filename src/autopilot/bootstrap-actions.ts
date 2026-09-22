@@ -305,13 +305,20 @@ function gatherAction(
       const playbookInterrupt = Boolean(
         playbook?.enabled && !playbook.complete && playbook.interruptActions.includes(id),
       );
+      // Stale coal busy must force Stop+Start even when already on Coal Ore.
+      const staleCoalForce =
+        id === 'mine_coal' && Boolean(playbook?.staleCoalGather);
       const allowInterrupt =
-        playbookInterrupt || (await ctx.jev.shouldInterruptGather(skillState));
+        staleCoalForce ||
+        playbookInterrupt ||
+        (await ctx.jev.shouldInterruptGather(skillState));
       const result = await restartSkillGather(ctx.page, ctx.config, {
         skill,
         resourceLabel: resource,
         allowInterrupt: ctx.forceInterrupt || allowInterrupt,
-        knownState: skillState,
+        forceRestart: staleCoalForce || Boolean(ctx.forceInterrupt && id === 'mine_coal'),
+        // When forcing a stale restart, discard known busy state so gather re-reads after Stop.
+        knownState: staleCoalForce ? undefined : skillState,
       });
       let outcome: string = result;
       // fish_cod missing_requirement/failed is often a UI/start/captcha issue when bait is trusted.
@@ -325,6 +332,12 @@ function gatherAction(
             '(UI/captcha/Start/quantity), NOT missing bait',
         );
         outcome = 'fishing_start_failed';
+      }
+      if (id === 'mine_coal' && result === 'failed') {
+        console.warn(
+          `[mine_coal] start failed — UI/captcha/Start/quantity/replace (staleCoal=${Boolean(playbook?.staleCoalGather)})`,
+        );
+        outcome = 'mining_start_failed';
       }
       const backoffMs = /restarted|already_busy/i.test(outcome) ? ctx.config.pollMs * 2 : undefined;
       return {

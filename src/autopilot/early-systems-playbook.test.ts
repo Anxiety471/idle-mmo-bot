@@ -19,6 +19,8 @@ import {
   shouldInjectAsyncPets,
   shouldInjectEquipPet,
   shouldPreferBaitRestock,
+  STALE_COAL_BUSY_CYCLES,
+  updateStaleCoalBusyTracking,
   type PlaybookProgress,
 } from './early-systems-playbook.js';
 
@@ -94,6 +96,8 @@ function fishCodPlaybook(overrides: Partial<PlaybookProgress> = {}): PlaybookPro
     gatherGraceResource: 'Cod',
     fishCodBackoffActive: false,
     consecutiveFishCodFailures: 0,
+    staleCoalGather: false,
+    staleCoalBusyCycles: 0,
     ...overrides,
   };
 }
@@ -438,6 +442,8 @@ describe('missions-first early gold', () => {
       gatherGraceActive: false,
       fishCodBackoffActive: false,
       consecutiveFishCodFailures: 0,
+      staleCoalGather: false,
+      staleCoalBusyCycles: 0,
       ...overrides,
     };
   }
@@ -1374,3 +1380,176 @@ describe('async opportunistic pets', () => {
   });
 });
 
+describe('stale coal gather', () => {
+  const envSnapshot = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
+  let statePath: string;
+
+  afterEach(() => {
+    restoreEnv(envSnapshot);
+    if (statePath) rmSync(statePath, { force: true });
+  });
+
+  it('updateStaleCoalBusyTracking flips stale after flat busy cycles', () => {
+    let track = updateStaleCoalBusyTracking({}, 3, true);
+    assert.equal(track.stale, false);
+    assert.equal(track.staleCoalBusyCycles, 1);
+    for (let i = 0; i < STALE_COAL_BUSY_CYCLES - 1; i++) {
+      track = updateStaleCoalBusyTracking(track, 3, true);
+    }
+    assert.equal(track.stale, true);
+    assert.ok(track.staleCoalBusyCycles >= STALE_COAL_BUSY_CYCLES);
+  });
+
+  it('updateStaleCoalBusyTracking resets when coal inventory rises', () => {
+    let track = updateStaleCoalBusyTracking({ lastCoalProgressSeen: 3, staleCoalBusyCycles: 5 }, 3, true);
+    assert.equal(track.staleCoalBusyCycles, 6);
+    track = updateStaleCoalBusyTracking(track, 8, true);
+    assert.equal(track.stale, false);
+    assert.equal(track.staleCoalBusyCycles, 0);
+    assert.equal(track.lastCoalProgressSeen, 8);
+  });
+
+  it('updateStaleCoalBusyTracking resets when not busy mining coal', () => {
+    const track = updateStaleCoalBusyTracking(
+      { lastCoalProgressSeen: 3, staleCoalBusyCycles: 9 },
+      3,
+      false,
+    );
+    assert.equal(track.stale, false);
+    assert.equal(track.staleCoalBusyCycles, 0);
+  });
+
+  it('filterAllowedByPlaybook drops continue_current when staleCoalGather', () => {
+    const playbook = fishCodPlaybook({
+      stage: 'mine_coal',
+      stageIndex: 0,
+      stageGoal: 'Mine coal',
+      preferredActions: ['mine_coal', 'continue_current'],
+      interruptActions: ['mine_coal'],
+      deprioritizedActions: ['gather_oak', 'gather_yew', 'fish_cod'],
+      counts: { ...emptyPlaybookCounts(), coal: 3, coalBusyCycles: 40 },
+      staleCoalGather: true,
+      staleCoalBusyCycles: STALE_COAL_BUSY_CYCLES,
+      gatherGraceActive: false,
+    });
+    const snapshot = minimalSnapshot({
+      inventory: { 'Coal Ore': 1 },
+      flags: {
+        hasBait: true,
+        bankNearby: false,
+        gatherBusy: true,
+        inBattle: false,
+        sessionValid: true,
+      },
+      currentAction: { busy: true, skill: 'mining', resource: 'Coal Ore' },
+    });
+    const filtered = filterAllowedByPlaybook(
+      ['mine_coal', 'continue_current', 'idle', 'craft_if_ready'],
+      snapshot,
+      playbook,
+    );
+    assert.ok(!filtered.includes('continue_current'), `got ${filtered.join(',')}`);
+    assert.equal(filtered[0], 'mine_coal');
+  });
+
+  it('evaluatePlaybook marks staleCoalGather after enough flat busy ticks', () => {
+    statePath = join('/tmp', `playbook-stale-coal-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'mine_coal',
+        counts: { ...emptyPlaybookCounts(), coal: 3, coalBusyCycles: 20 },
+        baitOwned: true,
+        lastCoalProgressSeen: 3,
+        staleCoalBusyCycles: STALE_COAL_BUSY_CYCLES - 1,
+      })}\n`,
+    );
+
+    const snap = minimalSnapshot({
+      inventory: { 'Coal Ore': 1, 'Cheap Bait': 5 },
+      flags: {
+        hasBait: true,
+        bankNearby: false,
+        gatherBusy: true,
+        inBattle: false,
+        sessionValid: true,
+      },
+      currentAction: { busy: true, skill: 'mining', resource: 'Coal Ore' },
+    });
+    const progress = evaluatePlaybook(snap);
+    assert.equal(progress.stage, 'mine_coal');
+    assert.equal(progress.staleCoalGather, true);
+    assert.ok(progress.staleCoalBusyCycles >= STALE_COAL_BUSY_CYCLES);
+    assert.ok(progress.preferredActions.includes('mine_coal'));
+    assert.ok(!progress.preferredActions.includes('continue_current'));
+
+    const filtered = filterAllowedByPlaybook(
+      ['mine_coal', 'continue_current', 'idle'],
+      snap,
+      progress,
+    );
+    assert.ok(!filtered.includes('continue_current'));
+    assert.equal(filtered[0], 'mine_coal');
+  });
+
+  it('syncs higher Coal Ore inventory into counts (progress reflects real ore)', () => {
+    statePath = join('/tmp', `playbook-coal-sync-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'mine_coal',
+        counts: { ...emptyPlaybookCounts(), coal: 3 },
+        baitOwned: true,
+        lastCoalProgressSeen: 3,
+        staleCoalBusyCycles: 4,
+      })}\n`,
+    );
+
+    const progress = evaluatePlaybook(
+      minimalSnapshot({
+        inventory: { 'Coal Ore': 12 },
+        currentAction: { busy: true, skill: 'mining', resource: 'Coal Ore' },
+        flags: {
+          hasBait: true,
+          bankNearby: false,
+          gatherBusy: true,
+          inBattle: false,
+          sessionValid: true,
+        },
+      }),
+    );
+    assert.equal(progress.counts.coal, 12);
+    assert.equal(progress.staleCoalGather, false);
+    assert.equal(progress.staleCoalBusyCycles, 0);
+  });
+
+  it('notePlaybookOutcome mine_coal restarted sets gather restart + clears stale cycles', () => {
+    statePath = join('/tmp', `playbook-mine-restart-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'mine_coal',
+        counts: { ...emptyPlaybookCounts(), coal: 3, coalBusyCycles: 30 },
+        baitOwned: true,
+        staleCoalBusyCycles: 9,
+        lastCoalProgressSeen: 3,
+      })}\n`,
+    );
+
+    notePlaybookOutcome('mine_coal', 'restarted');
+    const saved = JSON.parse(readFileSync(statePath, 'utf8'));
+    assert.ok(saved.lastGatherRestartAt);
+    assert.equal(saved.lastGatherSkill, 'mining');
+    assert.equal(saved.lastGatherResource, 'Coal Ore');
+    assert.equal(saved.staleCoalBusyCycles, 0);
+  });
+});
