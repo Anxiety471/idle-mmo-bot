@@ -78,7 +78,8 @@ Documented from the official wiki and in-game nav patterns used elsewhere in thi
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `CHARACTER_NAME` | _(unset)_ | Target character; unset = legacy single-character mode |
+| `CHARACTER_NAME` | _(unset)_ | Target / primary character; unset = legacy single-character mode |
+| `CHARACTER_ROSTER` | _(unset)_ | Comma-separated in-account alts to round-robin when busy (e.g. `Main,AltOne,AltTwo`). Empty = no rotation |
 | `ACCOUNT_SLUG` | from `STORAGE_STATE` | Override account folder name |
 | `SKIP_CHARACTER_ENSURE` | `false` | Skip bootstrap character switch |
 | `CHARACTER_SELECTOR_ROUTE` | _(unset)_ | Direct URL to roster (e.g. `/character`) |
@@ -96,6 +97,27 @@ On each browser session, autopilot calls `ensureActiveCharacter()` **before the 
 5. Continue into the normal snapshot → Jev → execute loop
 
 Legacy runs without `CHARACTER_NAME` behave exactly as before.
+
+## In-process roster rotation (alts while busy)
+
+When `CHARACTER_ROSTER` lists **2+** names, a **single** autopilot process can round-robin among those alts while the current character is `gatherBusy` (not mid-battle):
+
+1. Pets **maintenance** (claim/feed/battle/sleep) may still run on the busy character
+2. If the chosen action would be `continue_current` / `idle`, switch to the next roster name
+3. Reload `CHARACTER_NAME` + auto log/playbook paths for that alt and continue the loop
+4. **Equip** pets only when a character is idle (`equip_pet` / `manage_pets` with `allowEquip`)
+
+```bash
+export STORAGE_STATE=./storage-state-hitoriidle.json
+export CHARACTER_NAME=HitoriIdle
+export CHARACTER_ROSTER=HitoriIdle,MinerAlt,FisherAlt
+npm run autopilot -- -v --interrupt
+```
+
+- Only names in `CHARACTER_ROSTER` (+ primary `CHARACTER_NAME`) are rotated — respects the conceptual **3-active** limit by keeping the list short.
+- Unset `CHARACTER_ROSTER` → legacy single-character behavior (no mid-loop switches).
+- **Separate accounts** (IdleBocchi vs HitoriIdle vs KitaSan) still use separate `STORAGE_STATE` processes — roster does not cross accounts.
+- Roster UI selectors remain **best-effort**; tighten via Playwright codegen if switches fail.
 
 ## Path overrides
 

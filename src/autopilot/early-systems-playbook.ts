@@ -169,7 +169,8 @@ export const FISH_COD_BACKOFF_FALLBACKS: AutopilotAction[] = [
   'idle',
 ];
 /**
- * Soft-prefer manage_pets every N completed batch cycles when idle (not a hard gate).
+ * Soft-prefer manage_pets every N completed batch cycles (not a hard gate).
+ * Maintenance may run while busy; equip_pet is idle-only.
  * Override with PLAYBOOK_PETS_EVERY_N_CYCLES.
  */
 export const PETS_ASYNC_EVERY_N_CYCLES = envInt('PLAYBOOK_PETS_EVERY_N_CYCLES', 1);
@@ -417,22 +418,41 @@ export function huntTargetMet(counts: PlaybookCounts): boolean {
 }
 
 /**
- * Opportunistic pets: soft-prefer / interrupt manage_pets when not busy,
- * without requiring petManages>=1 to complete a batch.
+ * Opportunistic pets maintenance: soft-prefer / interrupt manage_pets even while busy
+ * (claim/feed/battle/sleep). Does not gate the batch. Equip is handled separately when idle.
  * Fires once per batch (petManages===0) on every Nth completed cycle.
  */
 export function shouldInjectAsyncPets(
   counts: PlaybookCounts,
+  _snapshot: GameSnapshot,
+  everyN: number = PETS_ASYNC_EVERY_N_CYCLES,
+): boolean {
+  if (counts.petManages >= 1) return false;
+  const n = everyN > 0 ? everyN : 1;
+  // Cycle 0 (first run) and every Nth completed cycle — OK while gatherBusy.
+  return counts.batchCycles % n === 0;
+}
+
+function isCharacterBusy(snapshot: GameSnapshot): boolean {
+  return Boolean(
+    snapshot.currentAction?.busy || snapshot.flags.gatherBusy || snapshot.flags.inBattle,
+  );
+}
+
+/**
+ * Idle-only equip tip: after maintenance (possibly while busy without Equip),
+ * soft-prefer equip_pet once (petManages===1) so the character gets the pet boost.
+ * equip_pet outcome bumps petManages so this does not spam every idle cycle.
+ */
+export function shouldInjectEquipPet(
+  counts: PlaybookCounts,
   snapshot: GameSnapshot,
   everyN: number = PETS_ASYNC_EVERY_N_CYCLES,
 ): boolean {
-  const busy = Boolean(
-    snapshot.currentAction?.busy || snapshot.flags.gatherBusy || snapshot.flags.inBattle,
-  );
-  if (busy) return false;
-  if (counts.petManages >= 1) return false;
+  if (isCharacterBusy(snapshot)) return false;
+  // Exactly one maintain tick already counted — tip equip before it advances further.
+  if (counts.petManages !== 1) return false;
   const n = everyN > 0 ? everyN : 1;
-  // Cycle 0 (first run) and every Nth completed cycle get a soft pets tip when idle.
   return counts.batchCycles % n === 0;
 }
 
@@ -846,11 +866,28 @@ export function evaluatePlaybook(
   }
 
   // Async pets: soft-prefer / interrupt without changing stage or gating the batch.
+  // Maintenance OK while busy; when busy, unshift so stub/Jev can pick over continue_current.
   const asyncPets = shouldInjectAsyncPets(counts, snapshot);
+  const busyNow = isCharacterBusy(snapshot);
   if (asyncPets) {
-    if (!preferredActions.includes('manage_pets')) preferredActions.push('manage_pets');
+    if (busyNow) {
+      preferredActions = [
+        'manage_pets',
+        ...preferredActions.filter((a) => a !== 'manage_pets'),
+      ];
+    } else if (!preferredActions.includes('manage_pets')) {
+      preferredActions.push('manage_pets');
+    }
     if (!interruptActions.includes('manage_pets')) interruptActions.push('manage_pets');
     deprioritizedActions = deprioritizedActions.filter((a) => a !== 'manage_pets');
+  }
+
+  // Idle-only equip after a busy-time (or prior) maintain tick without Equip.
+  const asyncEquip = shouldInjectEquipPet(counts, snapshot);
+  if (asyncEquip) {
+    if (!preferredActions.includes('equip_pet')) preferredActions.push('equip_pet');
+    if (!interruptActions.includes('equip_pet')) interruptActions.push('equip_pet');
+    deprioritizedActions = deprioritizedActions.filter((a) => a !== 'equip_pet');
   }
 
   const baitPurchaseRecent = recentBaitPurchase(persisted.lastBaitPurchaseAt);
@@ -870,7 +907,12 @@ export function evaluatePlaybook(
   if (asyncPets) {
     curriculumHint = (
       `${curriculumHint} EARLY PLAYBOOK pets async: soft-prefer manage_pets ` +
-      `(every ${PETS_ASYNC_EVERY_N_CYCLES} cycle(s) when idle; does not gate batch).`
+      `(every ${PETS_ASYNC_EVERY_N_CYCLES} cycle(s); maintenance OK while busy; does not gate batch).`
+    ).trim();
+  }
+  if (asyncEquip) {
+    curriculumHint = (
+      `${curriculumHint} EARLY PLAYBOOK pets equip: soft-prefer equip_pet while idle for boost.`
     ).trim();
   }
 
@@ -939,9 +981,10 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
   if (action === 'explore_map') {
     if (!/failed/i.test(outcome)) counts.mapPeeks += 1;
   }
-  if (action === 'manage_pets') {
+  if (action === 'manage_pets' || action === 'equip_pet') {
     // Async counter only — does not gate batch completion / loop to mine_coal.
     // no_pets still counts as a successful opportunistic tick (nothing to manage).
+    // equip_pet success bumps petManages so shouldInjectEquipPet (===1) fires once.
     if (/no_pets/i.test(outcome) || (!/failed|no_action/i.test(outcome) && outcome.trim())) {
       counts.petManages += 1;
     }
@@ -1104,6 +1147,11 @@ export function filterAllowedByPlaybook(
     }
   }
 
+  // Pets maintenance may run while gatherBusy (equip_pet stays idle-only via isAllowed).
+  if (busy && playbook.interruptActions.includes('manage_pets') && allowed.includes('manage_pets')) {
+    if (!next.includes('manage_pets')) next.push('manage_pets');
+  }
+
   // While on a mismatched gather, drop continue_current so Jev can pick the stage action.
   const preferredGather = playbook.preferredActions.find((a) => GATHER_RESOURCE[a]);
   const questGather = playbook.questCurriculum?.interruptActions.find((a) => GATHER_RESOURCE[a]);
@@ -1150,7 +1198,7 @@ export function filterAllowedByPlaybook(
       if (playbook.deprioritizedActions.includes(id)) {
         continue;
       }
-      if (!next.includes(id) && ['mine_coal', 'fish_cod', 'cook_cod', 'market_sell_half', 'sell_junk_for_gold', 'explore_map', 'hunt_rabbits', 'manage_pets', 'buy_bait', 'sell_junk'].includes(id)) {
+      if (!next.includes(id) && ['mine_coal', 'fish_cod', 'cook_cod', 'market_sell_half', 'sell_junk_for_gold', 'explore_map', 'hunt_rabbits', 'manage_pets', 'equip_pet', 'buy_bait', 'sell_junk'].includes(id)) {
         next.push(id);
       }
     }

@@ -41,7 +41,7 @@ import type { SnapshotQuest } from '../types.js';
 import type { ActionAllowContext, ActionDefinition, ActionExecuteContext } from './action-types.js';
 import { registerAction } from './action-registry.js';
 import { tryCookCod } from '../deterministic/cook.js';
-import { managePets } from '../deterministic/pets.js';
+import { equipPet, managePets } from '../deterministic/pets.js';
 import {
   getPlaybookFromSnapshot,
   recentBaitPurchase,
@@ -648,9 +648,32 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
   {
     id: 'manage_pets',
     description:
-      'Pets maintenance: claim finished work, feed carefully (avoid wasteful Max), battle or sleep for stamina, equip when useful',
+      'Pets maintenance: claim / feed / battle / sleep (OK while busy); equip only when character is idle',
     bootstrap: true,
     priority: 16,
+    tags: ['pets', 'playbook'],
+    safety: 'safe',
+    isAllowed: (ctx) => {
+      const playbook = getPlaybookFromSnapshot(ctx.snapshot);
+      const stageOk =
+        !playbook ||
+        playbook.complete ||
+        playbook.stage === 'manage_pets' ||
+        playbook.stage === 'complete';
+      // Maintenance is allowed while gatherBusy/inBattle; equip is gated inside managePets.
+      return ctx.snapshot.flags.sessionValid && stageOk;
+    },
+    execute: async (ctx) => ({
+      action: 'manage_pets',
+      outcome: await managePets(ctx.page, ctx.config, { allowEquip: gatherIdle(ctx) }),
+      backoffMs: Math.max(ctx.config.pollMs * 2, 5_000),
+    }),
+  },
+  {
+    id: 'equip_pet',
+    description: 'Equip a pet for boost — only when character is idle (not gathering/acting)',
+    bootstrap: true,
+    priority: 17,
     tags: ['pets', 'playbook'],
     safety: 'safe',
     isAllowed: (ctx) => {
@@ -663,8 +686,8 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
       return ctx.snapshot.flags.sessionValid && stageOk && gatherIdle(ctx);
     },
     execute: async (ctx) => ({
-      action: 'manage_pets',
-      outcome: await managePets(ctx.page, ctx.config),
+      action: 'equip_pet',
+      outcome: await equipPet(ctx.page, ctx.config),
       backoffMs: Math.max(ctx.config.pollMs * 2, 5_000),
     }),
   },
