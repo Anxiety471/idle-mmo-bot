@@ -203,6 +203,10 @@ export interface AutopilotContext {
   cycle: number;
   gatherRotationIndex: number;
   lastAction?: AutopilotAction;
+  /** Account slug for structured logs (derived from STORAGE_STATE / ACCOUNT_SLUG). */
+  accountSlug?: string;
+  /** Target in-game character when CHARACTER_NAME is set. */
+  characterName?: string;
 }
 
 export interface ActionResult {

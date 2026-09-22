@@ -82,6 +82,8 @@ Key `.env` variables (see `.env.example` for full list):
 |----------|---------|-------|
 | `BASE_URL` | `https://web.idle-mmo.com` | Game URL |
 | `STORAGE_STATE` | _(unset)_ | Path to session JSON — required for autopilot |
+| `CHARACTER_NAME` | _(unset)_ | In-game character for this process; auto-derives log/playbook paths when set |
+| `ACCOUNT_SLUG` | from `STORAGE_STATE` | Override account folder (`storage-state.json` → `idlebocchi`) |
 | `HEADLESS` | `true` | Set `false` when debugging UI |
 | `POLL_MS` | `5000` | Loop poll interval |
 | `BUY_BAIT` | `false` | Auto-buy Cheap Bait (gold only); or use `--buy-bait` on skill CLI |
@@ -93,6 +95,8 @@ Key `.env` variables (see `.env.example` for full list):
 | `AUTOPILOT_LOG_DIR` | `./logs` | Structured JSONL output directory |
 | `EARLY_PLAYBOOK` | on (enabled) | Early-systems curriculum filters; set `false` to disable |
 | `PLAYBOOK_STATE_PATH` | `logs/playbook-state.json` | Playbook stage persistence |
+
+See [docs/CHARACTER_MANAGEMENT.md](./CHARACTER_MANAGEMENT.md) for multi-account + multi-character path layout and bootstrap env knobs (`SKIP_CHARACTER_ENSURE`, `CREATE_CHARACTER_IF_MISSING`, etc.).
 
 ### 3.4 Typecheck
 
@@ -402,22 +406,63 @@ When multiple Idle MMO **overseer assistants** exist for the same owner (e.g. pe
 
 Use your platform’s agent-to-agent messaging (Cursor follow-ups, shared automation channels, etc.). Do **not** assume silence means another overseer is idle.
 
-### 7.2 One watch, isolated characters
+### 7.2 Multi-account and multi-character isolation
+
+Idle MMO allows **up to 5 characters per account** but only **3 active at once** ([wiki](https://wiki.idle-mmo.com/getting-started/introduction)). This repo models:
+
+| Layer | Isolation | Env |
+|-------|-----------|-----|
+| **Account** (login session) | Separate Playwright `storageState` per account | `STORAGE_STATE` |
+| **Character** (in-game alt) | Separate logs + playbook per character | `CHARACTER_NAME` (+ auto paths) |
+
+**Keep both accounts** — do not merge or delete:
+
+| Account | Storage file |
+|---------|----------------|
+| IdleBocchi | `storage-state.json` |
+| HitoriIdle | `storage-state-hitoriidle.json` |
+
+One autopilot process = one browser = one account session = **one active character**. Run alts as separate processes with the same `STORAGE_STATE` but different `CHARACTER_NAME`.
 
 | Rule | Detail |
 |------|--------|
 | **One enabled overnight watch** | Per **owner/account** — only one active health-watch automation |
-| **Unique paths per character** | Separate `STORAGE_STATE`, `AUTOPILOT_LOG_DIR`, and `PLAYBOOK_STATE_PATH` per character |
+| **Unique session per account** | Separate `STORAGE_STATE` per account login — never share between IdleBocchi and HitoriIdle |
+| **Unique paths per character** | Separate `AUTOPILOT_LOG_DIR` and `PLAYBOOK_STATE_PATH` per character process |
+| **Auto paths when `CHARACTER_NAME` set** | Defaults to `logs/{accountSlug}/{characterSlug}/` (`accountSlug` from storage filename or `ACCOUNT_SLUG`) |
 | **Never share playbook state** | Do **not** point two autopilots at the same `playbook-state.json` — stage counters and `baitOwned` will corrupt each other |
-| **No duplicate sessions** | Do not run two autopilot processes against the same `storage-state.json` |
+| **No duplicate sessions** | Do not run two autopilot processes against the same `storage-state.json` **and** the same character |
+| **Respect 3-active limit** | Do not run more than three simultaneous autopilots on the same account unless the fourth character is idle in-game |
 
-Example isolation (adjust names per character):
+Example — IdleBocchi main (auto paths):
+
+```bash
+export STORAGE_STATE=./storage-state.json
+export CHARACTER_NAME=IdleBocchi
+npm run autopilot -- -v --interrupt
+# logs → ./logs/idlebocchi/idlebocchi/
+```
+
+Example — HitoriIdle alt:
+
+```bash
+export STORAGE_STATE=./storage-state-hitoriidle.json
+export CHARACTER_NAME=MinerAlt
+export AUTOPILOT_LOG_DIR=./logs/hitoriidle/mineralt   # optional — auto-derived when CHARACTER_NAME set
+export PLAYBOOK_STATE_PATH=./logs/hitoriidle/mineralt/playbook-state.json
+npm run autopilot -- -v --interrupt
+```
+
+Legacy single-character runs (no `CHARACTER_NAME`) still work with manual `AUTOPILOT_LOG_DIR` overrides:
 
 ```bash
 export STORAGE_STATE=./storage-state-idlebocchi.json
 export AUTOPILOT_LOG_DIR=./logs/idlebocchi
 export PLAYBOOK_STATE_PATH=./logs/idlebocchi/playbook-state.json
+npm run autopilot -- -v --interrupt
 ```
+
+On startup, autopilot calls `ensureActiveCharacter()` after loading the session and **before snapshots** — set `SKIP_CHARACTER_ENSURE=true` only when debugging roster UI. Full UI notes: [CHARACTER_MANAGEMENT.md](./CHARACTER_MANAGEMENT.md).
 
 ### 7.3 Skills vs overseer ownership
 
