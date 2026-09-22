@@ -4,6 +4,8 @@ import { appendJsonl } from './jsonl-writer.js';
 export interface DecisionLogRecord {
   timestamp: string;
   cycle: number;
+  accountSlug?: string;
+  characterName?: string;
   location: string;
   gold?: number;
   totalLevel?: number;
@@ -35,6 +37,8 @@ export function buildDecisionRecord(
   return {
     timestamp: new Date().toISOString(),
     cycle: context.cycle,
+    accountSlug: context.accountSlug,
+    characterName: context.characterName,
     location: snapshot.location,
     gold: snapshot.gold,
     totalLevel: snapshot.totalLevel,

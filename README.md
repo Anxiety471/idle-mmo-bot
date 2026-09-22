@@ -193,7 +193,9 @@ npm run jev-smoke
 
 ## For overseer bots
 
-AI overseers (e.g. Grok Bot / Cursor agents supervising live autopilot) should read **[docs/OVERSEER_BOT_GUIDELINES.md](./docs/OVERSEER_BOT_GUIDELINES.md)** first. It covers bootstrap checklist, architecture, hard rules (hunt cap, pre-battle FOOD, bait trust, gather grace, gather reliability), early-systems playbook stages, log locations, **sibling overseer agent-to-agent coordination**, per-character isolation, and how to register new actions from discovery output.
+AI overseers (e.g. Grok Bot / Cursor agents supervising live autopilot) should read **[docs/OVERSEER_BOT_GUIDELINES.md](./docs/OVERSEER_BOT_GUIDELINES.md)** first. It covers bootstrap checklist, architecture, hard rules (hunt cap, pre-battle FOOD, bait trust, gather grace, gather reliability), early-systems playbook stages, log locations, **sibling overseer agent-to-agent coordination**, per-account/per-character isolation, and how to register new actions from discovery output.
+
+Multi-character setup (accounts, `CHARACTER_NAME`, path layout): **[docs/CHARACTER_MANAGEMENT.md](./docs/CHARACTER_MANAGEMENT.md)**.
 
 ## Architecture
 

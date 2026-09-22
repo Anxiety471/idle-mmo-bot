@@ -1,5 +1,7 @@
 export interface LogContext {
   cycle: number;
+  accountSlug?: string;
+  characterName?: string;
 }
 
 let currentContext: LogContext = { cycle: 0 };

@@ -1,3 +1,5 @@
+import { ensureActiveCharacter } from './character/character-select.js';
+import { resolveCharacterPaths } from './character/paths.js';
 import { loadConfig } from './config.js';
 import { launchBrowser } from './browser.js';
 import { executeAction } from './actions/executor.js';
@@ -48,6 +50,13 @@ registerBootstrapActions();
  */
 export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<void> {
   const config = loadConfig();
+  const paths = resolveCharacterPaths({
+    storageStatePath: config.storageStatePath,
+    characterName: config.characterName,
+    accountSlug: config.accountSlug,
+    autopilotLogDir: process.env.AUTOPILOT_LOG_DIR?.trim(),
+    playbookStatePath: process.env.PLAYBOOK_STATE_PATH?.trim(),
+  });
   const supervisor = createSupervisor(options.verbose ?? false);
   const junkItems = parseJunkSellItems();
   const hasJevToken = Boolean(
@@ -61,10 +70,17 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
   console.log('[autopilot] Flow: snapshot → discover → allowed → Jev → execute one action');
   console.log('[autopilot] Bootstrap actions registered; discovery logs unregistered UI features');
   console.log(`[autopilot] Structured logs → ${getLogDir()}/decisions.jsonl and jev.jsonl`);
+  console.log(
+    `[autopilot] Account=${paths.accountSlug}` +
+      (config.characterName ? ` character=${config.characterName}` : ' (legacy single-character)') +
+      ` logDir=${getLogDir()}`,
+  );
 
   const context: AutopilotContext = {
     cycle: 0,
     gatherRotationIndex: 0,
+    accountSlug: paths.accountSlug,
+    characterName: config.characterName,
   };
 
   const sessionRelaunchMs = Math.max(config.pollMs * 6, 30_000);
@@ -72,9 +88,25 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
   while (true) {
     const session = await launchBrowser(config);
     try {
+      const charResult = await ensureActiveCharacter(session.page, config);
+      console.log(
+        `[autopilot] character ensure: ${charResult.outcome}` +
+          (charResult.activeCharacter ? ` (${charResult.activeCharacter})` : '') +
+          (charResult.message ? ` — ${charResult.message}` : ''),
+      );
+      if (charResult.outcome === 'failed') {
+        console.error(
+          '[autopilot] character bootstrap failed — snapshots may reflect the wrong alt; check CHARACTER_NAME and roster UI',
+        );
+      }
+
       while (true) {
         context.cycle++;
-        setLogContext({ cycle: context.cycle });
+        setLogContext({
+          cycle: context.cycle,
+          accountSlug: context.accountSlug,
+          characterName: context.characterName,
+        });
 
         let snapshot;
         try {
