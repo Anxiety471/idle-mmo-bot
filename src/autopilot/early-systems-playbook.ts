@@ -342,11 +342,11 @@ function stageMeta(stage: EarlyStageId, baitOwned = false): {
     case 'sell_half':
       return {
         goal: 'Sell roughly half the coal / junk carefully (small batches; keep cook fuel)',
-        preferred: ['market_sell_half', 'sell_junk'],
+        preferred: ['sell_junk_for_gold', 'market_sell_half', 'sell_junk'],
         deprioritized: ['gather_oak', 'gather_yew', 'mine_coal'],
-        interrupt: ['market_sell_half', 'sell_junk'],
+        interrupt: ['sell_junk_for_gold', 'market_sell_half', 'sell_junk'],
         hint:
-          'EARLY PLAYBOOK stage sell_half: sell ~half excess mats in small batches. Keep enough Coal for cooking. Do not membership-spend. Prefer market_sell_half.',
+          'EARLY PLAYBOOK stage sell_half: sell ~half excess mats in small batches. Keep enough Coal for cooking. Do not membership-spend. Prefer sell_junk_for_gold when gold is low.',
       };
     case 'buy_bait':
       return {
@@ -383,9 +383,9 @@ function stageMeta(stage: EarlyStageId, baitOwned = false): {
     case 'sell_extras':
       return {
         goal: 'Sell extras carefully; keep Cod/Cooked Cod for battles',
-        preferred: ['market_sell_half', 'sell_junk'],
+        preferred: ['sell_junk_for_gold', 'market_sell_half', 'sell_junk'],
         deprioritized: ['gather_oak', 'gather_yew'],
-        interrupt: ['market_sell_half', 'sell_junk'],
+        interrupt: ['sell_junk_for_gold', 'market_sell_half', 'sell_junk'],
         hint:
           'EARLY PLAYBOOK stage sell_extras: sell junk/extras in small batches. Never sell all Cooked Cod / Cod needed for fights.',
       };
@@ -529,7 +529,7 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
   const counts = { ...persisted.counts };
   let stage = persisted.stage;
 
-  if (action === 'market_sell_half' || action === 'sell_junk') {
+  if (action === 'market_sell_half' || action === 'sell_junk' || action === 'sell_junk_for_gold') {
     if (/sold|sell/i.test(outcome) && !/no_action|failed/i.test(outcome)) {
       counts.sells += 1;
     }
@@ -658,7 +658,7 @@ export function filterAllowedByPlaybook(
       ) {
         continue;
       }
-      if (!next.includes(id) && ['mine_coal', 'fish_cod', 'cook_cod', 'market_sell_half', 'explore_map', 'hunt_rabbits', 'buy_bait', 'sell_junk'].includes(id)) {
+      if (!next.includes(id) && ['mine_coal', 'fish_cod', 'cook_cod', 'market_sell_half', 'sell_junk_for_gold', 'explore_map', 'hunt_rabbits', 'buy_bait', 'sell_junk'].includes(id)) {
         next.push(id);
       }
     }

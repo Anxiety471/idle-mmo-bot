@@ -325,13 +325,15 @@ Each autopilot cycle runs `discoverFeatures()` (`src/autopilot/discovery.ts`):
 4. Optionally push snapshot fields via `SNAPSHOT_ENRICHERS` (`src/autopilot/snapshot-enrichers.ts`)
 5. Typecheck, run autopilot briefly, verify `decisions.jsonl`
 
-Registered bootstrap action IDs (starting set): `continue_current`, `gather_oak`, `gather_yew`, `mine_coal`, `fish_cod`, `buy_bait`, `cook_cod`, `craft_if_ready`, `market_sell_half`, `hunt_battle`, `hunt_rabbits`, `quest_talk_accept`, `quest_turnin`, `sell_junk`, `idle`, plus `explore_map`.
+Registered bootstrap action IDs (starting set): `continue_current`, `gather_oak`, `gather_yew`, `mine_coal`, `fish_cod`, `buy_bait`, `cook_cod`, `craft_if_ready`, `market_sell_half`, `sell_junk_for_gold`, `hunt_battle`, `hunt_rabbits`, `quest_talk_accept`, `quest_turnin`, `sell_junk`, `idle`, plus `explore_map`.
 
 HttpJev and ProgressiveStubJev read action descriptions from the registry automatically.
 
 ### 6.2 Selling and junk
 
 Default junk: `Burnt Cod`, `Burnt Fish`, `Burnt Salmon`. Override with `JUNK_SELL_ITEMS`. Quest mats and protected items are never sold.
+
+**`sell_junk_for_gold`** (bootstrap action, priority 26) sells surplus gather junk via vendor UI when gold is below `SELL_GOLD_THRESHOLD` (default **800**) or during playbook `sell_half` / `sell_extras` stages. Protections: keeps at least 1 Cod and 1 Cooked Cod for heals, keeps Coal (15) and Oak (5) floors, and skips Cheap Bait when `fish_cod` / `buy_bait` needs it and bait is not yet trusted. HttpJev remains the decision brain; the playbook injects this action ahead of `market_sell_half` on sell stages.
 
 ---
 

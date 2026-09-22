@@ -51,6 +51,17 @@ export {
 
 export { buyCheapBait } from './merchant.js';
 export { sellJunk, sellJunkToVendor, sellHalfCareful } from './inventory.js';
+export {
+  parseSellGoldThreshold,
+  hasSurplusVendorJunk,
+  shouldAllowSellJunkForGold,
+  needsBaitProtection,
+  buildSellItemHints,
+  sellJunkForGold,
+  type SellJunkForGoldContext,
+  type SellJunkForGoldOptions,
+  type SellJunkProtectionOptions,
+} from './sell-junk-for-gold.js';
 export { trySmeltCoal } from './craft.js';
 export { huntFoundCap, shouldHardStopHunt } from './hunt-cap.js';
 export { selectBattleFood } from './combat.js';

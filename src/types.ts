@@ -133,6 +133,7 @@ export const BOOTSTRAP_ACTION_IDS = {
   quest_turnin: 'quest_turnin',
   craft_if_ready: 'craft_if_ready',
   sell_junk: 'sell_junk',
+  sell_junk_for_gold: 'sell_junk_for_gold',
   market_sell_half: 'market_sell_half',
   hunt_rabbits: 'hunt_rabbits',
   explore_map: 'explore_map',
