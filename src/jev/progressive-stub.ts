@@ -78,6 +78,16 @@ export class ProgressiveStubJev implements SupervisorAdvisor {
         const mine = pickAllowed(allowed, ['mine_coal']);
         if (mine) return mine;
       }
+      if (playbook.stage === 'fish_cod' && playbook.fishCodBackoffActive) {
+        const fallback = pickAllowed(allowed, [
+          'continue_current',
+          'cook_cod',
+          'mine_coal',
+          'sell_junk_for_gold',
+          'idle',
+        ]);
+        if (fallback) return fallback;
+      }
       if (playbook.stage === 'fish_cod' && !onCod) {
         // Prefer fishing; only buy_bait when bait is not trusted.
         const prefer = snapshot.flags.hasBait || playbook.baitOwned

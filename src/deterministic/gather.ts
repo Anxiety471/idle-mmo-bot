@@ -86,17 +86,35 @@ async function clickResource(page: Page, resourceLabel: string): Promise<boolean
     .getByRole('button', { name: new RegExp(`^${escapeRegExp(resourceLabel)}\\b`, 'i') })
     .or(page.getByRole('button', { name: resourceLabel, exact: true }));
   if (await resourceButton.count() > 0) {
+    await resourceButton.first().scrollIntoViewIfNeeded().catch(() => undefined);
     await resourceButton.first().click({ force: true, timeout: 5000 });
+    await page.waitForTimeout(350);
     return true;
   }
 
   const resourceText = page.getByText(resourceLabel, { exact: true });
   if (await resourceText.count() > 0) {
+    await resourceText.first().scrollIntoViewIfNeeded().catch(() => undefined);
     await resourceText.first().click({ force: true, timeout: 5000 }).catch(() => undefined);
+    await page.waitForTimeout(350);
     return true;
   }
 
   return false;
+}
+
+/** Wait for gather detail panel after resource select (qty field, Start, or can-perform copy). */
+async function waitForResourcePanelReady(page: Page, timeoutMs = 4_000): Promise<void> {
+  const qty = page.locator('input[name="quantity"]');
+  const startButton = page.getByRole('button', { name: 'Start', exact: true });
+  const canPerform = page.getByText(/you can perform this action\s+\d+\s+times/i);
+  await qty
+    .or(startButton)
+    .or(canPerform)
+    .first()
+    .waitFor({ state: 'visible', timeout: timeoutMs })
+    .catch(() => undefined);
+  await page.waitForTimeout(150);
 }
 
 function escapeRegExp(value: string): string {
@@ -336,6 +354,14 @@ export interface RestartGatherOptions {
 
 type StartReadiness = 'ready' | GatherRestartResult;
 
+interface GatherStartAttempt {
+  startReadiness: GatherRestartResult;
+  afterClickText: string;
+  canPerformAfter: boolean;
+  finalText: string;
+  activeResource?: string;
+}
+
 /**
  * Check whether Start can be clicked. Never clicks a disabled Start button
  * (fishing without bait exposes a disabled Start that would timeout).
@@ -371,60 +397,58 @@ async function checkStartReadiness(page: Page, skill: SkillConfig): Promise<Star
   return 'ready';
 }
 
-/**
- * Restart gathering on the given skill/resource when idle.
- * If busy (locally or globally), returns without clicking Start.
- */
-export async function restartSkillGather(
+async function attemptGatherStart(
   page: Page,
-  config: AppConfig,
-  options: RestartSkillOptions,
-): Promise<GatherRestartResult> {
-  const skill = getSkillConfig(options.skill);
-  const resourceLabel = resolveResource(skill, options.resourceLabel);
-  const allowInterrupt = options.allowInterrupt ?? false;
-
-  const state = options.knownState ?? await readSkillState(page, config, skill.id);
-  if (state.busy) {
-    return 'already_busy';
-  }
-
-  if (!allowInterrupt && state.busyElsewhere) {
-    return 'another_action_active';
-  }
-
-  if (!allowInterrupt && !state.busyElsewhere && !options.knownState) {
-    const probed = await findActiveGatherOnOtherSkill(page, config, skill.id);
-    await navigateTo(page, config, skill.path);
-    if (probed) {
-      return 'another_action_active';
-    }
-  }
-
-  // Clear leftover modals BEFORE selecting a resource — Escape after select
-  // can collapse the Cod panel and make Start look like missing bait.
+  skill: SkillConfig,
+  resourceLabel: string,
+  allowInterrupt: boolean,
+): Promise<GatherStartAttempt> {
   await dismissBlockingOverlays(page);
 
   if (!(await clickResource(page, resourceLabel))) {
-    return 'failed';
+    return {
+      startReadiness: 'failed',
+      afterClickText: '',
+      canPerformAfter: false,
+      finalText: '',
+    };
   }
+
+  await waitForResourcePanelReady(page);
 
   await setGatherQuantityBatch(page);
 
   const startReadiness = await checkStartReadiness(page, skill);
   if (startReadiness !== 'ready') {
-    return startReadiness;
+    const pageText = await page.locator('body').innerText();
+    return {
+      startReadiness,
+      afterClickText: pageText,
+      canPerformAfter: /you can perform this action\s+\d+\s+times/i.test(pageText),
+      finalText: pageText,
+    };
   }
 
   if (!(await clickStartButton(page))) {
-    return 'failed';
+    const pageText = await page.locator('body').innerText();
+    return {
+      startReadiness: 'failed',
+      afterClickText: pageText,
+      canPerformAfter: /you can perform this action\s+\d+\s+times/i.test(pageText),
+      finalText: pageText,
+    };
   }
 
   await page.waitForTimeout(500);
   const afterClickText = await page.locator('body').innerText();
   const canPerformAfter = /you can perform this action\s+\d+\s+times/i.test(afterClickText);
   if (skill.requiresBait && !canPerformAfter && detectMissingBait(afterClickText)) {
-    return 'missing_requirement';
+    return {
+      startReadiness: 'missing_requirement',
+      afterClickText,
+      canPerformAfter,
+      finalText: afterClickText,
+    };
   }
 
   const dialog = page.getByText('Start a new action?');
@@ -434,23 +458,38 @@ export async function restartSkillGather(
       if (await startAnyway.count() > 0) {
         await startAnyway.click({ force: true });
       } else {
-        return 'failed';
+        return {
+          startReadiness: 'failed',
+          afterClickText,
+          canPerformAfter,
+          finalText: afterClickText,
+        };
       }
     } else {
       const closeButton = page.getByRole('button', { name: 'Close', exact: true });
       if (await closeButton.count() > 0) {
         await closeButton.click();
-        return 'kept_current_action';
+        return {
+          startReadiness: 'kept_current_action',
+          afterClickText,
+          canPerformAfter,
+          finalText: afterClickText,
+        };
       }
-      return 'failed';
+      return {
+        startReadiness: 'failed',
+        afterClickText,
+        canPerformAfter,
+        finalText: afterClickText,
+      };
     }
   }
 
-  // Explicit CURRENT wait (settle alone can match idle Cod/Start chrome).
   let busyIndicator = page.getByText(CURRENT_ACTION_MARKER);
+  const currentActionWaitMs = skill.requiresBait ? GATHER_UI_SETTLE_MS : 5_000;
   await busyIndicator
     .first()
-    .waitFor({ state: 'visible', timeout: 5_000 })
+    .waitFor({ state: 'visible', timeout: currentActionWaitMs })
     .catch(() => undefined);
 
   let finalText = await page.locator('body').innerText();
@@ -483,16 +522,94 @@ export async function restartSkillGather(
     }
   }
 
+  const activeResource = finalText.includes(CURRENT_ACTION_MARKER)
+    ? parseCurrentResource(finalText, skill.resources)
+    : undefined;
+
   if (!finalText.includes(CURRENT_ACTION_MARKER)) {
-    return 'failed';
+    return {
+      startReadiness: 'failed',
+      afterClickText,
+      canPerformAfter,
+      finalText,
+      activeResource,
+    };
   }
 
-  const activeResource = parseCurrentResource(finalText, skill.resources);
   if (activeResource && activeResource !== resourceLabel) {
+    return {
+      startReadiness: 'already_busy',
+      afterClickText,
+      canPerformAfter,
+      finalText,
+      activeResource,
+    };
+  }
+
+  return {
+    startReadiness: 'restarted',
+    afterClickText,
+    canPerformAfter,
+    finalText,
+    activeResource,
+  };
+}
+
+/**
+ * Restart gathering on the given skill/resource when idle.
+ * If busy (locally or globally), returns without clicking Start.
+ */
+export async function restartSkillGather(
+  page: Page,
+  config: AppConfig,
+  options: RestartSkillOptions,
+): Promise<GatherRestartResult> {
+  const skill = getSkillConfig(options.skill);
+  const resourceLabel = resolveResource(skill, options.resourceLabel);
+  const allowInterrupt = options.allowInterrupt ?? false;
+
+  const state = options.knownState ?? await readSkillState(page, config, skill.id);
+  if (state.busy) {
     return 'already_busy';
   }
 
-  return 'restarted';
+  if (!allowInterrupt && state.busyElsewhere) {
+    return 'another_action_active';
+  }
+
+  if (!allowInterrupt && !state.busyElsewhere && !options.knownState) {
+    const probed = await findActiveGatherOnOtherSkill(page, config, skill.id);
+    await navigateTo(page, config, skill.path);
+    if (probed) {
+      return 'another_action_active';
+    }
+  }
+
+  // Ensure we're on the skill page (snapshot probes may leave us elsewhere).
+  await navigateTo(page, config, skill.path);
+  await waitForSkillUiSettled(page, skill);
+
+  const maxAttempts = skill.requiresBait ? 2 : 1;
+  let lastResult: GatherRestartResult = 'failed';
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (attempt > 0) {
+      await navigateTo(page, config, skill.path);
+      await waitForSkillUiSettled(page, skill);
+    }
+
+    const attemptResult = await attemptGatherStart(page, skill, resourceLabel, allowInterrupt);
+    lastResult = attemptResult.startReadiness;
+
+    if (lastResult === 'restarted' || lastResult === 'already_busy' || lastResult === 'kept_current_action') {
+      return lastResult;
+    }
+    if (lastResult === 'missing_requirement') {
+      return lastResult;
+    }
+  }
+
+  return lastResult;
 }
 
 /** Backward-compatible woodcutting restart. */

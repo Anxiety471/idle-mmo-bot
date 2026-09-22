@@ -7,6 +7,8 @@ import type { GameSnapshot } from '../types.js';
 import {
   evaluatePlaybook,
   filterAllowedByPlaybook,
+  FISH_COD_BACKOFF_MS,
+  FISH_COD_FAILURE_THRESHOLD,
   notePlaybookOutcome,
   resolvePlaybookStatePath,
   type PlaybookProgress,
@@ -75,6 +77,8 @@ function fishCodPlaybook(overrides: Partial<PlaybookProgress> = {}): PlaybookPro
     gatherGraceActive: true,
     gatherGraceSkill: 'fishing',
     gatherGraceResource: 'Cod',
+    fishCodBackoffActive: false,
+    consecutiveFishCodFailures: 0,
     ...overrides,
   };
 }
@@ -247,6 +251,106 @@ describe('sticky baitOwned (no repurchase loop)', () => {
     assert.equal(saved.baitOwned, true);
     assert.equal(saved.stage, 'fish_cod');
     assert.ok(saved.lastBaitPurchaseAt);
+  });
+
+  it('notePlaybookOutcome does not clear baitOwned on fish_cod failed', () => {
+    statePath = join('/tmp', `playbook-failed-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'fish_cod',
+        counts: emptyPlaybookCounts(),
+        baitOwned: true,
+      })}\n`,
+    );
+
+    notePlaybookOutcome('fish_cod', 'failed');
+
+    const saved = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      baitOwned?: boolean;
+      stage?: string;
+      consecutiveFishCodFailures?: number;
+    };
+    assert.equal(saved.baitOwned, true);
+    assert.equal(saved.stage, 'fish_cod');
+    assert.equal(saved.consecutiveFishCodFailures, 1);
+  });
+
+  it('notePlaybookOutcome enters fish_cod backoff after threshold failures', () => {
+    statePath = join('/tmp', `playbook-backoff-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'fish_cod',
+        counts: emptyPlaybookCounts(),
+        baitOwned: true,
+        consecutiveFishCodFailures: FISH_COD_FAILURE_THRESHOLD - 1,
+      })}\n`,
+    );
+
+    notePlaybookOutcome('fish_cod', 'fishing_start_failed');
+
+    const saved = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      consecutiveFishCodFailures?: number;
+      fishCodBackoffUntil?: string;
+      baitOwned?: boolean;
+    };
+    assert.equal(saved.consecutiveFishCodFailures, FISH_COD_FAILURE_THRESHOLD);
+    assert.ok(saved.fishCodBackoffUntil);
+    assert.equal(saved.baitOwned, true);
+    const remaining = new Date(saved.fishCodBackoffUntil!).getTime() - Date.now();
+    assert.ok(remaining > 0 && remaining <= FISH_COD_BACKOFF_MS);
+  });
+
+  it('filterAllowedByPlaybook skips fish_cod during backoff and injects fallbacks', () => {
+    const until = new Date(Date.now() + FISH_COD_BACKOFF_MS).toISOString();
+    const playbook = fishCodPlaybook({
+      gatherGraceActive: false,
+      fishCodBackoffActive: true,
+      fishCodBackoffUntil: until,
+      consecutiveFishCodFailures: FISH_COD_FAILURE_THRESHOLD,
+    });
+    const snapshot = minimalSnapshot();
+    const allowed: string[] = ['fish_cod', 'idle', 'continue_current', 'mine_coal', 'cook_cod'];
+
+    const filtered = filterAllowedByPlaybook(allowed, snapshot, playbook);
+
+    assert.ok(!filtered.includes('fish_cod'));
+    assert.ok(filtered.includes('continue_current'));
+    assert.ok(filtered.includes('mine_coal'));
+    assert.ok(filtered.includes('cook_cod'));
+  });
+
+  it('notePlaybookOutcome resets fish_cod failure counter on restarted', () => {
+    statePath = join('/tmp', `playbook-reset-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'fish_cod',
+        counts: emptyPlaybookCounts(),
+        baitOwned: true,
+        consecutiveFishCodFailures: 3,
+        fishCodBackoffUntil: new Date(Date.now() + 60_000).toISOString(),
+      })}\n`,
+    );
+
+    notePlaybookOutcome('fish_cod', 'restarted');
+
+    const saved = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      consecutiveFishCodFailures?: number;
+      fishCodBackoffUntil?: string;
+    };
+    assert.equal(saved.consecutiveFishCodFailures, 0);
+    assert.equal(saved.fishCodBackoffUntil, undefined);
   });
 
   it('notePlaybookOutcome counts sell_junk_for_gold sells', () => {

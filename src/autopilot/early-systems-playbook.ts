@@ -63,6 +63,12 @@ export interface PlaybookProgress {
   gatherGraceActive: boolean;
   gatherGraceSkill?: string;
   gatherGraceResource?: string;
+  /** True after repeated fish_cod start failures — temporarily prefer fallback actions. */
+  fishCodBackoffActive: boolean;
+  /** ISO time when fish_cod retries resume after backoff. */
+  fishCodBackoffUntil?: string;
+  /** Consecutive fish_cod failed/fishing_start_failed outcomes (resets on success). */
+  consecutiveFishCodFailures: number;
 }
 
 interface PersistedPlaybook {
@@ -79,6 +85,8 @@ interface PersistedPlaybook {
   lastGatherRestartAt?: string;
   lastGatherSkill?: string;
   lastGatherResource?: string;
+  consecutiveFishCodFailures?: number;
+  fishCodBackoffUntil?: string;
 }
 
 const STAGE_ORDER: EarlyStageId[] = [
@@ -104,6 +112,18 @@ const COD_BUSY_TARGET = 90;
 export const GATHER_GRACE_MS = 30_000;
 /** After buy_bait success, refuse another purchase for this long (or until stage advances). */
 export const BAIT_PURCHASE_COOLDOWN_MS = 15 * 60_000;
+/** Consecutive fish_cod start failures before temporary playbook fallback. */
+export const FISH_COD_FAILURE_THRESHOLD = 4;
+/** Cooldown before re-injecting fish_cod after backoff (stage stays fish_cod). */
+export const FISH_COD_BACKOFF_MS = 3 * 60_000;
+/** Fallback actions while fish_cod backoff is active (baitOwned is never cleared). */
+export const FISH_COD_BACKOFF_FALLBACKS: AutopilotAction[] = [
+  'continue_current',
+  'cook_cod',
+  'mine_coal',
+  'sell_junk_for_gold',
+  'idle',
+];
 
 /** Resolved at call time so AUTOPILOT_LOG_DIR is honored after env load. */
 export function resolvePlaybookStatePath(): string {
@@ -159,6 +179,8 @@ function loadPersisted(): PersistedPlaybook {
       lastGatherRestartAt: parsed.lastGatherRestartAt,
       lastGatherSkill: parsed.lastGatherSkill,
       lastGatherResource: parsed.lastGatherResource,
+      consecutiveFishCodFailures: parsed.consecutiveFishCodFailures ?? 0,
+      fishCodBackoffUntil: parsed.fishCodBackoffUntil,
     };
   } catch {
     return { version: 1, stage: 'mine_coal', counts: emptyCounts() };
@@ -240,6 +262,23 @@ function syncCountsFromSnapshot(
     next.codBusyCycles += 1;
   }
   return next;
+}
+
+function computeFishCodBackoff(persisted: PersistedPlaybook): {
+  active: boolean;
+  until?: string;
+  failures: number;
+} {
+  const failures = persisted.consecutiveFishCodFailures ?? 0;
+  const until = persisted.fishCodBackoffUntil;
+  if (!until) {
+    return { active: false, failures };
+  }
+  const remaining = new Date(until).getTime() - Date.now();
+  if (!Number.isFinite(remaining) || remaining <= 0) {
+    return { active: false, failures };
+  }
+  return { active: true, until, failures };
 }
 
 function computeGatherGrace(
@@ -439,6 +478,8 @@ export function evaluatePlaybook(
       curriculumHint: 'Early playbook disabled (EARLY_PLAYBOOK=false).',
       complete: true,
       gatherGraceActive: false,
+      fishCodBackoffActive: false,
+      consecutiveFishCodFailures: 0,
     };
   }
 
@@ -478,6 +519,7 @@ export function evaluatePlaybook(
   if (stage === 'explore_map' && counts.mapPeeks >= 1) stage = 'complete';
 
   const grace = computeGatherGrace(persisted, stage);
+  const fishBackoff = computeFishCodBackoff(persisted);
   if (grace.active && stage === 'fish_cod') {
     const resource = snapshot.currentAction?.resource ?? snapshot.currentAction?.label ?? '';
     const creditedFromSnapshot =
@@ -489,6 +531,17 @@ export function evaluatePlaybook(
 
   const meta = stageMeta(stage, baitOwned);
   const complete = stage === 'complete';
+  const backoffActive = stage === 'fish_cod' && fishBackoff.active;
+  const preferredActions = backoffActive
+    ? [...FISH_COD_BACKOFF_FALLBACKS]
+    : meta.preferred;
+  const interruptActions = backoffActive
+    ? meta.interrupt.filter((a) => a !== 'fish_cod')
+    : meta.interrupt;
+  const curriculumHint = backoffActive
+    ? `EARLY PLAYBOOK fish_cod backoff (${fishBackoff.failures} failures) until ${fishBackoff.until ?? 'cooldown'} — ` +
+      `prefer ${FISH_COD_BACKOFF_FALLBACKS.join('/')} instead of hammering fish_cod. baitOwned stays true.`
+    : meta.hint;
 
   savePersisted({
     version: 1,
@@ -500,6 +553,8 @@ export function evaluatePlaybook(
     lastGatherRestartAt: persisted.lastGatherRestartAt,
     lastGatherSkill: persisted.lastGatherSkill,
     lastGatherResource: persisted.lastGatherResource,
+    consecutiveFishCodFailures: fishBackoff.failures,
+    fishCodBackoffUntil: fishBackoff.active ? fishBackoff.until : undefined,
   });
 
   return {
@@ -507,18 +562,21 @@ export function evaluatePlaybook(
     stage,
     stageIndex: STAGE_ORDER.indexOf(stage),
     stageGoal: meta.goal,
-    preferredActions: meta.preferred,
+    preferredActions,
     deprioritizedActions: meta.deprioritized,
-    interruptActions: meta.interrupt,
+    interruptActions,
     counts,
     baitOwned,
     lastBaitPurchaseAt: persisted.lastBaitPurchaseAt,
     targets: { coalMin: COAL_MIN, coalMax: COAL_MAX, codMin: COD_MIN, codMax: COD_MAX },
-    curriculumHint: meta.hint,
+    curriculumHint,
     complete,
     gatherGraceActive: grace.active,
     gatherGraceSkill: grace.skill,
     gatherGraceResource: grace.resource,
+    fishCodBackoffActive: backoffActive,
+    fishCodBackoffUntil: fishBackoff.until,
+    consecutiveFishCodFailures: fishBackoff.failures,
   };
 }
 
@@ -547,6 +605,8 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
   let lastGatherRestartAt = persisted.lastGatherRestartAt;
   let lastGatherSkill = persisted.lastGatherSkill;
   let lastGatherResource = persisted.lastGatherResource;
+  let consecutiveFishCodFailures = persisted.consecutiveFishCodFailures ?? 0;
+  let fishCodBackoffUntil = persisted.fishCodBackoffUntil;
   if (action === 'buy_bait' && /purchased/i.test(outcome)) {
     baitOwned = true;
     lastBaitPurchaseAt = new Date().toISOString();
@@ -554,7 +614,17 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
       stage = 'fish_cod';
     }
   }
-  if (action === 'fish_cod' && /missing_requirement|fishing_start_failed/i.test(outcome)) {
+  if (action === 'fish_cod' && /failed|fishing_start_failed|missing_requirement/i.test(outcome)) {
+    if (/failed|fishing_start_failed/i.test(outcome)) {
+      consecutiveFishCodFailures += 1;
+      if (consecutiveFishCodFailures >= FISH_COD_FAILURE_THRESHOLD) {
+        fishCodBackoffUntil = new Date(Date.now() + FISH_COD_BACKOFF_MS).toISOString();
+        console.warn(
+          `[playbook] fish_cod start failed ${consecutiveFishCodFailures}x — backoff until ${fishCodBackoffUntil} ` +
+            '(prefer mine_coal/cook_cod/sell_junk_for_gold/continue_current; baitOwned stays true)',
+        );
+      }
+    }
     // Do NOT clear baitOwned or retreat to buy_bait. Inventory scrape / Start UI / captcha
     // often false-flags missing bait while Cheap Bait is already owned.
     if (baitOwned || STAGE_ORDER.indexOf(stage) > STAGE_ORDER.indexOf('buy_bait')) {
@@ -574,6 +644,8 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
     }
   }
   if (action === 'fish_cod' && /restarted|already_busy/i.test(outcome)) {
+    consecutiveFishCodFailures = 0;
+    fishCodBackoffUntil = undefined;
     lastGatherRestartAt = new Date().toISOString();
     lastGatherSkill = 'fishing';
     lastGatherResource = 'Cod';
@@ -597,6 +669,8 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
     lastGatherRestartAt,
     lastGatherSkill,
     lastGatherResource,
+    consecutiveFishCodFailures,
+    fishCodBackoffUntil,
   });
 }
 
@@ -614,8 +688,22 @@ export function filterAllowedByPlaybook(
   const resource = snapshot.currentAction?.resource ?? snapshot.currentAction?.label ?? '';
   const busy = Boolean(snapshot.currentAction?.busy || snapshot.flags.gatherBusy);
   const baitTrusted = playbook.baitOwned || snapshot.flags.hasBait;
+  const fishBackoff =
+    playbook.stage === 'fish_cod' &&
+    (playbook.fishCodBackoffActive ||
+      (playbook.fishCodBackoffUntil &&
+        Date.now() < new Date(playbook.fishCodBackoffUntil).getTime()));
 
   let next = allowed.filter((a) => !playbook.deprioritizedActions.includes(a));
+
+  if (fishBackoff) {
+    next = next.filter((a) => a !== 'fish_cod');
+    for (const fallback of FISH_COD_BACKOFF_FALLBACKS) {
+      if (allowed.includes(fallback) && !next.includes(fallback)) {
+        next.push(fallback);
+      }
+    }
+  }
 
   // NEVER allow buy_bait when bait is trusted, stage is past buy_bait, or purchase cooldown active —
   // even if stage was incorrectly reset to buy_bait or inventory scrape is empty.
@@ -645,6 +733,9 @@ export function filterAllowedByPlaybook(
       }
     }
     for (const id of playbook.interruptActions) {
+      if (fishBackoff && id === 'fish_cod') {
+        continue;
+      }
       if (
         playbook.gatherGraceActive &&
         playbook.stage === 'fish_cod' &&
