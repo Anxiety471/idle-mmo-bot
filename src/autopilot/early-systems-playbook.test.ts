@@ -248,4 +248,19 @@ describe('sticky baitOwned (no repurchase loop)', () => {
     assert.equal(saved.stage, 'fish_cod');
     assert.ok(saved.lastBaitPurchaseAt);
   });
+
+  it('notePlaybookOutcome counts sell_junk_for_gold sells', () => {
+    statePath = join('/tmp', `playbook-sell-junk-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({ version: 1, stage: 'sell_half', counts: emptyPlaybookCounts(), baitOwned: false })}\n`,
+    );
+
+    notePlaybookOutcome('sell_junk_for_gold', 'sold');
+
+    const saved = JSON.parse(readFileSync(statePath, 'utf8')) as { counts?: { sells?: number } };
+    assert.equal(saved.counts?.sells, 1);
+  });
 });

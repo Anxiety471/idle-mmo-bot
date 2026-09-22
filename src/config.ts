@@ -22,6 +22,8 @@ export interface AppConfig {
   buyBait: boolean;
   /** When true, combat/gather may click Start anyway on replace dialog. Off by default. */
   forceInterrupt: boolean;
+  /** Gold floor — sell_junk_for_gold may run when snapshot gold is below this (default 800). */
+  sellGoldThreshold: number;
 }
 
 export function loadConfig(): AppConfig {
@@ -32,5 +34,6 @@ export function loadConfig(): AppConfig {
     storageStatePath: process.env.STORAGE_STATE?.trim() || undefined,
     buyBait: parseBool(process.env.BUY_BAIT, false),
     forceInterrupt: parseBool(process.env.FORCE_INTERRUPT, false),
+    sellGoldThreshold: parseIntEnv(process.env.SELL_GOLD_THRESHOLD, 800),
   };
 }

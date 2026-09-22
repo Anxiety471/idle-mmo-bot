@@ -76,9 +76,19 @@ export async function sellJunk(page: Page, config: AppConfig): Promise<Inventory
 export async function sellHalfCareful(
   page: Page,
   config: AppConfig,
-  options: { itemHints?: string[]; keepCoal?: number; maxStacks?: number } = {},
+  options: {
+    itemHints?: string[];
+    keepCoal?: number;
+    keepOak?: number;
+    keepCod?: number;
+    keepCookedCod?: number;
+    maxStacks?: number;
+  } = {},
 ): Promise<InventoryStepResult | 'sold_partial'> {
   const keepCoal = options.keepCoal ?? 15;
+  const keepOak = options.keepOak ?? 5;
+  const keepCod = options.keepCod ?? 1;
+  const keepCookedCod = options.keepCookedCod ?? 1;
   const maxStacks = options.maxStacks ?? 2;
   const hints = options.itemHints ?? ['Burnt Cod', 'Burnt Fish', 'Burnt Salmon', 'Oak Log', 'Coal Ore'];
 
@@ -89,7 +99,7 @@ export async function sellHalfCareful(
     let sold = 0;
     for (const item of hints) {
       if (sold >= maxStacks) break;
-      if (item === 'Cooked Cod' || item === 'Cod' || item === 'Raw Cod' || item === 'Cheap Bait') {
+      if (item === 'Cheap Bait') {
         continue;
       }
 
@@ -125,6 +135,23 @@ export async function sellHalfCareful(
         const qty = coalMatch ? Number.parseInt(coalMatch[1], 10) : 0;
         if (Number.isFinite(qty) && qty <= keepCoal) {
           console.log(`[inventory] keep Coal floor ${keepCoal} (have ${qty}) — skip sell`);
+          continue;
+        }
+      }
+      if (item === 'Oak Log' || /Oak/i.test(item)) {
+        const oakMatch = body.match(/Oak(?:\s*Log)?[^\d]{0,20}(\d+)/i);
+        const qty = oakMatch ? Number.parseInt(oakMatch[1], 10) : 0;
+        if (Number.isFinite(qty) && qty <= keepOak) {
+          console.log(`[inventory] keep Oak floor ${keepOak} (have ${qty}) — skip sell`);
+          continue;
+        }
+      }
+      if (item === 'Cooked Cod' || item === 'Cod' || item === 'Raw Cod') {
+        const codMatch = body.match(/(?:Cooked\s+)?Cod[^\d]{0,20}(\d+)/i);
+        const qty = codMatch ? Number.parseInt(codMatch[1], 10) : 0;
+        const floor = item === 'Cooked Cod' ? keepCookedCod : keepCod;
+        if (Number.isFinite(qty) && qty <= floor) {
+          console.log(`[inventory] keep ${item} floor ${floor} (have ${qty}) — skip sell`);
           continue;
         }
       }

@@ -24,8 +24,12 @@ import {
   buyCheapBait,
   sellJunkToVendor,
   sellHalfCareful,
+  sellJunkForGold,
+  hasSurplusVendorJunk,
+  shouldAllowSellJunkForGold,
   trySmeltCoal,
 } from '../deterministic/index.js';
+import type { SellJunkForGoldContext } from '../deterministic/sell-junk-for-gold.js';
 import type { ActionAllowContext, ActionDefinition, ActionExecuteContext } from './action-types.js';
 import { registerAction } from './action-registry.js';
 import { tryCookCod } from '../deterministic/cook.js';
@@ -58,6 +62,18 @@ function inventoryPressure(ctx: ActionAllowContext): boolean {
 
 function hasJunk(ctx: ActionAllowContext): boolean {
   return ctx.junkItems.some((item) => (ctx.snapshot.inventory[item] ?? 0) > 0);
+}
+
+function buildSellJunkForGoldContext(ctx: ActionAllowContext): SellJunkForGoldContext {
+  const playbook = getPlaybookFromSnapshot(ctx.snapshot);
+  return {
+    inventory: ctx.snapshot.inventory,
+    gold: ctx.snapshot.gold ?? 999,
+    playbookStage: playbook?.stage,
+    baitOwned: playbook?.baitOwned ?? false,
+    hasBait: ctx.snapshot.flags.hasBait,
+    junkItems: ctx.junkItems,
+  };
 }
 
 function gatherIdle(ctx: ActionAllowContext): boolean {
@@ -427,6 +443,27 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
     }),
   },
 
+  {
+    id: 'sell_junk_for_gold',
+    description:
+      'Sell surplus gather junk (Oak, Coal, vendor trash) for gold; keep battle food and bait when fishing needs it',
+    bootstrap: true,
+    priority: 26,
+    tags: ['economy', 'playbook'],
+    safety: 'inventory',
+    isAllowed: (ctx) => {
+      if (!ctx.snapshot.flags.sessionValid) return false;
+      const sellCtx = buildSellJunkForGoldContext(ctx);
+      if (!hasSurplusVendorJunk(sellCtx)) return false;
+      return shouldAllowSellJunkForGold(sellCtx, ctx.config.sellGoldThreshold);
+    },
+    execute: async (ctx) => ({
+      action: 'sell_junk_for_gold',
+      outcome: await sellJunkForGold(ctx.page, ctx.config, {
+        context: buildSellJunkForGoldContext(ctx),
+      }),
+    }),
+  },
   {
     id: 'market_sell_half',
     description:

@@ -13,6 +13,7 @@ import { listActions } from '../autopilot/action-registry.js';
 import { huntFoundCap } from './hunt-cap.js';
 import type { SupervisorAdvisor } from './supervisor-advisor.js';
 import { getPlaybookFromSnapshot } from '../autopilot/early-systems-playbook.js';
+import { parseSellGoldThreshold } from '../deterministic/sell-junk-for-gold.js';
 
 const HEARTH_QUEST = 'Wood for the Hearth';
 const GOBLIN_QUEST = 'Goblin Menace';
@@ -133,6 +134,11 @@ export class ProgressiveStubJev implements SupervisorAdvisor {
     const gatherCandidates = gatherRotationActions(allowed);
     if (gatherCandidates.length > 0 && !snapshot.flags.gatherBusy) {
       return gatherCandidates[context.gatherRotationIndex % gatherCandidates.length];
+    }
+
+    const sellForGold = pickAllowed(allowed, ['sell_junk_for_gold']);
+    if (sellForGold && (snapshot.gold ?? 999) < parseSellGoldThreshold()) {
+      return sellForGold;
     }
 
     const sell = pickAllowed(allowed, ['sell_junk']);
