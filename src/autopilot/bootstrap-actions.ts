@@ -42,7 +42,11 @@ import type { ActionAllowContext, ActionDefinition, ActionExecuteContext } from 
 import { registerAction } from './action-registry.js';
 import { tryCookCod } from '../deterministic/cook.js';
 import { managePets } from '../deterministic/pets.js';
-import { getPlaybookFromSnapshot } from './early-systems-playbook.js';
+import {
+  getPlaybookFromSnapshot,
+  recentBaitPurchase,
+  shouldPreferBaitRestock,
+} from './early-systems-playbook.js';
 import { pollUntilHuntStop } from '../jev/hunt-cap.js';
 
 const HEARTH_QUEST = 'Wood for the Hearth';
@@ -465,11 +469,13 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
       const playbookWantsBait =
         Boolean(playbook?.enabled && !playbook.complete && playbook.stage === 'buy_bait');
       // Never repurchase while playbook trusts bait, stage past buy_bait, or purchase cooldown active.
+      // Scrape undercount after buy_bait must not bypass cooldown (trust purchased stock).
       const baitCount =
         (ctx.snapshot.inventory['Cheap Bait'] ?? 0) + (ctx.snapshot.inventory['Bait'] ?? 0);
+      const baitCooldown = recentBaitPurchase(playbook?.lastBaitPurchaseAt);
       const needsBaitRestock =
-        Boolean(playbook?.enabled && !playbook.complete && playbook.stage === 'fish_cod') &&
-        baitCount < 15;
+        Boolean(playbook?.enabled && !playbook.complete) &&
+        shouldPreferBaitRestock(playbook?.stage, baitCount, playbook?.lastBaitPurchaseAt);
       const baitTrusted =
         !needsBaitRestock &&
         (ctx.snapshot.flags.hasBait ||
@@ -479,11 +485,6 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
             playbook.stage !== 'buy_bait' &&
             playbook.stage !== 'mine_coal' &&
             playbook.stage !== 'sell_half'));
-      let baitCooldown = false;
-      if (playbook?.lastBaitPurchaseAt && !needsBaitRestock) {
-        const elapsed = Date.now() - new Date(playbook.lastBaitPurchaseAt).getTime();
-        baitCooldown = Number.isFinite(elapsed) && elapsed >= 0 && elapsed < 15 * 60_000;
-      }
       return (
         ctx.snapshot.flags.sessionValid &&
         !baitTrusted &&

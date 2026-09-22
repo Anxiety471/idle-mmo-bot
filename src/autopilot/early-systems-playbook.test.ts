@@ -10,7 +10,9 @@ import {
   FISH_COD_BACKOFF_MS,
   FISH_COD_FAILURE_THRESHOLD,
   notePlaybookOutcome,
+  recentBaitPurchase,
   resolvePlaybookStatePath,
+  shouldPreferBaitRestock,
   type PlaybookProgress,
 } from './early-systems-playbook.js';
 
@@ -622,5 +624,112 @@ describe('bait restock preference', () => {
     assert.ok(!filtered.includes('fish_cod'));
     assert.ok(!filtered.includes('craft_if_ready'));
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('does not hard-prefer buy_bait after recent purchase when scrape undercounts', () => {
+    for (const key of ENV_KEYS) envSnapshot[key] = process.env[key];
+    const dir = join(getLogDir(), `pb-bait-trust-${Date.now()}`);
+    mkdirSync(dir, { recursive: true });
+    process.env.AUTOPILOT_LOG_DIR = dir;
+    process.env.PLAYBOOK_STATE_PATH = join(dir, 'playbook-state.json');
+    process.env.EARLY_PLAYBOOK = 'true';
+    const purchasedAt = new Date().toISOString();
+    writeFileSync(
+      process.env.PLAYBOOK_STATE_PATH,
+      JSON.stringify({
+        version: 1,
+        stage: 'fish_cod',
+        counts: emptyPlaybookCounts(),
+        baitOwned: true,
+        lastBaitPurchaseAt: purchasedAt,
+      }),
+    );
+
+    const snapshot = minimalSnapshot({
+      // Undercount / icon-only scrape after successful buy_bait
+      inventory: { 'Cheap Bait': 0 },
+      gold: 50,
+      flags: {
+        hasBait: true,
+        bankNearby: false,
+        gatherBusy: false,
+        inBattle: false,
+        sessionValid: true,
+      },
+    });
+    const playbook = evaluatePlaybook(snapshot);
+    assert.equal(playbook.baitOwned, true);
+    assert.ok(recentBaitPurchase(playbook.lastBaitPurchaseAt));
+    assert.equal(shouldPreferBaitRestock('fish_cod', 0, purchasedAt), false);
+    assert.ok(
+      playbook.preferredActions[0] !== 'buy_bait',
+      `expected not to hard-prefer buy_bait, got ${playbook.preferredActions.join(',')}`,
+    );
+    assert.ok(
+      !playbook.preferredActions.includes('buy_bait') || playbook.preferredActions[0] === 'fish_cod',
+      `buy_bait must not lead preferred after recent purchase: ${playbook.preferredActions.join(',')}`,
+    );
+    assert.ok(
+      playbook.curriculumHint.includes('cooldown') || playbook.curriculumHint.includes('trust'),
+      `hint should mention trust/cooldown, got: ${playbook.curriculumHint}`,
+    );
+    const filtered = filterAllowedByPlaybook(
+      ['fish_cod', 'buy_bait', 'craft_if_ready', 'idle'],
+      snapshot,
+      playbook,
+    );
+    assert.ok(!filtered.includes('buy_bait'), `buy_bait should be stripped during cooldown, got ${filtered.join(',')}`);
+    assert.ok(filtered.includes('fish_cod'), `fish_cod should remain allowed, got ${filtered.join(',')}`);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('still prefers buy_bait on fish_cod when scrape <15 and no recent purchase', () => {
+    for (const key of ENV_KEYS) envSnapshot[key] = process.env[key];
+    const dir = join(getLogDir(), `pb-bait-first-${Date.now()}`);
+    mkdirSync(dir, { recursive: true });
+    process.env.AUTOPILOT_LOG_DIR = dir;
+    process.env.PLAYBOOK_STATE_PATH = join(dir, 'playbook-state.json');
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      process.env.PLAYBOOK_STATE_PATH,
+      JSON.stringify({
+        version: 1,
+        stage: 'fish_cod',
+        counts: emptyPlaybookCounts(),
+        baitOwned: true,
+        // expired purchase — cooldown gone
+        lastBaitPurchaseAt: new Date(Date.now() - 16 * 60_000).toISOString(),
+      }),
+    );
+
+    const snapshot = minimalSnapshot({
+      inventory: { 'Cheap Bait': 1 },
+      gold: 50,
+      flags: {
+        hasBait: true,
+        bankNearby: false,
+        gatherBusy: false,
+        inBattle: false,
+        sessionValid: true,
+      },
+    });
+    const playbook = evaluatePlaybook(snapshot);
+    assert.equal(shouldPreferBaitRestock('fish_cod', 1, playbook.lastBaitPurchaseAt), true);
+    assert.equal(playbook.preferredActions[0], 'buy_bait');
+    const filtered = filterAllowedByPlaybook(
+      ['fish_cod', 'buy_bait', 'idle'],
+      snapshot,
+      playbook,
+    );
+    assert.equal(filtered[0], 'buy_bait');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('shouldPreferBaitRestock allows first restock when empty and no purchase timestamp', () => {
+    assert.equal(shouldPreferBaitRestock('fish_cod', 0, undefined), true);
+    assert.equal(shouldPreferBaitRestock('fish_cod', 14, undefined), true);
+    assert.equal(shouldPreferBaitRestock('fish_cod', 15, undefined), false);
+    assert.equal(shouldPreferBaitRestock('mine_coal', 0, undefined), false);
+    assert.equal(shouldPreferBaitRestock('fish_cod', 0, new Date().toISOString()), false);
   });
 });
