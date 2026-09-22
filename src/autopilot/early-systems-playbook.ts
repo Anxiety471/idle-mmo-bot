@@ -3,6 +3,7 @@
  *
  * HttpJev remains the decision brain. This module only:
  *  - tracks batch loop progress (coal → sell → bait → fish → cook → sell → hunt → pets → repeat)
+ *  - hard gate: coal (~PLAYBOOK_COAL_TARGET, default 100) before fish_cod; snap back if stuck ahead
  *  - default batch targets: ~100 coal, ~100 fish, ~100 cook, ~50 hunt/battle (env-overridable)
  *  - exposes preferred / deprioritized actions into the snapshot for Jev
  *  - filters allowed actions so endless Oak woodcutting loses priority until the run completes
@@ -381,6 +382,11 @@ function effectiveCoal(counts: PlaybookCounts): number {
   return Math.max(counts.coal, Math.min(COAL_MAX, estimate));
 }
 
+/** Coal inventory/busy heuristic has reached PLAYBOOK_COAL_TARGET (default 100). */
+export function coalTargetMet(counts: PlaybookCounts): boolean {
+  return effectiveCoal(counts) >= COAL_MIN || counts.coalBusyCycles >= COAL_BUSY_TARGET;
+}
+
 function effectiveCod(counts: PlaybookCounts): number {
   if (counts.rawCod >= COD_MIN) return counts.rawCod;
   const estimate = Math.floor(counts.codBusyCycles / 2.5);
@@ -441,7 +447,8 @@ function deriveStage(
   const idx = STAGE_ORDER.indexOf(persisted);
   const atLeast = (stage: EarlyStageId): boolean => STAGE_ORDER.indexOf(stage) <= idx;
 
-  if (coal < COAL_MIN && counts.coalBusyCycles < COAL_BUSY_TARGET) {
+  // Hard gate: never leave mine_coal until coal target met (coal first before fishing).
+  if (!coalTargetMet(counts)) {
     return 'mine_coal';
   }
   if (counts.sells < 1 && atLeast('sell_half')) {
@@ -492,10 +499,17 @@ function stageMeta(stage: EarlyStageId, baitOwned = false): {
       return {
         goal: `Mine ${COAL_MIN}–${COAL_MAX} Coal Ore`,
         preferred: ['mine_coal', 'continue_current'],
-        deprioritized: ['gather_oak', 'gather_yew', 'hunt_battle', 'explore_map'],
+        deprioritized: [
+          'gather_oak',
+          'gather_yew',
+          'hunt_battle',
+          'explore_map',
+          'fish_cod',
+          'cook_cod',
+        ],
         interrupt: ['mine_coal'],
         hint:
-          `EARLY PLAYBOOK stage mine_coal: interrupt Oak/Yew woodcutting and mine Coal Ore until ~${COAL_MIN}–${COAL_MAX}. Prefer mine_coal over continue_current when current resource is not Coal.`,
+          `EARLY PLAYBOOK stage mine_coal: coal first before fishing — interrupt Oak/Yew and mine Coal Ore until ~${COAL_MIN}–${COAL_MAX}. Prefer mine_coal; deprioritize fish_cod until coal target met.`,
       };
     case 'sell_half':
       return {
@@ -630,14 +644,23 @@ export function evaluatePlaybook(
   }
 
   let stage = deriveStage(counts, snapshot, persisted.stage, baitOwned);
+  const coalMet = coalTargetMet(counts);
+  const snappedBackForCoal =
+    !coalMet && STAGE_ORDER.indexOf(persisted.stage) >= STAGE_ORDER.indexOf('fish_cod');
 
-  // Monotonic advance: never go backwards in STAGE_ORDER.
-  const prevIdx = STAGE_ORDER.indexOf(persisted.stage);
-  const nextIdx = STAGE_ORDER.indexOf(stage);
-  if (nextIdx < prevIdx) stage = persisted.stage;
+  // Hard coal gate: snap back to mine_coal when target unmet (exception to monotonic).
+  // Recovers live bots stuck on fish_cod+ with only a few coal.
+  if (!coalMet) {
+    stage = 'mine_coal';
+  } else {
+    // Monotonic advance: never go backwards in STAGE_ORDER once coal is secured.
+    const prevIdx = STAGE_ORDER.indexOf(persisted.stage);
+    const nextIdx = STAGE_ORDER.indexOf(stage);
+    if (nextIdx < prevIdx) stage = persisted.stage;
+  }
 
   // Auto-advance mine_coal → sell_half when coal target met.
-  if (stage === 'mine_coal' && (effectiveCoal(counts) >= COAL_MIN || counts.coalBusyCycles >= COAL_BUSY_TARGET)) {
+  if (stage === 'mine_coal' && coalMet) {
     stage = 'sell_half';
   }
   if (
@@ -732,7 +755,10 @@ export function evaluatePlaybook(
   }
 
   const baitPurchaseRecent = recentBaitPurchase(persisted.lastBaitPurchaseAt);
-  let curriculumHint = needsBaitRestockNow
+  let curriculumHint = snappedBackForCoal
+    ? `EARLY PLAYBOOK coal gate: snapped back from ${persisted.stage} to mine_coal ` +
+      `(coal=${counts.coal}/${COAL_MIN}, busyCycles=${counts.coalBusyCycles}). Coal first before fishing.`
+    : needsBaitRestockNow
     ? `EARLY PLAYBOOK fish_cod needs bait restock (Cheap Bait=${baitStock} < 15) — choose buy_bait before fish_cod.`
     : baitPurchaseRecent && stage === 'fish_cod' && baitStock < 15
       ? `EARLY PLAYBOOK fish_cod: scrape Cheap Bait=${baitStock} < 15 but recent buy_bait still in cooldown — trust purchased stock; do NOT repurchase.`
@@ -826,7 +852,8 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
     baitOwned = true;
     lastBaitPurchaseAt = new Date().toISOString();
     if (stage === 'buy_bait' || STAGE_ORDER.indexOf(stage) <= STAGE_ORDER.indexOf('buy_bait')) {
-      stage = 'fish_cod';
+      // Coal first: only advance to fish_cod once coal target is met.
+      stage = coalTargetMet(counts) ? 'fish_cod' : 'mine_coal';
     }
   }
   if (action === 'fish_cod' && /failed|fishing_start_failed|missing_requirement/i.test(outcome)) {
@@ -910,6 +937,15 @@ export function filterAllowedByPlaybook(
         Date.now() < new Date(playbook.fishCodBackoffUntil).getTime()));
 
   let next = allowed.filter((a) => !playbook.deprioritizedActions.includes(a));
+
+  // Coal-first gate: while coal target unmet, prefer mine_coal and drop fish_cod/cook_cod.
+  const coalIncomplete = !coalTargetMet(playbook.counts);
+  if (coalIncomplete || playbook.stage === 'mine_coal') {
+    next = next.filter((a) => a !== 'fish_cod' && a !== 'cook_cod');
+    if (allowed.includes('mine_coal') && !next.includes('mine_coal')) {
+      next.push('mine_coal');
+    }
+  }
 
   if (fishBackoff) {
     next = next.filter((a) => a !== 'fish_cod');
@@ -1035,6 +1071,10 @@ export function filterAllowedByPlaybook(
 
   if (needsBaitRestock && next.includes('buy_bait')) {
     next = ['buy_bait', ...next.filter((a) => a !== 'buy_bait')];
+  }
+
+  if ((coalIncomplete || playbook.stage === 'mine_coal') && next.includes('mine_coal')) {
+    next = ['mine_coal', ...next.filter((a) => a !== 'mine_coal')];
   }
 
   const preferred = new Set(playbook.preferredActions);

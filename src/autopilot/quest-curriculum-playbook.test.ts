@@ -33,6 +33,10 @@ function emptyPlaybookCounts() {
   };
 }
 
+function coalMetCounts(overrides: Record<string, number> = {}) {
+  return { ...emptyPlaybookCounts(), coal: 100, coalBusyCycles: 300, ...overrides };
+}
+
 function minimalSnapshot(overrides: Partial<GameSnapshot> = {}): GameSnapshot {
   return {
     location: 'Melriel',
@@ -72,7 +76,7 @@ describe('quest curriculum playbook integration', () => {
       `${JSON.stringify({
         version: 1,
         stage: 'fish_cod',
-        counts: emptyPlaybookCounts(),
+        counts: coalMetCounts(),
         baitOwned: true,
       })}\n`,
     );
@@ -137,7 +141,7 @@ describe('quest curriculum playbook integration', () => {
       `${JSON.stringify({
         version: 1,
         stage: 'sell_half',
-        counts: emptyPlaybookCounts(),
+        counts: coalMetCounts(),
         baitOwned: false,
       })}\n`,
     );
@@ -171,7 +175,7 @@ describe('ProgressiveStubJev quest curriculum', () => {
       `${JSON.stringify({
         version: 1,
         stage: 'fish_cod',
-        counts: emptyPlaybookCounts(),
+        counts: coalMetCounts(),
         baitOwned: true,
       })}\n`,
     );
@@ -196,7 +200,7 @@ describe('ProgressiveStubJev quest curriculum', () => {
     process.env.EARLY_PLAYBOOK = 'true';
     writeFileSync(
       statePath,
-      `${JSON.stringify({ version: 1, stage: 'fish_cod', counts: emptyPlaybookCounts(), baitOwned: true })}\n`,
+      `${JSON.stringify({ version: 1, stage: 'fish_cod', counts: coalMetCounts(), baitOwned: true })}\n`,
     );
     const snapshot = minimalSnapshot({
       acceptedQuests: [
