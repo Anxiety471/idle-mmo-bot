@@ -181,7 +181,7 @@ Store project conventions in **mem0** (or your persistent memory store) so futur
 - No membership / real-money spend; gold Cheap Bait only (§4)
 - Protected sell list (`PROTECTED_ITEMS` in `src/deterministic/inventory.ts`)
 - Sibling overseer coordination + agent-to-agent notifications (§7)
-- Bait trust / gather grace / gather reliability hard rules (§4.7–§4.9)
+- Bait trust / gather grace / gather reliability / inventory scrape hard rules (§4.7–§4.10)
 
 ---
 
@@ -282,6 +282,21 @@ Even with PR #17 grace, restarts fail when quantity is too short, the wrong Star
 **Restart sequence:** dismiss overlays → select resource → set quantity → click largest Start → wait for CURRENT ACTION (5s) → on captcha: solve, re-batch, re-click Start, wait again → return **`failed`** if CURRENT ACTION never appears (preserves grace semantics).
 
 **What overseers should watch:** `fish_cod` → `failed` or immediate idle after `restarted`; check overlays, quantity field, captcha prompts, and whether Start was disabled (missing bait — see §4.7).
+
+### 4.10 Inventory scrape reliability (`src/snapshot/inventory-scrape.ts`)
+
+The live `/inventory` UI is mostly **icon + quantity badge** with item names in tooltips or click-through detail panels. `readGameSnapshot()` merges:
+
+| Pass | Source | Notes |
+|------|--------|-------|
+| Text | `parseInventoryCounts` / `extractItemQuantitiesFromText` | `Item x 25`, `25 x Item`, multiline detail panels |
+| DOM static | `title` / `aria-label` / `alt`, `data-tooltip`, **image slug → item name** | CDN filenames like `oak-log.png` → `Oak Log` |
+| Tooltip hover | `.tippy-content` after hovering slot buttons | IdleMMO uses Tippy for item names |
+| Click-through | Up to 60 slot buttons → detail panel / dialog text | Fallback when badges are numeric-only |
+
+`sanitizeInventoryCounts` drops page-chrome false positives (e.g. `Code of Conduct` → `Cod`). **`baitOwned` sticky trust (§4.7) remains** as a safety net when scrape still misses Cheap Bait.
+
+**What overseers should watch:** `decisions.jsonl` with empty `inventory: {}` while `market_sell_half` / `cook_cod` should fire — check `/inventory` DOM changes before weakening sell floors. Unit tests: `src/snapshot/inventory-scrape.test.ts`.
 
 ---
 

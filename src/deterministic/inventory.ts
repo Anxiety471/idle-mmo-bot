@@ -2,6 +2,10 @@ import type { Page } from 'playwright';
 import type { AppConfig } from '../config.js';
 import type { InventoryStepResult } from '../types.js';
 import { navigateTo } from '../browser.js';
+import {
+  extractItemQuantitiesFromText,
+  matchKnownItem,
+} from '../snapshot/inventory-scrape.js';
 
 const INVENTORY_PATH = '/inventory';
 const SELL_VENDOR_PATTERN = /sell to vendor/i;
@@ -26,6 +30,49 @@ async function confirmSell(page: Page): Promise<void> {
   }
 }
 
+async function clickInventoryItem(page: Page, item: string): Promise<boolean> {
+  const itemNode = page.getByText(item, { exact: true });
+  if (await itemNode.count() > 0) {
+    await itemNode.first().click({ timeout: 5000 }).catch(() => undefined);
+    return true;
+  }
+
+  const detailHint = page.getByText(item, { exact: false });
+  if (await detailHint.count() > 0) {
+    await detailHint.first().click({ timeout: 5000 }).catch(() => undefined);
+    return true;
+  }
+
+  const buttons = page.getByRole('button');
+  const count = await buttons.count();
+  for (let i = 0; i < Math.min(count, 80); i++) {
+    const btn = buttons.nth(i);
+    const label = (await btn.innerText().catch(() => '')).trim();
+    if (!label || /^Empty$/i.test(label)) continue;
+    if (/sort|filter|sell|vendor|bank|market|quest|profile|combat/i.test(label)) continue;
+    if (!/^(\d+(?:\.\d+)?[kK]?)$/.test(label) && label.length > 12) continue;
+
+    await btn.hover({ timeout: 1200 }).catch(() => undefined);
+    await page.waitForTimeout(120);
+    const tooltip = page.locator('.tippy-content:visible, [role="tooltip"]:visible').first();
+    if ((await tooltip.count()) > 0) {
+      const tipText = (await tooltip.innerText().catch(() => '')).trim();
+      if (matchKnownItem(tipText) === item) {
+        await btn.click({ timeout: 2000 }).catch(() => undefined);
+        return true;
+      }
+    }
+
+    await btn.click({ timeout: 2000 }).catch(() => undefined);
+    await page.waitForTimeout(250);
+    const panelText = await page.locator('body').innerText();
+    if (extractItemQuantitiesFromText(panelText)[item] !== undefined || panelText.includes(item)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Sell configured junk items via Sell to Vendor. Skips protected mats.
  */
@@ -40,9 +87,7 @@ export async function sellJunkToVendor(
     for (const item of junkItems) {
       if (PROTECTED_ITEMS.has(item)) continue;
 
-      const itemNode = page.getByText(item, { exact: true });
-      if (await itemNode.count() === 0) continue;
-      await itemNode.first().click({ timeout: 5000 }).catch(() => undefined);
+      if (!(await clickInventoryItem(page, item))) continue;
 
       const sellBtn = page.getByRole('button', { name: SELL_VENDOR_PATTERN });
       if (await sellBtn.count() === 0) continue;
@@ -93,31 +138,7 @@ export async function sellHalfCareful(
         continue;
       }
 
-      // Prefer clicking slots then reading detail panel (icon-only inventory).
-      const detailHint = page.getByText(item, { exact: false });
-      const itemNode = page.getByText(item, { exact: true });
-      if ((await itemNode.count()) === 0 && (await detailHint.count()) === 0) {
-        // Try clicking non-Empty inventory buttons and check detail text.
-        const buttons = page.getByRole('button');
-        const count = await buttons.count();
-        let found = false;
-        for (let i = 0; i < Math.min(count, 80); i++) {
-          const label = (await buttons.nth(i).innerText().catch(() => '')).trim();
-          if (!label || /^Empty$/i.test(label) || label.length > 12) continue;
-          // Quantity-only badges like "25" / "1.2K"
-          if (!/^(\d+(?:\.\d+)?[kK]?)$/.test(label) && label.length > 6) continue;
-          await buttons.nth(i).click({ timeout: 2000 }).catch(() => undefined);
-          await page.waitForTimeout(300);
-          const body = await page.locator('body').innerText();
-          if (body.includes(item)) {
-            found = true;
-            break;
-          }
-        }
-        if (!found) continue;
-      } else if (await itemNode.count() > 0) {
-        await itemNode.first().click({ timeout: 5000 }).catch(() => undefined);
-      }
+      if (!(await clickInventoryItem(page, item))) continue;
 
       const body = await page.locator('body').innerText();
       if (item === 'Coal Ore' || /Coal/i.test(item)) {
