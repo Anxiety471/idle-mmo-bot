@@ -9,6 +9,7 @@ import {
 } from '../deterministic/index.js';
 import { mapEnricher } from '../autopilot/snapshot-enrichers.js';
 import {
+import { isQuestProgressMet } from '../deterministic/quest-accept.js';
   buildInventoryMap,
   detectHasBait,
   scrapeInventoryFromDom,
@@ -62,10 +63,14 @@ function parseQuestCards(text: string, tab: SnapshotQuest['tab']): SnapshotQuest
     const progressMatch = text.match(
       new RegExp(`${title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]{0,200}?(\\d+\\s*/\\s*\\d+)`, 'i'),
     );
-    const canTurnIn = /Turn In/i.test(text) && text.includes(title);
+    const progress = progressMatch?.[1]?.trim();
+    // List view often omits the Turn In control until the card is opened — treat met progress as ready.
+    const canTurnIn =
+      (/Turn In/i.test(text) && text.includes(title)) ||
+      (tab === 'accepted' && isQuestProgressMet(progress));
     quests.push({
       title,
-      progress: progressMatch?.[1]?.trim(),
+      progress,
       canTurnIn,
       tab,
     });

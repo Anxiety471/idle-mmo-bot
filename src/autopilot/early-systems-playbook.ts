@@ -880,10 +880,16 @@ export function filterAllowedByPlaybook(
 
   // NEVER allow buy_bait when bait is trusted, stage is past buy_bait, or purchase cooldown active —
   // even if stage was incorrectly reset to buy_bait or inventory scrape is empty.
+  // Exception: fish_cod with low Cheap Bait stock needs restock for the 100-fish batch.
+  const baitCount =
+    (snapshot.inventory['Cheap Bait'] ?? 0) + (snapshot.inventory['Bait'] ?? 0);
+  const needsBaitRestock = playbook.stage === 'fish_cod' && baitCount < 15;
   const pastBuyBait = STAGE_ORDER.indexOf(playbook.stage) > STAGE_ORDER.indexOf('buy_bait');
   const baitCooldown = recentBaitPurchase(playbook.lastBaitPurchaseAt);
-  if (baitTrusted || pastBuyBait || baitCooldown || playbook.baitOwned) {
+  if (!needsBaitRestock && (baitTrusted || pastBuyBait || baitCooldown || playbook.baitOwned)) {
     next = next.filter((a) => a !== 'buy_bait');
+  } else if (needsBaitRestock && !next.includes('buy_bait') && allowed.includes('buy_bait')) {
+    next.push('buy_bait');
   }
 
   // Easy-complete pending quests (e.g. Hearth 150/150) should win over continue_current.
@@ -936,6 +942,7 @@ export function filterAllowedByPlaybook(
       }
       if (
         id === 'buy_bait' &&
+        !needsBaitRestock &&
         (baitTrusted || pastBuyBait || baitCooldown || playbook.baitOwned)
       ) {
         continue;

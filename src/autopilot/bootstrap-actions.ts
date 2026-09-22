@@ -139,15 +139,27 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<string> {
   return `battle:${battleResult}:huntMore:${await huntMore(page, allowInterrupt)}`;
 }
 
-async function questTurnIn(page: Page, config: AppConfig): Promise<string> {
+async function questTurnIn(
+  page: Page,
+  config: AppConfig,
+  interruptGather = false,
+): Promise<string> {
+  if (interruptGather) {
+    const nav = await navigateToQuestsInterrupting(page, config);
+    if (nav === 'blocked') return 'gather_interrupt_blocked';
+  }
+
   const hearth = await turnInQuestWhenReady(page, config, {
     title: HEARTH_QUEST,
     tab: 'Accepted',
     progressItem: 'Oak Log',
+    skipNavigate: interruptGather,
   });
   if (hearth.result === 'turned_in') return `turned_in:${HEARTH_QUEST}`;
 
-  await navigateTo(page, config, '/quests');
+  if (!interruptGather) {
+    await navigateTo(page, config, '/quests');
+  }
   await waitForQuestTabsSettled(page);
   await switchQuestTab(page, 'Accepted');
 
@@ -365,10 +377,20 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
     tags: ['quest'],
     safety: 'safe',
     isAllowed: (ctx) => ctx.snapshot.flags.sessionValid && hasTurnInReady(ctx),
-    execute: async (ctx) => ({
-      action: 'quest_turnin',
-      outcome: await questTurnIn(ctx.page, ctx.config),
-    }),
+    execute: async (ctx) => {
+      const gatherState = await readGatherState(ctx.page, ctx.config);
+      const interruptGather = Boolean(
+        gatherState.busy ||
+          gatherState.busyElsewhere ||
+          ctx.snapshot.flags.gatherBusy ||
+          ctx.snapshot.currentAction?.busy ||
+          ctx.forceInterrupt,
+      );
+      return {
+        action: 'quest_turnin',
+        outcome: await questTurnIn(ctx.page, ctx.config, interruptGather),
+      };
+    },
   },
   {
     id: 'quest_talk_accept',
@@ -443,16 +465,22 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
       const playbookWantsBait =
         Boolean(playbook?.enabled && !playbook.complete && playbook.stage === 'buy_bait');
       // Never repurchase while playbook trusts bait, stage past buy_bait, or purchase cooldown active.
+      const baitCount =
+        (ctx.snapshot.inventory['Cheap Bait'] ?? 0) + (ctx.snapshot.inventory['Bait'] ?? 0);
+      const needsBaitRestock =
+        Boolean(playbook?.enabled && !playbook.complete && playbook.stage === 'fish_cod') &&
+        baitCount < 15;
       const baitTrusted =
-        ctx.snapshot.flags.hasBait ||
-        Boolean(playbook?.baitOwned) ||
-        (playbook?.enabled === true &&
-          !playbook.complete &&
-          playbook.stage !== 'buy_bait' &&
-          playbook.stage !== 'mine_coal' &&
-          playbook.stage !== 'sell_half');
+        !needsBaitRestock &&
+        (ctx.snapshot.flags.hasBait ||
+          Boolean(playbook?.baitOwned) ||
+          (playbook?.enabled === true &&
+            !playbook.complete &&
+            playbook.stage !== 'buy_bait' &&
+            playbook.stage !== 'mine_coal' &&
+            playbook.stage !== 'sell_half'));
       let baitCooldown = false;
-      if (playbook?.lastBaitPurchaseAt) {
+      if (playbook?.lastBaitPurchaseAt && !needsBaitRestock) {
         const elapsed = Date.now() - new Date(playbook.lastBaitPurchaseAt).getTime();
         baitCooldown = Number.isFinite(elapsed) && elapsed >= 0 && elapsed < 15 * 60_000;
       }
@@ -461,13 +489,17 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
         !baitTrusted &&
         !baitCooldown &&
         (ctx.snapshot.gold ?? 0) >= 2 &&
-        (ctx.config.buyBait || hasKillQuest(ctx) || combatLagging || playbookWantsBait)
+        (ctx.config.buyBait ||
+          hasKillQuest(ctx) ||
+          combatLagging ||
+          playbookWantsBait ||
+          needsBaitRestock)
       );
     },
     execute: async (ctx) => ({
       action: 'buy_bait',
       // Buy a stack so one purchase covers fish_cod (inventory scrape often misses bait).
-      outcome: await buyCheapBait(ctx.page, ctx.config, 20),
+      outcome: await buyCheapBait(ctx.page, ctx.config, 50),
     }),
   },
   {
