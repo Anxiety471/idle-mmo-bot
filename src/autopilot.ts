@@ -1,5 +1,11 @@
 import { ensureActiveCharacter } from './character/character-select.js';
 import { resolveCharacterPaths } from './character/paths.js';
+import {
+  nextRosterCharacter,
+  parseCharacterRoster,
+  rotateToRosterCharacter,
+  shouldRotateWhileBusy,
+} from './character/roster.js';
 import { loadConfig } from './config.js';
 import { launchBrowser } from './browser.js';
 import { executeAction } from './actions/executor.js';
@@ -83,6 +89,11 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
     characterName: config.characterName,
   };
 
+  const roster = parseCharacterRoster(config.characterName, process.env.CHARACTER_ROSTER);
+  if (roster.length >= 2) {
+    console.log(`[autopilot] Character roster rotation: ${roster.join(' → ')}`);
+  }
+
   const sessionRelaunchMs = Math.max(config.pollMs * 6, 30_000);
 
   while (true) {
@@ -125,8 +136,45 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
         }
 
         const allowed = deriveAllowedActions(snapshot, config, junkItems, context);
-        const action = await supervisor.chooseNextAction(snapshot, allowed, context);
+        let action = await supervisor.chooseNextAction(snapshot, allowed, context);
         context.lastAction = action;
+
+        // When current alt is busy gathering and roster has another character, rotate
+        // after pets/quest interrupts — prefer managing the next alt over spinning on continue_current.
+        const rosterNow = parseCharacterRoster(config.characterName, process.env.CHARACTER_ROSTER);
+        const canRotate = shouldRotateWhileBusy(rosterNow, config.characterName, {
+          gatherBusy: snapshot.flags.gatherBusy,
+          inBattle: snapshot.flags.inBattle,
+          currentActionBusy: snapshot.currentAction?.busy,
+        });
+        if (
+          canRotate &&
+          (action === 'continue_current' || action === 'idle')
+        ) {
+          const nextName = nextRosterCharacter(rosterNow, config.characterName);
+          if (nextName) {
+            console.log(
+              `[autopilot] character busy — rotating ${config.characterName ?? '?'} → ${nextName}`,
+            );
+            const rotated = await rotateToRosterCharacter(session.page, config, nextName);
+            if (rotated.ok) {
+              context.characterName = config.characterName;
+              setLogContext({
+                cycle: context.cycle,
+                accountSlug: context.accountSlug,
+                characterName: context.characterName,
+              });
+              console.log(
+                `[autopilot] rotated to ${rotated.to} logDir=${rotated.paths?.autopilotLogDir}`,
+              );
+              await sleep(config.pollMs);
+              continue;
+            }
+            console.warn(
+              `[autopilot] roster rotate failed: ${rotated.message ?? 'unknown'} — staying on current`,
+            );
+          }
+        }
 
         if (isGatherAction(action)) {
           context.gatherRotationIndex += 1;

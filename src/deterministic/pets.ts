@@ -3,12 +3,23 @@
  *
  * Live UI selectors are resilient (role/text). Pets page: /pets.
  * Feeding tip from community guides: avoid blind Max (can waste one food unit).
+ *
+ * Maintenance (claim/feed/battle/sleep) is safe while the character is gathering.
+ * Equip is reserved for idle ticks so the character receives the pet boost.
  */
 import type { Page } from 'playwright';
 import type { AppConfig } from '../config.js';
 import { navigateTo } from '../browser.js';
 
 export type PetsStepResult = string;
+
+export interface ManagePetsOptions {
+  /**
+   * When true (default), also click Equip if shown.
+   * Pass false while gatherBusy/inBattle so maintenance can run without equipping mid-action.
+   */
+  allowEquip?: boolean;
+}
 
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
@@ -59,11 +70,7 @@ async function tryFeedOnce(page: Page): Promise<boolean> {
   return true;
 }
 
-/**
- * Best-effort pets maintenance tick.
- * Returns a short outcome token for playbook counters.
- */
-export async function managePets(page: Page, config: AppConfig): Promise<PetsStepResult> {
+async function openPetsPage(page: Page, config: AppConfig): Promise<PetsStepResult | null> {
   try {
     await navigateTo(page, config, '/pets');
     await sleep(Math.max(800, config.pollMs));
@@ -76,7 +83,49 @@ export async function managePets(page: Page, config: AppConfig): Promise<PetsSte
   if (/no pets|you don't have any pets|don.?t have any pets|hatch an egg/i.test(body)) {
     return 'no_pets';
   }
+  return null;
+}
 
+/**
+ * Maintenance only: claim / sleep / feed / battle — never Equip.
+ * Safe to run while the character is gathering or otherwise acting.
+ */
+export async function maintainPets(page: Page, config: AppConfig): Promise<PetsStepResult> {
+  return managePets(page, config, { allowEquip: false });
+}
+
+/**
+ * Idle-only equip tick — keep a pet equipped for the character boost.
+ */
+export async function equipPet(page: Page, config: AppConfig): Promise<PetsStepResult> {
+  const early = await openPetsPage(page, config);
+  if (early) return early;
+
+  const body = (await page.locator('body').innerText().catch(() => '')).toLowerCase();
+  if (await clickFirst(page, /^\s*equip\s*$/i)) {
+    return 'ok:equip';
+  }
+  if (/equipped|pet|stamina|happiness|mastery/i.test(body)) {
+    return 'inspected';
+  }
+  return 'no_action';
+}
+
+/**
+ * Best-effort pets tick.
+ * Maintenance always; Equip only when `allowEquip` is true (default true for backward compat).
+ */
+export async function managePets(
+  page: Page,
+  config: AppConfig,
+  options: ManagePetsOptions = {},
+): Promise<PetsStepResult> {
+  const allowEquip = options.allowEquip !== false;
+
+  const early = await openPetsPage(page, config);
+  if (early) return early;
+
+  const body = (await page.locator('body').innerText().catch(() => '')).toLowerCase();
   const actions: string[] = [];
 
   if (await clickFirst(page, /claim|collect|complete|finish/i)) {
@@ -99,8 +148,7 @@ export async function managePets(page: Page, config: AppConfig): Promise<PetsSte
     await clickFirst(page, /^\s*start\s*$|^\s*confirm\s*$|^\s*battle\s*$/i);
   }
 
-  // Equip if unequipped pet shows Equip.
-  if (await clickFirst(page, /^\s*equip\s*$/i)) {
+  if (allowEquip && (await clickFirst(page, /^\s*equip\s*$/i))) {
     actions.push('equip');
   }
 

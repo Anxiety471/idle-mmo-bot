@@ -17,6 +17,7 @@ import {
   recentBaitPurchase,
   resolvePlaybookStatePath,
   shouldInjectAsyncPets,
+  shouldInjectEquipPet,
   shouldPreferBaitRestock,
   type PlaybookProgress,
 } from './early-systems-playbook.js';
@@ -1254,7 +1255,74 @@ describe('async opportunistic pets', () => {
     assert.equal(filtered[0], 'mine_coal'); // hard gate still leads
   });
 
-  it('does not inject async pets while gatherBusy', () => {
+  it('injects async pets maintenance while gatherBusy', () => {
+    statePath = join('/tmp', `playbook-pets-async-busy-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'mine_coal',
+        counts: {
+          ...emptyPlaybookCounts(),
+          coal: 10,
+          petManages: 0,
+          batchCycles: 0,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const busySnap = minimalSnapshot({
+      inventory: { 'Cheap Bait': 5, 'Coal Ore': 10 },
+      gold: 50,
+      flags: {
+        hasBait: true,
+        bankNearby: false,
+        gatherBusy: true,
+        inBattle: false,
+        sessionValid: true,
+      },
+      currentAction: { busy: true, skill: 'mining', resource: 'Coal Ore' },
+    });
+    assert.equal(shouldInjectAsyncPets(emptyPlaybookCounts(), busySnap), true);
+
+    const progress = evaluatePlaybook(busySnap);
+    assert.ok(
+      progress.preferredActions.includes('manage_pets'),
+      `expected manage_pets while busy, got ${progress.preferredActions.join(',')}`,
+    );
+    assert.equal(progress.preferredActions[0], 'manage_pets');
+    assert.ok(progress.interruptActions.includes('manage_pets'));
+    assert.ok(
+      !progress.preferredActions.includes('equip_pet'),
+      'equip_pet must not inject while busy',
+    );
+
+    const filtered = filterAllowedByPlaybook(
+      ['mine_coal', 'manage_pets', 'idle', 'continue_current'],
+      busySnap,
+      progress,
+    );
+    assert.ok(filtered.includes('manage_pets'));
+  });
+
+  it('injects equip_pet only when idle after one maintain tick', () => {
+    const idleSnap = minimalSnapshot({
+      flags: {
+        hasBait: true,
+        bankNearby: false,
+        gatherBusy: false,
+        inBattle: false,
+        sessionValid: true,
+      },
+      currentAction: { busy: false },
+    });
+    const afterMaintain = { ...emptyPlaybookCounts(), petManages: 1 };
+    assert.equal(shouldInjectEquipPet(afterMaintain, idleSnap), true);
+    assert.equal(shouldInjectAsyncPets(afterMaintain, idleSnap), false);
+
     const busySnap = minimalSnapshot({
       flags: {
         hasBait: true,
@@ -1265,7 +1333,12 @@ describe('async opportunistic pets', () => {
       },
       currentAction: { busy: true, skill: 'mining', resource: 'Coal Ore' },
     });
-    assert.equal(shouldInjectAsyncPets(emptyPlaybookCounts(), busySnap), false);
+    assert.equal(shouldInjectEquipPet(afterMaintain, busySnap), false);
+    assert.equal(shouldInjectEquipPet(emptyPlaybookCounts(), idleSnap), false);
+    assert.equal(
+      shouldInjectEquipPet({ ...emptyPlaybookCounts(), petManages: 2 }, idleSnap),
+      false,
+    );
   });
 
   it('legacy manage_pets persisted stage does not block loop after hunt met', () => {

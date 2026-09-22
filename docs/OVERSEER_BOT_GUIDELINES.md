@@ -83,6 +83,7 @@ Key `.env` variables (see `.env.example` for full list):
 | `BASE_URL` | `https://web.idle-mmo.com` | Game URL |
 | `STORAGE_STATE` | _(unset)_ | Path to session JSON — required for autopilot |
 | `CHARACTER_NAME` | _(unset)_ | In-game character for this process; auto-derives log/playbook paths when set |
+| `CHARACTER_ROSTER` | _(unset)_ | Comma-separated alts to rotate when gatherBusy (same account); unset = single-character |
 | `ACCOUNT_SLUG` | from `STORAGE_STATE` | Override account folder (`storage-state.json` → `idlebocchi`) |
 | `HEADLESS` | `true` | Set `false` when debugging UI |
 | `POLL_MS` | `5000` | Loop poll interval |
@@ -414,7 +415,7 @@ Idle MMO allows **up to 5 characters per account** but only **3 active at once**
 | Layer | Isolation | Env |
 |-------|-----------|-----|
 | **Account** (login session) | Separate Playwright `storageState` per account | `STORAGE_STATE` |
-| **Character** (in-game alt) | Separate logs + playbook per character | `CHARACTER_NAME` (+ auto paths) |
+| **Character** (in-game alt) | Separate logs + playbook per character | `CHARACTER_NAME` (+ auto paths); optional `CHARACTER_ROSTER` for in-process busy rotation |
 
 **Keep both accounts** — do not merge or delete:
 
@@ -423,7 +424,7 @@ Idle MMO allows **up to 5 characters per account** but only **3 active at once**
 | IdleBocchi | `storage-state.json` |
 | HitoriIdle | `storage-state-hitoriidle.json` |
 
-One autopilot process = one browser = one account session = **one active character**. Run alts as separate processes with the same `STORAGE_STATE` but different `CHARACTER_NAME`.
+One autopilot process = one browser = one account session = **one active character at a time**. Run alts as separate processes with the same `STORAGE_STATE` but different `CHARACTER_NAME`, **or** set `CHARACTER_ROSTER=Name1,Name2,Name3` so one process round-robins when the current alt is gatherBusy (see [CHARACTER_MANAGEMENT.md](./CHARACTER_MANAGEMENT.md)).
 
 | Rule | Detail |
 |------|--------|
