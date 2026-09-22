@@ -16,6 +16,7 @@ import {
   notePlaybookOutcome,
   recentBaitPurchase,
   resolvePlaybookStatePath,
+  shouldInjectAsyncPets,
   shouldPreferBaitRestock,
   type PlaybookProgress,
 } from './early-systems-playbook.js';
@@ -536,7 +537,7 @@ describe('batch leveling playbook targets', () => {
     restoreEnv(envSnapshot);
   });
 
-  it('defaults to 100/100/100/120 targets and loops after pets', () => {
+  it('defaults to 100/100/100/120 targets and loops to mine_coal after hunt (pets not required)', () => {
     for (const key of ENV_KEYS) envSnapshot[key] = process.env[key];
     const dir = join(getLogDir(), `pb-batch-${Date.now()}`);
     mkdirSync(dir, { recursive: true });
@@ -552,7 +553,7 @@ describe('batch leveling playbook targets', () => {
       process.env.PLAYBOOK_STATE_PATH,
       JSON.stringify({
         version: 1,
-        stage: 'manage_pets',
+        stage: 'hunt_rabbits',
         counts: {
           coal: 100,
           rawCod: 100,
@@ -569,7 +570,6 @@ describe('batch leveling playbook targets', () => {
       }),
     );
 
-    notePlaybookOutcome('manage_pets', 'no_pets');
     const progress = evaluatePlaybook(
       minimalSnapshot({
         inventory: { 'Cheap Bait': 5, 'Coal Ore': 0, Cod: 0, 'Cooked Cod': 0 },
@@ -583,6 +583,8 @@ describe('batch leveling playbook targets', () => {
     assert.equal(progress.complete, false);
     assert.equal(progress.stage, 'mine_coal');
     assert.ok(progress.counts.batchCycles >= 2);
+    // Pets not required: petManages can stay 0 across the loop.
+    assert.equal(progress.counts.petManages, 0);
     rmSync(dir, { recursive: true, force: true });
   });
 });
@@ -1153,7 +1155,149 @@ describe('strict sequential real-count gates', () => {
     assert.equal(fishTargetMet(progress.counts), true);
     assert.equal(cookTargetMet(progress.counts), true);
     assert.equal(huntTargetMet(progress.counts), true);
-    assert.equal(progress.stage, 'manage_pets');
+    // Hunt met → explore_map on first cycle (batchCycles=0, mapPeeks=0) — not manage_pets.
+    assert.equal(progress.stage, 'explore_map');
+    assert.notEqual(progress.stage, 'manage_pets');
+  });
+});
+
+describe('async opportunistic pets', () => {
+  const envSnapshot = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
+  let statePath = '';
+
+  afterEach(() => {
+    restoreEnv(envSnapshot);
+    if (statePath) rmSync(statePath, { force: true });
+  });
+
+  it('hunt met loops to mine_coal without requiring petManages>=1', () => {
+    statePath = join('/tmp', `playbook-pets-async-loop-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'hunt_rabbits',
+        counts: {
+          ...coalMetCounts({ sells: 2 }),
+          rawCod: 100,
+          cookedCod: 100,
+          rabbitHunts: 120,
+          mapPeeks: 1,
+          petManages: 0,
+          batchCycles: 2,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const progress = evaluatePlaybook(
+      minimalSnapshot({
+        inventory: { 'Cheap Bait': 20, 'Coal Ore': 0, Cod: 0, 'Cooked Cod': 0 },
+        gold: 50,
+      }),
+    );
+    assert.equal(progress.stage, 'mine_coal');
+    assert.ok(progress.counts.batchCycles >= 3);
+    assert.equal(progress.counts.petManages, 0);
+  });
+
+  it('soft-prefers manage_pets interrupt when idle on every Nth cycle', () => {
+    statePath = join('/tmp', `playbook-pets-async-prefer-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'mine_coal',
+        counts: {
+          ...emptyPlaybookCounts(),
+          coal: 10,
+          petManages: 0,
+          batchCycles: 0,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const idleSnap = minimalSnapshot({
+      inventory: { 'Cheap Bait': 5, 'Coal Ore': 10 },
+      gold: 50,
+      flags: {
+        hasBait: true,
+        bankNearby: false,
+        gatherBusy: false,
+        inBattle: false,
+        sessionValid: true,
+      },
+      currentAction: { busy: false },
+    });
+    assert.equal(shouldInjectAsyncPets(emptyPlaybookCounts(), idleSnap), true);
+
+    const progress = evaluatePlaybook(idleSnap);
+    assert.equal(progress.stage, 'mine_coal');
+    assert.ok(
+      progress.preferredActions.includes('manage_pets'),
+      `expected manage_pets soft prefer, got ${progress.preferredActions.join(',')}`,
+    );
+    assert.ok(progress.interruptActions.includes('manage_pets'));
+    assert.ok(progress.curriculumHint.includes('pets async'));
+
+    const filtered = filterAllowedByPlaybook(
+      ['mine_coal', 'manage_pets', 'idle', 'continue_current'],
+      idleSnap,
+      progress,
+    );
+    assert.ok(filtered.includes('manage_pets'));
+    assert.equal(filtered[0], 'mine_coal'); // hard gate still leads
+  });
+
+  it('does not inject async pets while gatherBusy', () => {
+    const busySnap = minimalSnapshot({
+      flags: {
+        hasBait: true,
+        bankNearby: false,
+        gatherBusy: true,
+        inBattle: false,
+        sessionValid: true,
+      },
+      currentAction: { busy: true, skill: 'mining', resource: 'Coal Ore' },
+    });
+    assert.equal(shouldInjectAsyncPets(emptyPlaybookCounts(), busySnap), false);
+  });
+
+  it('legacy manage_pets persisted stage does not block loop after hunt met', () => {
+    statePath = join('/tmp', `playbook-pets-legacy-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'manage_pets',
+        counts: {
+          ...coalMetCounts({ sells: 2 }),
+          rawCod: 100,
+          cookedCod: 100,
+          rabbitHunts: 120,
+          mapPeeks: 1,
+          petManages: 0,
+          batchCycles: 1,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const progress = evaluatePlaybook(
+      minimalSnapshot({
+        inventory: { 'Cheap Bait': 5, 'Coal Ore': 0 },
+        gold: 50,
+      }),
+    );
+    assert.equal(progress.stage, 'mine_coal');
+    assert.ok(progress.counts.batchCycles >= 2);
   });
 });
 

@@ -2,9 +2,10 @@
  * Early-systems playbook — curriculum / stage targets + allowed-action filters.
  *
  * HttpJev remains the decision brain. This module only:
- *  - tracks batch loop progress (coal → sell → bait → fish → cook → sell → hunt → pets → repeat)
+ *  - tracks batch loop progress (coal → sell → bait → fish → cook → sell → hunt → repeat)
  *  - hard sequential gates by real counts only (not busy-cycle estimates):
  *      coal → fish → cook → hunt; snap back to first unmet stage if stuck ahead
+ *  - pets are async/opportunistic (soft prefer / interrupt), NOT a sequential batch stage
  *  - default batch targets: ~100 coal, ~100 fish, ~100 cook, ~120 hunt/battle (env-overridable)
  *  - exposes preferred / deprioritized actions into the snapshot for Jev
  *  - filters allowed actions so endless Oak woodcutting loses priority until the run completes
@@ -47,9 +48,9 @@ export interface PlaybookCounts {
   sells: number;
   rabbitHunts: number;
   mapPeeks: number;
-  /** Successful manage_pets ticks this batch (feed/battle/sleep/claim). */
+  /** Successful manage_pets ticks this batch (async; does not gate the batch loop). */
   petManages: number;
-  /** Completed full mine→fish→cook→hunt→pets cycles. */
+  /** Completed full coal→fish→cook→hunt cycles (pets are async, not counted here). */
   batchCycles: number;
   /** Cycles observed while CURRENT ACTION was Coal (inventory often icon-only). */
   coalBusyCycles: number;
@@ -112,6 +113,7 @@ interface PersistedPlaybook {
   fishCodBackoffUntil?: string;
 }
 
+/** Sequential batch stages only — manage_pets is async and not in this order. */
 const STAGE_ORDER: EarlyStageId[] = [
   'mine_coal',
   'sell_half',
@@ -120,7 +122,6 @@ const STAGE_ORDER: EarlyStageId[] = [
   'cook_cod',
   'sell_extras',
   'hunt_rabbits',
-  'manage_pets',
   'explore_map',
   'complete',
 ];
@@ -167,6 +168,11 @@ export const FISH_COD_BACKOFF_FALLBACKS: AutopilotAction[] = [
   'sell_junk_for_gold',
   'idle',
 ];
+/**
+ * Soft-prefer manage_pets every N completed batch cycles when idle (not a hard gate).
+ * Override with PLAYBOOK_PETS_EVERY_N_CYCLES.
+ */
+export const PETS_ASYNC_EVERY_N_CYCLES = envInt('PLAYBOOK_PETS_EVERY_N_CYCLES', 1);
 
 /** Resolved at call time so AUTOPILOT_LOG_DIR is honored after env load. */
 export function resolvePlaybookStatePath(): string {
@@ -410,6 +416,26 @@ export function huntTargetMet(counts: PlaybookCounts): boolean {
   return counts.rabbitHunts >= HUNT_MIN;
 }
 
+/**
+ * Opportunistic pets: soft-prefer / interrupt manage_pets when not busy,
+ * without requiring petManages>=1 to complete a batch.
+ * Fires once per batch (petManages===0) on every Nth completed cycle.
+ */
+export function shouldInjectAsyncPets(
+  counts: PlaybookCounts,
+  snapshot: GameSnapshot,
+  everyN: number = PETS_ASYNC_EVERY_N_CYCLES,
+): boolean {
+  const busy = Boolean(
+    snapshot.currentAction?.busy || snapshot.flags.gatherBusy || snapshot.flags.inBattle,
+  );
+  if (busy) return false;
+  if (counts.petManages >= 1) return false;
+  const n = everyN > 0 ? everyN : 1;
+  // Cycle 0 (first run) and every Nth completed cycle get a soft pets tip when idle.
+  return counts.batchCycles % n === 0;
+}
+
 export function hasTurnInReady(snapshot: GameSnapshot): boolean {
   return snapshot.acceptedQuests.some((q) => q.canTurnIn);
 }
@@ -482,15 +508,22 @@ function deriveStage(
   if (cookTargetMet(counts) && !huntTargetMet(counts) && idx >= STAGE_ORDER.indexOf('sell_extras')) {
     return 'hunt_rabbits';
   }
-  if (huntTargetMet(counts) && counts.petManages < 1 && idx >= STAGE_ORDER.indexOf('hunt_rabbits')) {
-    return 'manage_pets';
-  }
-  // Batch loop: after pets (or hunt if pets already done), do not retire to complete — reset happens in evaluatePlaybook.
-  if (counts.mapPeeks < 1 && idx >= STAGE_ORDER.indexOf('manage_pets') && counts.batchCycles === 0) {
+  // Pets are async — never a sequential stage after hunt.
+  // First-cycle map peek after hunt target; batch reset happens in evaluatePlaybook.
+  if (
+    huntTargetMet(counts) &&
+    counts.mapPeeks < 1 &&
+    counts.batchCycles === 0 &&
+    idx >= STAGE_ORDER.indexOf('hunt_rabbits')
+  ) {
     return 'explore_map';
   }
 
   // Fall through: keep persisted stage if still sensible.
+  // Legacy manage_pets (removed from STAGE_ORDER) → treat as post-hunt for loop logic.
+  if (persisted === 'manage_pets') {
+    return 'hunt_rabbits';
+  }
   return persisted === 'mine_coal' && coalTargetMet(counts) ? 'sell_half' : persisted;
 }
 
@@ -578,13 +611,14 @@ function stageMeta(stage: EarlyStageId, baitOwned = false): {
           `EARLY PLAYBOOK stage hunt_rabbits: hunt and battle until ~${HUNT_MIN} successes. Ensure Cooked Cod via FOOD Add. Respect huntFoundCap (early combat may pause hunting until enemies decay).`,
       };
     case 'manage_pets':
+      // Legacy stage id kept for logging only — not in STAGE_ORDER; pets inject async instead.
       return {
-        goal: 'Manage pets: claim, feed (avoid wasteful Max), battle/sleep for stamina',
+        goal: 'Manage pets (async): claim, feed (avoid wasteful Max), battle/sleep for stamina',
         preferred: ['manage_pets'],
-        deprioritized: ['gather_oak', 'gather_yew', 'mine_coal', 'fish_cod'],
+        deprioritized: ['gather_oak', 'gather_yew'],
         interrupt: ['manage_pets'],
         hint:
-          'EARLY PLAYBOOK stage manage_pets: open /pets — claim finished work, feed injured pets carefully, send idle pets to battle or sleep for stamina, keep one equipped when useful.',
+          'EARLY PLAYBOOK manage_pets (async interrupt): open /pets — claim finished work, feed injured pets carefully, send idle pets to battle or sleep. Does not gate the coal→fish→cook→hunt batch.',
       };
     case 'explore_map':
       return {
@@ -650,12 +684,22 @@ export function evaluatePlaybook(
     baitOwned = true;
   }
 
-  let stage = deriveStage(counts, snapshot, persisted.stage, baitOwned);
+  // Legacy manage_pets was sequential; normalize out of STAGE_ORDER before gates.
+  let persistedStage = persisted.stage;
+  if (persistedStage === 'manage_pets') {
+    persistedStage = 'hunt_rabbits';
+  }
+
+  let stage = deriveStage(counts, snapshot, persistedStage, baitOwned);
   const coalMet = coalTargetMet(counts);
   const fishMet = fishTargetMet(counts);
   const cookMet = cookTargetMet(counts);
   const huntMet = huntTargetMet(counts);
-  const persistedIdx = STAGE_ORDER.indexOf(persisted.stage);
+  // Treat legacy manage_pets as post-hunt for snap-back comparisons.
+  const persistedIdx =
+    persisted.stage === 'manage_pets'
+      ? STAGE_ORDER.indexOf('explore_map')
+      : STAGE_ORDER.indexOf(persistedStage);
 
   // Snap back to the first unmet hard-gate stage (real counts only).
   // Busy-cycle estimates must never keep a bot ahead of unfinished prior stages.
@@ -715,10 +759,20 @@ export function evaluatePlaybook(
   }
   if (stage === 'cook_cod' && cookMet) stage = 'sell_extras';
   if (stage === 'sell_extras' && counts.sells >= 2) stage = 'hunt_rabbits';
-  if (stage === 'hunt_rabbits' && huntMet) stage = 'manage_pets';
-  // One map peek on the first cycle only, then loop the batch forever (never retire to complete).
-  if (stage === 'manage_pets' && counts.petManages >= 1) {
+  // Hunt target met → loop batch (pets are async; never block on manage_pets).
+  if (stage === 'hunt_rabbits' && huntMet) {
     if (counts.mapPeeks < 1 && counts.batchCycles === 0) {
+      stage = 'explore_map';
+    } else {
+      counts = resetBatchResourceCounts(counts);
+      stage = 'mine_coal';
+    }
+  }
+  // Legacy: if somehow still on manage_pets, same loop behavior (no petManages gate).
+  if (stage === 'manage_pets') {
+    if (!huntMet) {
+      stage = 'hunt_rabbits';
+    } else if (counts.mapPeeks < 1 && counts.batchCycles === 0) {
       stage = 'explore_map';
     } else {
       counts = resetBatchResourceCounts(counts);
@@ -791,6 +845,14 @@ export function evaluatePlaybook(
     }
   }
 
+  // Async pets: soft-prefer / interrupt without changing stage or gating the batch.
+  const asyncPets = shouldInjectAsyncPets(counts, snapshot);
+  if (asyncPets) {
+    if (!preferredActions.includes('manage_pets')) preferredActions.push('manage_pets');
+    if (!interruptActions.includes('manage_pets')) interruptActions.push('manage_pets');
+    deprioritizedActions = deprioritizedActions.filter((a) => a !== 'manage_pets');
+  }
+
   const baitPurchaseRecent = recentBaitPurchase(persisted.lastBaitPurchaseAt);
   let curriculumHint = snapBackReason
     ? `EARLY PLAYBOOK ${snapBackReason}. Strict real-count batch gates.`
@@ -804,6 +866,12 @@ export function evaluatePlaybook(
       : meta.hint;
   if (questCurriculum.hint) {
     curriculumHint = `${curriculumHint} ${questCurriculum.hint}`.trim();
+  }
+  if (asyncPets) {
+    curriculumHint = (
+      `${curriculumHint} EARLY PLAYBOOK pets async: soft-prefer manage_pets ` +
+      `(every ${PETS_ASYNC_EVERY_N_CYCLES} cycle(s) when idle; does not gate batch).`
+    ).trim();
   }
 
   savePersisted({
@@ -872,7 +940,8 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
     if (!/failed/i.test(outcome)) counts.mapPeeks += 1;
   }
   if (action === 'manage_pets') {
-    // no_pets advances the batch (skip until eggs/pets exist); failed/no_action stay put.
+    // Async counter only — does not gate batch completion / loop to mine_coal.
+    // no_pets still counts as a successful opportunistic tick (nothing to manage).
     if (/no_pets/i.test(outcome) || (!/failed|no_action/i.test(outcome) && outcome.trim())) {
       counts.petManages += 1;
     }

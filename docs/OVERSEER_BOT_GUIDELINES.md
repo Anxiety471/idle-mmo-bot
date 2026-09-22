@@ -138,7 +138,7 @@ CLI / env equivalents:
 
 Without `JEV_API_TOKEN`, autopilot runs **ProgressiveStubJev** (still writes `jev.jsonl` via `LoggingJev`).
 
-For a fresh low-level character, leave **`EARLY_PLAYBOOK` enabled** (default) so the batch leveling loop (coal → fish → cook → hunt → pets → repeat) runs automatically.
+For a fresh low-level character, leave **`EARLY_PLAYBOOK` enabled** (default) so the batch leveling loop (coal → fish → cook → hunt → repeat; pets async) runs automatically.
 
 ### 3.7 Know where logs live
 
@@ -335,7 +335,7 @@ The live `/inventory` UI is mostly **icon + quantity badge** with item names in 
 
 ## 5. Early-systems playbook stages
 
-When `EARLY_PLAYBOOK` is enabled (default), `evaluatePlaybook()` runs a **repeating batch leveling loop** (`src/autopilot/early-systems-playbook.ts`). Default targets (env-overridable): **100 Coal Ore**, **100 Raw Cod**, **100 Cooked Cod**, **~120 hunt/battle**, then **manage pets**, then loop back to mining. Hard stage gates use **real counts only** (inventory/playbook counters) — busy-cycle estimates never advance past mine_coal / fish_cod / cook_cod / hunt_rabbits. Override with `PLAYBOOK_COAL_TARGET`, `PLAYBOOK_FISH_TARGET`, `PLAYBOOK_COOK_TARGET`, `PLAYBOOK_HUNT_TARGET`.
+When `EARLY_PLAYBOOK` is enabled (default), `evaluatePlaybook()` runs a **repeating batch leveling loop** (`src/autopilot/early-systems-playbook.ts`). Default targets (env-overridable): **100 Coal Ore**, **100 Raw Cod**, **100 Cooked Cod**, **~120 hunt/battle**, then loop back to mining. **Pets are async/opportunistic** (soft prefer / interrupt every N cycles when idle) — they are **not** a sequential stage and do **not** gate batch completion. Hard stage gates use **real counts only** (inventory/playbook counters) — busy-cycle estimates never advance past mine_coal / fish_cod / cook_cod / hunt_rabbits. Override with `PLAYBOOK_COAL_TARGET`, `PLAYBOOK_FISH_TARGET`, `PLAYBOOK_COOK_TARGET`, `PLAYBOOK_HUNT_TARGET`, `PLAYBOOK_PETS_EVERY_N_CYCLES`.
 
 | Stage ID | Goal | Primary actions |
 |----------|------|-----------------|
@@ -346,9 +346,9 @@ When `EARLY_PLAYBOOK` is enabled (default), `evaluatePlaybook()` runs a **repeat
 | `cook_cod` | Cook ~100 Cod → Cooked Cod with Coal | `cook_cod` (`src/deterministic/cook.ts`) |
 | `sell_extras` | Missions-first gold; sell extras as fallback | `quest_turnin`, `quest_talk_accept`, then `market_sell_half`, `sell_junk` |
 | `hunt_rabbits` | Hunt/battle ~120 times with pre-battle FOOD Add | `hunt_rabbits` (calls `selectBattleFood` + combat round); respects `huntFoundCap` |
-| `manage_pets` | Claim / feed / battle / sleep pets | `manage_pets` (`src/deterministic/pets.ts`); `no_pets` still advances the batch |
 | `explore_map` | One map peek on the first cycle | `explore_map` |
-| *(loop)* | Reset batch counters → `mine_coal` again | Does **not** retire to `complete` after the first pass |
+| *(loop)* | After hunt target met → reset batch counters → `mine_coal` | Does **not** retire to `complete`; pets are **not** required |
+| *(async)* `manage_pets` | Claim / feed / battle / sleep pets | Soft prefer / interrupt when idle every N cycles (`PLAYBOOK_PETS_EVERY_N_CYCLES`, default 1); `src/deterministic/pets.ts` — does **not** block the batch |
 
 **Missions-first early gold:** While the early playbook is active, prefer `quest_turnin` and `quest_talk_accept` over `market_sell_half`, `sell_junk_for_gold`, and `sell_junk` when quests are available. Market sell remains fallback when quests are unavailable or dry. At `sell_half`, the playbook skips straight to `buy_bait` when gold is already ≥ 2g (bait cost) or quests can fund bait without a sell pass.
 
