@@ -169,7 +169,7 @@ Create a **paused or active hourly watch** (Cursor automation / scheduled agent)
 4. Sends a **short morning status** (~7–9 owner-local) summarizing cycles, last action, gold/combat deltas
 5. Stays **quiet when healthy**
 
-**Only ONE enabled overnight watch per owner/account.** If a sibling overseer already owns the watch, skip creating a duplicate or create yours **paused** and coordinate ownership.
+**Only ONE enabled overnight watch per owner/account.** If a sibling overseer already owns the watch, skip creating a duplicate or create yours **paused** and coordinate ownership via agent-to-agent messages (§7).
 
 ### 3.9 Write durable memories
 
@@ -180,7 +180,8 @@ Store project conventions in **mem0** (or your persistent memory store) so futur
 - Pre-battle FOOD packing for heal — not mid-fight (§4)
 - No membership / real-money spend; gold Cheap Bait only (§4)
 - Protected sell list (`PROTECTED_ITEMS` in `src/deterministic/inventory.ts`)
-- Sibling bot watch ownership (§7)
+- Sibling overseer coordination + agent-to-agent notifications (§7)
+- Bait trust / gather grace / gather reliability hard rules (§4.7–§4.9)
 
 ---
 
@@ -220,6 +221,7 @@ FOOD → Add → food-for-battle modal → select item → quantity Max → Add
 - Default: **no** auto-buy (`BUY_BAIT=false`)
 - Opt in via `BUY_BAIT=true`, `--buy-bait` (skill CLI), or autopilot `buy_bait` when allowed (no bait, gold ≥ 2, and `buyBait` config or active kill quest)
 - `Cheap Bait` is in `PROTECTED_ITEMS` — never sold as junk
+- **Sticky bait trust:** once purchased or stage is `fish_cod+`, playbook treats bait as owned even when inventory scrape is empty — see §4.7
 
 ### 4.5 Replace-dialog policy
 
@@ -228,6 +230,58 @@ Only one gather/craft action globally. Default: **Close** replace dialog (keep c
 ### 4.6 Secrets
 
 Never print or commit: `JEV_API_TOKEN`, `TYPESAFE_API_KEY`, passwords, `storage-state.json`, cookies.
+
+### 4.7 Bait trust (PR #16 — stop gold-drain `buy_bait` loops)
+
+Inventory scrape often returns **empty or icon-only** for Cheap Bait even when bait is present. Without sticky trust, autopilot can choose `buy_bait` every ~20s during `fish_cod`, draining gold.
+
+**Rules (implemented in `early-systems-playbook.ts` + `bootstrap-actions.ts`):**
+
+| Signal | Meaning |
+|--------|---------|
+| `baitOwned` | Persisted in `playbook-state.json` after a successful merchant purchase |
+| `trustHasBait()` | `snapshot.flags.hasBait`, inventory count, **`baitOwned`**, or stage past `buy_bait` |
+| Allowed actions | **Strip `buy_bait`** from allowed once bait is trusted or stage is **`fish_cod+`** |
+| Purchase size | Buy **×20** when bait is truly missing (not ×1 repurchase loops) |
+| Interrupt priority | Prefer **`fish_cod`** over repurchase when stage is `fish_cod` and bait is trusted |
+
+**What overseers should watch:** `decisions.jsonl` showing repeated `→ buy_bait` while `stage=fish_cod` and gold dropping — fix trust/playbook gating, not more merchant clicks. After a successful buy, confirm `baitOwned=true` in playbook state and that `allowed` no longer includes `buy_bait`.
+
+### 4.8 Fishing stickiness / gather grace (PR #17 — stop `fish_cod` restart loops)
+
+After `fish_cod` returns `restarted`, snapshots can still show `gatherBusy=false` for several seconds before **CURRENT ACTION** appears on the fishing page. Without grace, the playbook re-injects `fish_cod` every tick and `codBusyCycles` never climbs.
+
+**Rules (implemented in `early-systems-playbook.ts`, `gather.ts`, `bootstrap-actions.ts`):**
+
+| Mechanism | Behavior |
+|-----------|----------|
+| **Wait for CURRENT ACTION** | `restartSkillGather` must see CURRENT ACTION before returning `restarted` (not a ~500ms fire-and-forget click) |
+| **~30s gather grace** | After `fish_cod` + `restarted`/`already_busy`, persist `lastGatherRestartAt` / skill / resource |
+| **`gatherGraceActive`** | Exposed on playbook progress; also applies to `mine_coal` restarts |
+| **`continue_current` during grace** | Allowed so the bot **polls** instead of re-clicking Cod |
+| **No re-injection** | `filterAllowedByPlaybook` **skips `fish_cod`** while grace is active |
+| **`codBusyCycles` credit** | Increment during grace so stage progression works despite probe gaps |
+| **Stub preference** | ProgressiveStubJev prefers `continue_current` during grace |
+| **Backoff** | `backoffMs: pollMs * 2` after gather restart so UI can settle |
+
+**What overseers should watch:** endless `→ fish_cod` with `result: restarted` every cycle and flat `codBusyCycles` — grace or CURRENT ACTION wait is broken. Healthy pattern: `fish_cod` → `restarted` → `continue_current` with `busy=true` and climbing `codBusyCycles`.
+
+### 4.9 Gather reliability (PR #18 — make restarts actually stick)
+
+Even with PR #17 grace, restarts fail when quantity is too short, the wrong Start button is clicked, overlays block clicks, or a human captcha appears after Start.
+
+**Rules (implemented in `src/deterministic/gather.ts`):**
+
+| Helper | Purpose |
+|--------|---------|
+| `dismissBlockingOverlays` | Clear modals **before** resource select (Escape **after** select can collapse the Cod panel) |
+| `setGatherQuantityBatch` / Max | Default batch **8**; use **Max** when ≥20 actions available — Cod default qty=**1** (~6s) is too short vs the ~30s grace window |
+| `clickStartButton` | Pick the **largest visible enabled Start**, not `.first()` (tiny hidden submits steal clicks) |
+| `solveHumanCaptchaIfPresent` | **Verify** → emoji challenge when UI shows “make sure you're human”; retry Start when API returns `is_captcha` |
+
+**Restart sequence:** dismiss overlays → select resource → set quantity → click largest Start → wait for CURRENT ACTION (5s) → on captcha: solve, re-batch, re-click Start, wait again → return **`failed`** if CURRENT ACTION never appears (preserves grace semantics).
+
+**What overseers should watch:** `fish_cod` → `failed` or immediate idle after `restarted`; check overlays, quantity field, captcha prompts, and whether Start was disabled (missing bait — see §4.7).
 
 ---
 
@@ -281,12 +335,54 @@ Default junk: `Burnt Cod`, `Burnt Fish`, `Burnt Salmon`. Override with `JUNK_SEL
 
 ---
 
-## 7. Sibling bots
+## 7. Sibling overseer communication
+
+When multiple Idle MMO **overseer assistants** exist for the same owner (e.g. per-character bots, “Idle MMO 0/1”, Grok + Cursor), they **MUST coordinate via agent-to-agent messages** — not only by waiting for the user to relay status.
+
+**This document (`docs/OVERSEER_BOT_GUIDELINES.md`) is the shared source of truth.** When you learn a new hard rule in production, update this file (and open a PR) so freshly created siblings inherit it.
+
+### 7.1 Notify siblings when you…
+
+| Event | What to send |
+|-------|----------------|
+| Restart a shared-box autopilot process | Character name, `STORAGE_STATE`, env overrides, PID/log tail if relevant |
+| Change **`AUTOPILOT_LOG_DIR`**, **`PLAYBOOK_STATE_PATH`**, or **`STORAGE_STATE`** | Old → new paths; which character/session |
+| Land gather / combat / playbook fixes | PR link, branch, what symptom it fixes (e.g. bait loop, fish_cod grace) |
+| Create or take over the overnight watch | Watch name, schedule, which character(s) it monitors; confirm others are paused |
+
+Use your platform’s agent-to-agent messaging (Cursor follow-ups, shared automation channels, etc.). Do **not** assume silence means another overseer is idle.
+
+### 7.2 One watch, isolated characters
+
+| Rule | Detail |
+|------|--------|
+| **One enabled overnight watch** | Per **owner/account** — only one active health-watch automation |
+| **Unique paths per character** | Separate `STORAGE_STATE`, `AUTOPILOT_LOG_DIR`, and `PLAYBOOK_STATE_PATH` per character |
+| **Never share playbook state** | Do **not** point two autopilots at the same `playbook-state.json` — stage counters and `baitOwned` will corrupt each other |
+| **No duplicate sessions** | Do not run two autopilot processes against the same `storage-state.json` |
+
+Example isolation (adjust names per character):
+
+```bash
+export STORAGE_STATE=./storage-state-idlebocchi.json
+export AUTOPILOT_LOG_DIR=./logs/idlebocchi
+export PLAYBOOK_STATE_PATH=./logs/idlebocchi/playbook-state.json
+```
+
+### 7.3 Skills vs overseer ownership
 
 - **Skills** (Cursor skills, mem0) may be global across repos — do not assume exclusive ownership of shared skills
-- **Overnight watches**: only **one enabled** watch per owner/account; coordinate with sibling overseers (e.g. "Idle MMO 0/1")
-- If another bot owns the watch, create yours paused or skip
-- Do not run duplicate autopilot processes against the same `storage-state.json` session
+- **Overnight watches and live autopilot** are **per-character / per-owner** resources — coordinate before starting or restarting
+- If another overseer owns the watch, create yours **paused** or skip; message them before taking over
+
+### 7.4 Fresh bot onboarding
+
+New overseers should:
+
+1. Read this file end-to-end (especially §4 hard rules and §4.7–§4.9 operational lessons)
+2. Message existing siblings: who you are, which character(s) you supervise, your log/playbook paths
+3. Ask whether an overnight watch already exists before creating one
+4. Update this doc when you discover a new production rule worth preserving
 
 ---
 
