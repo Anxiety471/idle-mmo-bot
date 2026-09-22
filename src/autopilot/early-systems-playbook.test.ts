@@ -5,6 +5,7 @@ import { afterEach, describe, it } from 'node:test';
 import { getLogDir } from '../logging/jsonl-writer.js';
 import type { GameSnapshot } from '../types.js';
 import {
+  coalTargetMet,
   evaluatePlaybook,
   filterAllowedByPlaybook,
   FISH_COD_BACKOFF_MS,
@@ -41,6 +42,11 @@ function emptyPlaybookCounts() {
     coalBusyCycles: 0,
     codBusyCycles: 0,
   };
+}
+
+/** Counts that satisfy the default PLAYBOOK_COAL_TARGET (100). */
+function coalMetCounts(overrides: Record<string, number> = {}) {
+  return { ...emptyPlaybookCounts(), coal: 100, coalBusyCycles: 300, ...overrides };
 }
 
 function minimalSnapshot(overrides: Partial<GameSnapshot> = {}): GameSnapshot {
@@ -191,7 +197,7 @@ describe('gather grace', () => {
       `${JSON.stringify({
         version: 1,
         stage: 'fish_cod',
-        counts: { ...emptyPlaybookCounts(), codBusyCycles: 5 },
+        counts: { ...coalMetCounts(), codBusyCycles: 5 },
         baitOwned: true,
         lastGatherRestartAt: new Date().toISOString(),
         lastGatherSkill: 'fishing',
@@ -272,7 +278,7 @@ describe('sticky baitOwned (no repurchase loop)', () => {
     process.env.EARLY_PLAYBOOK = 'true';
     writeFileSync(
       statePath,
-      `${JSON.stringify({ version: 1, stage: 'buy_bait', counts: emptyPlaybookCounts(), baitOwned: false })}\n`,
+      `${JSON.stringify({ version: 1, stage: 'buy_bait', counts: coalMetCounts(), baitOwned: false })}\n`,
     );
     notePlaybookOutcome('buy_bait', 'purchased');
     const saved = JSON.parse(readFileSync(statePath, 'utf8')) as {
@@ -496,7 +502,7 @@ describe('missions-first early gold', () => {
       `${JSON.stringify({
         version: 1,
         stage: 'sell_half',
-        counts: { ...emptyPlaybookCounts(), coal: 35 },
+        counts: { ...coalMetCounts(), sells: 0 },
         baitOwned: false,
       })}\n`,
     );
@@ -504,7 +510,7 @@ describe('missions-first early gold', () => {
     const progress = evaluatePlaybook(
       minimalSnapshot({
         gold: 2,
-        inventory: { 'Coal Ore': 35 },
+        inventory: { 'Coal Ore': 100 },
         flags: {
           hasBait: false,
           bankNearby: false,
@@ -597,13 +603,13 @@ describe('bait restock preference', () => {
       JSON.stringify({
         version: 1,
         stage: 'fish_cod',
-        counts: emptyPlaybookCounts(),
+        counts: coalMetCounts(),
         baitOwned: true,
       }),
     );
 
     const snapshot = minimalSnapshot({
-      inventory: { 'Cheap Bait': 1 },
+      inventory: { 'Cheap Bait': 1, 'Coal Ore': 100 },
       gold: 50,
       flags: {
         hasBait: true,
@@ -614,6 +620,7 @@ describe('bait restock preference', () => {
       },
     });
     const playbook = evaluatePlaybook(snapshot);
+    assert.equal(playbook.stage, 'fish_cod');
     assert.equal(playbook.preferredActions[0], 'buy_bait');
     const filtered = filterAllowedByPlaybook(
       ['fish_cod', 'buy_bait', 'craft_if_ready', 'idle'],
@@ -639,7 +646,7 @@ describe('bait restock preference', () => {
       JSON.stringify({
         version: 1,
         stage: 'fish_cod',
-        counts: emptyPlaybookCounts(),
+        counts: coalMetCounts(),
         baitOwned: true,
         lastBaitPurchaseAt: purchasedAt,
       }),
@@ -647,7 +654,7 @@ describe('bait restock preference', () => {
 
     const snapshot = minimalSnapshot({
       // Undercount / icon-only scrape after successful buy_bait
-      inventory: { 'Cheap Bait': 0 },
+      inventory: { 'Cheap Bait': 0, 'Coal Ore': 100 },
       gold: 50,
       flags: {
         hasBait: true,
@@ -658,6 +665,7 @@ describe('bait restock preference', () => {
       },
     });
     const playbook = evaluatePlaybook(snapshot);
+    assert.equal(playbook.stage, 'fish_cod');
     assert.equal(playbook.baitOwned, true);
     assert.ok(recentBaitPurchase(playbook.lastBaitPurchaseAt));
     assert.equal(shouldPreferBaitRestock('fish_cod', 0, purchasedAt), false);
@@ -695,7 +703,7 @@ describe('bait restock preference', () => {
       JSON.stringify({
         version: 1,
         stage: 'fish_cod',
-        counts: emptyPlaybookCounts(),
+        counts: coalMetCounts(),
         baitOwned: true,
         // expired purchase — cooldown gone
         lastBaitPurchaseAt: new Date(Date.now() - 16 * 60_000).toISOString(),
@@ -703,7 +711,7 @@ describe('bait restock preference', () => {
     );
 
     const snapshot = minimalSnapshot({
-      inventory: { 'Cheap Bait': 1 },
+      inventory: { 'Cheap Bait': 1, 'Coal Ore': 100 },
       gold: 50,
       flags: {
         hasBait: true,
@@ -731,5 +739,186 @@ describe('bait restock preference', () => {
     assert.equal(shouldPreferBaitRestock('fish_cod', 15, undefined), false);
     assert.equal(shouldPreferBaitRestock('mine_coal', 0, undefined), false);
     assert.equal(shouldPreferBaitRestock('fish_cod', 0, new Date().toISOString()), false);
+  });
+});
+
+
+describe('coal before fish gate', () => {
+  const envSnapshot = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
+  let statePath = '';
+
+  afterEach(() => {
+    restoreEnv(envSnapshot);
+    if (statePath) rmSync(statePath, { force: true });
+  });
+
+  it('snaps stuck fish_cod with low coal back to mine_coal', () => {
+    statePath = join('/tmp', `playbook-coal-snap-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'fish_cod',
+        counts: { ...emptyPlaybookCounts(), coal: 4, coalBusyCycles: 8 },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const snapshot = minimalSnapshot({
+      inventory: { 'Cheap Bait': 20, 'Coal Ore': 4 },
+      gold: 50,
+      flags: {
+        hasBait: true,
+        bankNearby: false,
+        gatherBusy: false,
+        inBattle: false,
+        sessionValid: true,
+      },
+    });
+    const progress = evaluatePlaybook(snapshot);
+
+    assert.equal(progress.stage, 'mine_coal');
+    assert.equal(coalTargetMet(progress.counts), false);
+    assert.ok(
+      progress.curriculumHint.includes('coal gate') || progress.curriculumHint.includes('snapped'),
+      `hint should mention coal snap-back, got: ${progress.curriculumHint}`,
+    );
+    assert.ok(progress.preferredActions.includes('mine_coal'));
+    assert.ok(progress.deprioritizedActions.includes('fish_cod'));
+
+    const filtered = filterAllowedByPlaybook(
+      ['fish_cod', 'mine_coal', 'cook_cod', 'idle', 'continue_current'],
+      snapshot,
+      progress,
+    );
+    assert.equal(filtered[0], 'mine_coal');
+    assert.ok(!filtered.includes('fish_cod'));
+    assert.ok(!filtered.includes('cook_cod'));
+
+    const saved = JSON.parse(readFileSync(statePath, 'utf8')) as { stage?: string };
+    assert.equal(saved.stage, 'mine_coal');
+  });
+
+  it('snaps cook_cod / later stages back to mine_coal when coal still low', () => {
+    statePath = join('/tmp', `playbook-coal-snap-later-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'cook_cod',
+        counts: { ...emptyPlaybookCounts(), coal: 1, rawCod: 20, coalBusyCycles: 2 },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const progress = evaluatePlaybook(
+      minimalSnapshot({
+        inventory: { 'Cheap Bait': 5, 'Coal Ore': 1, Cod: 20 },
+        gold: 50,
+      }),
+    );
+    assert.equal(progress.stage, 'mine_coal');
+  });
+
+  it('allows fish_cod once coal target is met', () => {
+    statePath = join('/tmp', `playbook-coal-met-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'fish_cod',
+        counts: coalMetCounts({ sells: 1 }),
+        baitOwned: true,
+        lastBaitPurchaseAt: new Date().toISOString(),
+      })}\n`,
+    );
+
+    const snapshot = minimalSnapshot({
+      inventory: { 'Cheap Bait': 20, 'Coal Ore': 100 },
+      gold: 50,
+      flags: {
+        hasBait: true,
+        bankNearby: false,
+        gatherBusy: false,
+        inBattle: false,
+        sessionValid: true,
+      },
+    });
+    const progress = evaluatePlaybook(snapshot);
+
+    assert.equal(progress.stage, 'fish_cod');
+    assert.equal(coalTargetMet(progress.counts), true);
+    assert.ok(progress.preferredActions.includes('fish_cod'));
+    assert.ok(!progress.curriculumHint.includes('coal gate'));
+
+    const filtered = filterAllowedByPlaybook(
+      ['fish_cod', 'mine_coal', 'idle', 'continue_current'],
+      snapshot,
+      progress,
+    );
+    assert.ok(filtered.includes('fish_cod'));
+  });
+
+  it('notePlaybookOutcome buy_bait stays on mine_coal when coal incomplete', () => {
+    statePath = join('/tmp', `playbook-coal-buy-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'buy_bait',
+        counts: { ...emptyPlaybookCounts(), coal: 3 },
+        baitOwned: false,
+      })}\n`,
+    );
+
+    notePlaybookOutcome('buy_bait', 'purchased');
+
+    const saved = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      stage?: string;
+      baitOwned?: boolean;
+      lastBaitPurchaseAt?: string;
+    };
+    assert.equal(saved.baitOwned, true);
+    assert.ok(saved.lastBaitPurchaseAt);
+    assert.equal(saved.stage, 'mine_coal');
+  });
+
+  it('reports default coalMin 100 matching PLAYBOOK_COAL_TARGET default', () => {
+    statePath = join('/tmp', `playbook-coal-target-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    delete process.env.PLAYBOOK_COAL_TARGET;
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'mine_coal',
+        counts: emptyPlaybookCounts(),
+        baitOwned: false,
+      })}\n`,
+    );
+
+    const progress = evaluatePlaybook(
+      minimalSnapshot({
+        inventory: { 'Coal Ore': 2 },
+        flags: {
+          hasBait: false,
+          bankNearby: false,
+          gatherBusy: false,
+          inBattle: false,
+          sessionValid: true,
+        },
+      }),
+    );
+    assert.equal(progress.targets.coalMin, 100);
+    assert.equal(progress.stage, 'mine_coal');
   });
 });
