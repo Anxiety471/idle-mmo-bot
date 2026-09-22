@@ -80,3 +80,4 @@ export { trySmeltCoal } from './craft.js';
 export { huntFoundCap, shouldHardStopHunt } from './hunt-cap.js';
 export { selectBattleFood } from './combat.js';
 export { tryCookCod } from './cook.js';
+export { managePets } from './pets.js';

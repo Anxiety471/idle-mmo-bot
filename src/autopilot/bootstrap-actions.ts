@@ -41,6 +41,7 @@ import type { SnapshotQuest } from '../types.js';
 import type { ActionAllowContext, ActionDefinition, ActionExecuteContext } from './action-types.js';
 import { registerAction } from './action-registry.js';
 import { tryCookCod } from '../deterministic/cook.js';
+import { managePets } from '../deterministic/pets.js';
 import { getPlaybookFromSnapshot } from './early-systems-playbook.js';
 import { pollUntilHuntStop } from '../jev/hunt-cap.js';
 
@@ -480,10 +481,17 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
       const inv = ctx.snapshot.inventory;
       const hasCod = (inv['Cod'] ?? 0) >= 1 || (inv['Raw Cod'] ?? 0) >= 1;
       const hasCoal = (inv['Coal Ore'] ?? 0) >= 1;
+      const playbook = getPlaybookFromSnapshot(ctx.snapshot);
+      const batchCooking =
+        Boolean(playbook?.enabled && !playbook.complete && playbook.stage === 'cook_cod');
+      const cookTarget = playbook?.targets.cookMin ?? 5;
+      const cooked = inv['Cooked Cod'] ?? 0;
       const needsFood =
-        (inv['Cooked Cod'] ?? 0) < 5 &&
-        (inv['Cooked Salmon'] ?? 0) < 5 &&
-        (inv['Cooked Tuna'] ?? 0) < 5;
+        batchCooking
+          ? cooked < cookTarget
+          : cooked < 5 &&
+            (inv['Cooked Salmon'] ?? 0) < 5 &&
+            (inv['Cooked Tuna'] ?? 0) < 5;
       return (
         ctx.snapshot.flags.sessionValid &&
         gatherIdle(ctx) &&
@@ -577,7 +585,7 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
     execute: async (ctx) => ({
       action: 'market_sell_half',
       outcome: await sellHalfCareful(ctx.page, ctx.config, {
-        keepCoal: 15,
+        keepCoal: 100,
         maxStacks: 2,
       }),
     }),
@@ -602,6 +610,29 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
     execute: async (ctx) => ({
       action: 'hunt_rabbits',
       outcome: await runCombatRound(ctx),
+    }),
+  },
+  {
+    id: 'manage_pets',
+    description:
+      'Pets maintenance: claim finished work, feed carefully (avoid wasteful Max), battle or sleep for stamina, equip when useful',
+    bootstrap: true,
+    priority: 16,
+    tags: ['pets', 'playbook'],
+    safety: 'safe',
+    isAllowed: (ctx) => {
+      const playbook = getPlaybookFromSnapshot(ctx.snapshot);
+      const stageOk =
+        !playbook ||
+        playbook.complete ||
+        playbook.stage === 'manage_pets' ||
+        playbook.stage === 'complete';
+      return ctx.snapshot.flags.sessionValid && stageOk && gatherIdle(ctx);
+    },
+    execute: async (ctx) => ({
+      action: 'manage_pets',
+      outcome: await managePets(ctx.page, ctx.config),
+      backoffMs: Math.max(ctx.config.pollMs * 2, 5_000),
     }),
   },
 ];

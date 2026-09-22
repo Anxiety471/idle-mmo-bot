@@ -26,6 +26,8 @@ function emptyPlaybookCounts() {
     sells: 0,
     rabbitHunts: 0,
     mapPeeks: 0,
+    petManages: 0,
+    batchCycles: 0,
     coalBusyCycles: 0,
     codBusyCycles: 0,
   };

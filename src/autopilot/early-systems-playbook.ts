@@ -2,7 +2,8 @@
  * Early-systems playbook — curriculum / stage targets + allowed-action filters.
  *
  * HttpJev remains the decision brain. This module only:
- *  - tracks stage progress (coal → sell → bait → fish → cook → sell → hunt → map)
+ *  - tracks batch loop progress (coal → sell → bait → fish → cook → sell → hunt → pets → repeat)
+ *  - default batch targets: ~100 coal, ~100 fish, ~100 cook, ~50 hunt/battle (env-overridable)
  *  - exposes preferred / deprioritized actions into the snapshot for Jev
  *  - filters allowed actions so endless Oak woodcutting loses priority until the run completes
  *  - missions-first early gold: quest_turnin / quest_talk_accept before market sell when quests
@@ -33,6 +34,7 @@ export type EarlyStageId =
   | 'cook_cod'
   | 'sell_extras'
   | 'hunt_rabbits'
+  | 'manage_pets'
   | 'explore_map'
   | 'complete';
 
@@ -43,6 +45,10 @@ export interface PlaybookCounts {
   sells: number;
   rabbitHunts: number;
   mapPeeks: number;
+  /** Successful manage_pets ticks this batch (feed/battle/sleep/claim). */
+  petManages: number;
+  /** Completed full mine→fish→cook→hunt→pets cycles. */
+  batchCycles: number;
   /** Cycles observed while CURRENT ACTION was Coal (inventory often icon-only). */
   coalBusyCycles: number;
   codBusyCycles: number;
@@ -67,6 +73,8 @@ export interface PlaybookProgress {
     coalMax: number;
     codMin: number;
     codMax: number;
+    cookMin: number;
+    huntMin: number;
   };
   curriculumHint: string;
   complete: boolean;
@@ -110,14 +118,25 @@ const STAGE_ORDER: EarlyStageId[] = [
   'cook_cod',
   'sell_extras',
   'hunt_rabbits',
+  'manage_pets',
   'explore_map',
   'complete',
 ];
 
-const COAL_MIN = 30;
-const COAL_MAX = 50;
-const COD_MIN = 30;
-const COD_MAX = 50;
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+/** Batch leveling defaults (user: 100 coal → 100 fish → 100 cook → ~50 hunt). */
+const COAL_MIN = envInt('PLAYBOOK_COAL_TARGET', 100);
+const COAL_MAX = envInt('PLAYBOOK_COAL_MAX', COAL_MIN);
+const COD_MIN = envInt('PLAYBOOK_FISH_TARGET', 100);
+const COD_MAX = envInt('PLAYBOOK_FISH_MAX', COD_MIN);
+const COOK_MIN = envInt('PLAYBOOK_COOK_TARGET', 100);
+const HUNT_MIN = envInt('PLAYBOOK_HUNT_TARGET', 50);
 
 /** Quest actions preferred over market sell for early gold while playbook is active. */
 export const EARLY_GOLD_QUEST_ACTIONS: AutopilotAction[] = ['quest_turnin', 'quest_talk_accept'];
@@ -131,8 +150,8 @@ export const BAIT_GOLD_COST = 2;
 
 const EARLY_GOLD_SELL_SET = new Set<AutopilotAction>(EARLY_GOLD_SELL_ACTIONS);
 /** Busy-cycle heuristic when inventory scrape is empty (~5s poll → ~2–3 cycles/ore). */
-const COAL_BUSY_TARGET = 90;
-const COD_BUSY_TARGET = 90;
+const COAL_BUSY_TARGET = Math.max(90, Math.ceil(COAL_MIN * 2.5));
+const COD_BUSY_TARGET = Math.max(90, Math.ceil(COD_MIN * 2.5));
 /** Grace window after restartSkillGather before re-injecting interrupt gathers. */
 export const GATHER_GRACE_MS = 30_000;
 /** After buy_bait success, refuse another purchase for this long (or until stage advances). */
@@ -173,8 +192,26 @@ function emptyCounts(): PlaybookCounts {
     sells: 0,
     rabbitHunts: 0,
     mapPeeks: 0,
+    petManages: 0,
+    batchCycles: 0,
     coalBusyCycles: 0,
     codBusyCycles: 0,
+  };
+}
+
+/** Reset per-batch resource counters while keeping cycle totals / bait trust. */
+function resetBatchResourceCounts(counts: PlaybookCounts): PlaybookCounts {
+  return {
+    ...counts,
+    coal: 0,
+    rawCod: 0,
+    cookedCod: 0,
+    sells: 0,
+    rabbitHunts: 0,
+    petManages: 0,
+    coalBusyCycles: 0,
+    codBusyCycles: 0,
+    batchCycles: counts.batchCycles + 1,
   };
 }
 
@@ -408,19 +445,22 @@ function deriveStage(
   if (hasBait && rawCod < COD_MIN && counts.codBusyCycles < COD_BUSY_TARGET) {
     if (idx >= STAGE_ORDER.indexOf('buy_bait') || hasBait) return 'fish_cod';
   }
-  if (rawCod >= Math.floor(COD_MIN / 2) && cooked < Math.floor(COD_MIN / 2)) {
+  if (rawCod >= Math.floor(COD_MIN / 2) && cooked < COOK_MIN) {
     if (idx >= STAGE_ORDER.indexOf('fish_cod')) return 'cook_cod';
   }
-  if (cooked >= 5 && counts.sells < 2 && idx >= STAGE_ORDER.indexOf('cook_cod')) {
+  if (cooked >= Math.min(5, Math.floor(COOK_MIN / 4)) && counts.sells < 2 && idx >= STAGE_ORDER.indexOf('cook_cod')) {
     return 'sell_extras';
   }
-  if (cooked >= 3 && counts.rabbitHunts < 2 && idx >= STAGE_ORDER.indexOf('sell_extras')) {
+  if (cooked >= Math.min(3, COOK_MIN) && counts.rabbitHunts < HUNT_MIN && idx >= STAGE_ORDER.indexOf('sell_extras')) {
     return 'hunt_rabbits';
   }
-  if (counts.mapPeeks < 1 && idx >= STAGE_ORDER.indexOf('hunt_rabbits')) {
+  if (counts.rabbitHunts >= HUNT_MIN && counts.petManages < 1 && idx >= STAGE_ORDER.indexOf('hunt_rabbits')) {
+    return 'manage_pets';
+  }
+  // Batch loop: after pets (or hunt if pets already done), do not retire to complete — reset happens in evaluatePlaybook.
+  if (counts.mapPeeks < 1 && idx >= STAGE_ORDER.indexOf('manage_pets') && counts.batchCycles === 0) {
     return 'explore_map';
   }
-  if (counts.mapPeeks >= 1 && counts.rabbitHunts >= 1) return 'complete';
 
   // Fall through: keep persisted stage if still sensible.
   return persisted === 'mine_coal' && coal >= COAL_MIN ? 'sell_half' : persisted;
@@ -441,7 +481,7 @@ function stageMeta(stage: EarlyStageId, baitOwned = false): {
         deprioritized: ['gather_oak', 'gather_yew', 'hunt_battle', 'explore_map'],
         interrupt: ['mine_coal'],
         hint:
-          'EARLY PLAYBOOK stage mine_coal: interrupt Oak/Yew woodcutting and mine Coal Ore until ~30–50. Prefer mine_coal over continue_current when current resource is not Coal.',
+          `EARLY PLAYBOOK stage mine_coal: interrupt Oak/Yew woodcutting and mine Coal Ore until ~${COAL_MIN}–${COAL_MAX}. Prefer mine_coal over continue_current when current resource is not Coal.`,
       };
     case 'sell_half':
       return {
@@ -478,11 +518,11 @@ function stageMeta(stage: EarlyStageId, baitOwned = false): {
       };
     case 'cook_cod':
       return {
-        goal: 'Cook roughly half the Cod into Cooked Cod (battle food)',
+        goal: `Cook ~${COOK_MIN} Cod into Cooked Cod (battle food + pet feed)`,
         preferred: ['cook_cod'],
         deprioritized: ['gather_oak', 'gather_yew'],
         interrupt: ['cook_cod'],
-        hint: 'EARLY PLAYBOOK stage cook_cod: cook Cod with Coal into Cooked Cod for battles.',
+        hint: `EARLY PLAYBOOK stage cook_cod: cook Cod with Coal until ~${COOK_MIN} Cooked Cod for battles/pets.`,
       };
     case 'sell_extras':
       return {
@@ -495,12 +535,21 @@ function stageMeta(stage: EarlyStageId, baitOwned = false): {
       };
     case 'hunt_rabbits':
       return {
-        goal: 'Hunt Rabbits + battle using Cooked Cod (pre-battle FOOD Add)',
+        goal: `Hunt/battle ~${HUNT_MIN} times using Cooked Cod (pre-battle FOOD Add)`,
         preferred: ['hunt_rabbits', 'hunt_battle'],
         deprioritized: ['gather_oak', 'gather_yew', 'mine_coal'],
         interrupt: ['hunt_rabbits', 'hunt_battle'],
         hint:
-          'EARLY PLAYBOOK stage hunt_rabbits: hunt and battle Rabbits. Ensure Cooked Cod is selected via FOOD Add before battle. Respect huntFoundCap.',
+          `EARLY PLAYBOOK stage hunt_rabbits: hunt and battle until ~${HUNT_MIN} successes. Ensure Cooked Cod via FOOD Add. Respect huntFoundCap (early combat may pause hunting until enemies decay).`,
+      };
+    case 'manage_pets':
+      return {
+        goal: 'Manage pets: claim, feed (avoid wasteful Max), battle/sleep for stamina',
+        preferred: ['manage_pets'],
+        deprioritized: ['gather_oak', 'gather_yew', 'mine_coal', 'fish_cod'],
+        interrupt: ['manage_pets'],
+        hint:
+          'EARLY PLAYBOOK stage manage_pets: open /pets — claim finished work, feed injured pets carefully, send idle pets to battle or sleep for stamina, keep one equipped when useful.',
       };
     case 'explore_map':
       return {
@@ -539,7 +588,14 @@ export function evaluatePlaybook(
       interruptActions: [],
       counts: emptyCounts(),
       baitOwned: false,
-      targets: { coalMin: COAL_MIN, coalMax: COAL_MAX, codMin: COD_MIN, codMax: COD_MAX },
+      targets: {
+        coalMin: COAL_MIN,
+        coalMax: COAL_MAX,
+        codMin: COD_MIN,
+        codMax: COD_MAX,
+        cookMin: COOK_MIN,
+        huntMin: HUNT_MIN,
+      },
       curriculumHint: 'Early playbook disabled (EARLY_PLAYBOOK=false).',
       complete: true,
       gatherGraceActive: false,
@@ -583,10 +639,22 @@ export function evaluatePlaybook(
   if (stage === 'fish_cod' && (effectiveCod(counts) >= COD_MIN || counts.codBusyCycles >= COD_BUSY_TARGET)) {
     stage = 'cook_cod';
   }
-  if (stage === 'cook_cod' && counts.cookedCod >= Math.floor(COD_MIN / 2)) stage = 'sell_extras';
+  if (stage === 'cook_cod' && counts.cookedCod >= COOK_MIN) stage = 'sell_extras';
   if (stage === 'sell_extras' && counts.sells >= 2) stage = 'hunt_rabbits';
-  if (stage === 'hunt_rabbits' && counts.rabbitHunts >= 2) stage = 'explore_map';
-  if (stage === 'explore_map' && counts.mapPeeks >= 1) stage = 'complete';
+  if (stage === 'hunt_rabbits' && counts.rabbitHunts >= HUNT_MIN) stage = 'manage_pets';
+  // One map peek on the first cycle only, then loop the batch forever (never retire to complete).
+  if (stage === 'manage_pets' && counts.petManages >= 1) {
+    if (counts.mapPeeks < 1 && counts.batchCycles === 0) {
+      stage = 'explore_map';
+    } else {
+      counts = resetBatchResourceCounts(counts);
+      stage = 'mine_coal';
+    }
+  }
+  if (stage === 'explore_map' && counts.mapPeeks >= 1) {
+    counts = resetBatchResourceCounts(counts);
+    stage = 'mine_coal';
+  }
 
   const grace = computeGatherGrace(persisted, stage);
   const fishBackoff = computeFishCodBackoff(persisted);
@@ -659,7 +727,14 @@ export function evaluatePlaybook(
     counts,
     baitOwned,
     lastBaitPurchaseAt: persisted.lastBaitPurchaseAt,
-    targets: { coalMin: COAL_MIN, coalMax: COAL_MAX, codMin: COD_MIN, codMax: COD_MAX },
+    targets: {
+      coalMin: COAL_MIN,
+      coalMax: COAL_MAX,
+      codMin: COD_MIN,
+      codMax: COD_MAX,
+      cookMin: COOK_MIN,
+      huntMin: HUNT_MIN,
+    },
     curriculumHint,
     complete,
     gatherGraceActive: grace.active,
@@ -691,6 +766,12 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
   }
   if (action === 'explore_map') {
     if (!/failed/i.test(outcome)) counts.mapPeeks += 1;
+  }
+  if (action === 'manage_pets') {
+    // no_pets advances the batch (skip until eggs/pets exist); failed/no_action stay put.
+    if (/no_pets/i.test(outcome) || (!/failed|no_action/i.test(outcome) && outcome.trim())) {
+      counts.petManages += 1;
+    }
   }
   let baitOwned = Boolean(persisted.baitOwned);
   let lastBaitPurchaseAt = persisted.lastBaitPurchaseAt;
@@ -862,7 +943,7 @@ export function filterAllowedByPlaybook(
       if (playbook.deprioritizedActions.includes(id)) {
         continue;
       }
-      if (!next.includes(id) && ['mine_coal', 'fish_cod', 'cook_cod', 'market_sell_half', 'sell_junk_for_gold', 'explore_map', 'hunt_rabbits', 'buy_bait', 'sell_junk'].includes(id)) {
+      if (!next.includes(id) && ['mine_coal', 'fish_cod', 'cook_cod', 'market_sell_half', 'sell_junk_for_gold', 'explore_map', 'hunt_rabbits', 'manage_pets', 'buy_bait', 'sell_junk'].includes(id)) {
         next.push(id);
       }
     }
@@ -975,7 +1056,8 @@ export function formatPlaybookLogLine(playbook: PlaybookProgress): string {
     `stage=${playbook.stage} goal="${playbook.stageGoal}"` +
     ` coal=${c.coal}/${playbook.targets.coalMin} (busyCycles=${c.coalBusyCycles})` +
     ` cod=${c.rawCod}/${playbook.targets.codMin} cooked=${c.cookedCod}` +
-    ` sells=${c.sells} rabbits=${c.rabbitHunts} map=${c.mapPeeks}` +
+    ` sells=${c.sells} rabbits=${c.rabbitHunts}/${playbook.targets.huntMin}` +
+    ` cookedTarget=${playbook.targets.cookMin} pets=${c.petManages} cycles=${c.batchCycles} map=${c.mapPeeks}` +
     ` baitOwned=${playbook.baitOwned}` +
     ` preferred=[${playbook.preferredActions.join(',')}]`
   );

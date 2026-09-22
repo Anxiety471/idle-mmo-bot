@@ -138,7 +138,7 @@ CLI / env equivalents:
 
 Without `JEV_API_TOKEN`, autopilot runs **ProgressiveStubJev** (still writes `jev.jsonl` via `LoggingJev`).
 
-For a fresh low-level character, leave **`EARLY_PLAYBOOK` enabled** (default) so coal → sell → bait → fish → cook → hunt → map runs automatically.
+For a fresh low-level character, leave **`EARLY_PLAYBOOK` enabled** (default) so the batch leveling loop (coal → fish → cook → hunt → pets → repeat) runs automatically.
 
 ### 3.7 Know where logs live
 
@@ -335,19 +335,20 @@ The live `/inventory` UI is mostly **icon + quantity badge** with item names in 
 
 ## 5. Early-systems playbook stages
 
-When `EARLY_PLAYBOOK` is enabled (default), `evaluatePlaybook()` advances through these stages (`src/autopilot/early-systems-playbook.ts`). Targets: **30–50 Coal Ore**, **30–50 Raw Cod**, cook ~half into **Cooked Cod**, then hunt and map peek.
+When `EARLY_PLAYBOOK` is enabled (default), `evaluatePlaybook()` runs a **repeating batch leveling loop** (`src/autopilot/early-systems-playbook.ts`). Default targets (env-overridable): **100 Coal Ore**, **100 Raw Cod**, **100 Cooked Cod**, **~50 hunt/battle**, then **manage pets**, then loop back to mining. Override with `PLAYBOOK_COAL_TARGET`, `PLAYBOOK_FISH_TARGET`, `PLAYBOOK_COOK_TARGET`, `PLAYBOOK_HUNT_TARGET`.
 
 | Stage ID | Goal | Primary actions |
 |----------|------|-----------------|
-| `mine_coal` | Mine 30–50 Coal Ore | `mine_coal` (interrupts Oak/Yew woodcutting) |
+| `mine_coal` | Mine ~100 Coal Ore | `mine_coal` (interrupts Oak/Yew woodcutting) |
 | `sell_half` | Early gold via missions first; careful sell as fallback | `quest_turnin`, `quest_talk_accept`, then `sell_junk_for_gold` / `market_sell_half` |
 | `buy_bait` | Buy Cheap Bait (gold only, 2g) | `buy_bait` |
-| `fish_cod` | Fish 30–50 Raw Cod | `fish_cod`, `buy_bait` if missing |
-| `cook_cod` | Cook Cod → Cooked Cod with Coal | `cook_cod` (`src/deterministic/cook.ts`) |
+| `fish_cod` | Fish ~100 Raw Cod | `fish_cod`, `buy_bait` if missing |
+| `cook_cod` | Cook ~100 Cod → Cooked Cod with Coal | `cook_cod` (`src/deterministic/cook.ts`) |
 | `sell_extras` | Missions-first gold; sell extras as fallback | `quest_turnin`, `quest_talk_accept`, then `market_sell_half`, `sell_junk` |
-| `hunt_rabbits` | Hunt Rabbits with pre-battle FOOD Add | `hunt_rabbits` (calls `selectBattleFood` + combat round) |
-| `explore_map` | Map peek / zone discovery | `explore_map` |
-| `complete` | Resume full progressive loop | All bootstrap actions; filters off |
+| `hunt_rabbits` | Hunt/battle ~50 times with pre-battle FOOD Add | `hunt_rabbits` (calls `selectBattleFood` + combat round); respects `huntFoundCap` |
+| `manage_pets` | Claim / feed / battle / sleep pets | `manage_pets` (`src/deterministic/pets.ts`); `no_pets` still advances the batch |
+| `explore_map` | One map peek on the first cycle | `explore_map` |
+| *(loop)* | Reset batch counters → `mine_coal` again | Does **not** retire to `complete` after the first pass |
 
 **Missions-first early gold:** While the early playbook is active, prefer `quest_turnin` and `quest_talk_accept` over `market_sell_half`, `sell_junk_for_gold`, and `sell_junk` when quests are available. Market sell remains fallback when quests are unavailable or dry. At `sell_half`, the playbook skips straight to `buy_bait` when gold is already ≥ 2g (bait cost) or quests can fund bait without a sell pass.
 
