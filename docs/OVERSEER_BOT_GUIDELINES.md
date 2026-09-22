@@ -336,16 +336,16 @@ When `EARLY_PLAYBOOK` is enabled (default), `evaluatePlaybook()` advances throug
 | Stage ID | Goal | Primary actions |
 |----------|------|-----------------|
 | `mine_coal` | Mine 30–50 Coal Ore | `mine_coal` (interrupts Oak/Yew woodcutting) |
-| `sell_half` | Careful sell ~half excess; keep cook fuel | `market_sell_half`, `sell_junk` |
+| `sell_half` | Early gold via missions first; careful sell as fallback | `quest_turnin`, `quest_talk_accept`, then `sell_junk_for_gold` / `market_sell_half` |
 | `buy_bait` | Buy Cheap Bait (gold only, 2g) | `buy_bait` |
 | `fish_cod` | Fish 30–50 Raw Cod | `fish_cod`, `buy_bait` if missing |
 | `cook_cod` | Cook Cod → Cooked Cod with Coal | `cook_cod` (`src/deterministic/cook.ts`) |
-| `sell_extras` | Sell extras; keep battle food | `market_sell_half`, `sell_junk` |
+| `sell_extras` | Missions-first gold; sell extras as fallback | `quest_turnin`, `quest_talk_accept`, then `market_sell_half`, `sell_junk` |
 | `hunt_rabbits` | Hunt Rabbits with pre-battle FOOD Add | `hunt_rabbits` (calls `selectBattleFood` + combat round) |
 | `explore_map` | Map peek / zone discovery | `explore_map` |
 | `complete` | Resume full progressive loop | All bootstrap actions; filters off |
 
-Quest flow still runs when allowed: `quest_turnin` → `quest_talk_accept` alongside playbook stages.
+**Missions-first early gold:** While the early playbook is active, prefer `quest_turnin` and `quest_talk_accept` over `market_sell_half`, `sell_junk_for_gold`, and `sell_junk` when quests are available. Market sell remains fallback when quests are unavailable or dry. At `sell_half`, the playbook skips straight to `buy_bait` when gold is already ≥ 2g (bait cost) or quests can fund bait without a sell pass.
 
 ProgressiveStubJev respects playbook hints when no API token. HttpJev receives `curriculumHint` and playbook metadata in the snapshot.
 
