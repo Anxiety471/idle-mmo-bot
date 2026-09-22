@@ -16,11 +16,18 @@ import {
   runAway,
   huntMore,
   turnInQuestWhenReady,
+  openQuest,
   talkQuest,
   turnInQuest,
   isTurnInEnabled,
   switchQuestTab,
   waitForQuestTabsSettled,
+  waitForQuestCard,
+  waitForQuestDetail,
+  navigateToQuestsInterrupting,
+  rankPendingQuestForAccept,
+  hasEasyCompletePendingQuest,
+  getQuestDialogueLine,
   buyCheapBait,
   sellJunkToVendor,
   sellHalfCareful,
@@ -30,6 +37,7 @@ import {
   trySmeltCoal,
 } from '../deterministic/index.js';
 import type { SellJunkForGoldContext } from '../deterministic/sell-junk-for-gold.js';
+import type { SnapshotQuest } from '../types.js';
 import type { ActionAllowContext, ActionDefinition, ActionExecuteContext } from './action-types.js';
 import { registerAction } from './action-registry.js';
 import { tryCookCod } from '../deterministic/cook.js';
@@ -37,7 +45,6 @@ import { getPlaybookFromSnapshot } from './early-systems-playbook.js';
 import { pollUntilHuntStop } from '../jev/hunt-cap.js';
 
 const HEARTH_QUEST = 'Wood for the Hearth';
-const GOBLIN_QUEST = 'Goblin Menace';
 const KILL_QUEST_PATTERN = /goblin|duck|rabbit|menace|fortune|whisper/i;
 
 function sleep(ms: number): Promise<void> {
@@ -156,26 +163,91 @@ async function questTurnIn(page: Page, config: AppConfig): Promise<string> {
   return `in_progress:${hearth.result}`;
 }
 
-async function questTalkAccept(page: Page, config: AppConfig): Promise<string> {
-  await navigateTo(page, config, '/quests');
-  await waitForQuestTabsSettled(page);
-  await switchQuestTab(page, 'Pending Nearby');
-
-  const preferred = page.getByRole('button', { name: GOBLIN_QUEST });
-  if (await preferred.count() > 0) {
-    await preferred.first().click();
-  } else {
-    const cards = page.getByRole('button');
-    const count = await cards.count();
-    for (let i = 0; i < count; i++) {
-      const label = (await cards.nth(i).innerText()).trim();
-      if (/Menace|Whisper|Fortune|Hearth/i.test(label)) {
-        await cards.nth(i).click();
-        break;
-      }
+async function openPendingQuestCard(
+  page: Page,
+  config: AppConfig,
+  pendingQuests: SnapshotQuest[],
+): Promise<{ opened: boolean; title?: string }> {
+  const target = rankPendingQuestForAccept(pendingQuests);
+  if (target && (await waitForQuestCard(page, target.title))) {
+    const opened = await openQuest(page, config, target.title, { skipNavigate: true });
+    if (opened !== 'failed') {
+      return { opened: true, title: target.title };
     }
   }
-  return `talk:${await talkQuest(page)}`;
+
+  const ranked: SnapshotQuest[] = [];
+  let remaining = [...pendingQuests];
+  while (remaining.length > 0) {
+    const next = rankPendingQuestForAccept(remaining);
+    if (!next) break;
+    ranked.push(next);
+    remaining = remaining.filter((q) => q.title !== next.title);
+  }
+
+  for (const quest of ranked) {
+    if (!(await waitForQuestCard(page, quest.title, 2_000))) continue;
+    const opened = await openQuest(page, config, quest.title, { skipNavigate: true });
+    if (opened !== 'failed') {
+      return { opened: true, title: quest.title };
+    }
+  }
+
+  const cards = page.getByRole('button');
+  const count = await cards.count();
+  for (let i = 0; i < count; i++) {
+    const label = (await cards.nth(i).innerText()).trim();
+    if (/Hearth|Menace|Whisper|Fortune/i.test(label)) {
+      await cards.nth(i).click();
+      return { opened: true, title: label };
+    }
+  }
+
+  return { opened: false };
+}
+
+async function questTalkAccept(
+  page: Page,
+  config: AppConfig,
+  pendingQuests: SnapshotQuest[],
+  interruptGather = false,
+): Promise<string> {
+  let nav: 'ok' | 'blocked' = 'ok';
+  if (interruptGather) {
+    nav = await navigateToQuestsInterrupting(page, config);
+  } else {
+    await navigateTo(page, config, '/quests');
+  }
+  if (nav === 'blocked') {
+    return 'gather_interrupt_blocked';
+  }
+
+  await waitForQuestTabsSettled(page);
+  const tab = await switchQuestTab(page, 'Pending Nearby');
+  if (tab === 'no_action') {
+    return 'pending_tab_missing';
+  }
+
+  const { opened, title } = await openPendingQuestCard(page, config, pendingQuests);
+  if (!opened) {
+    return 'card_not_opened';
+  }
+
+  if (!(await waitForQuestDetail(page))) {
+    return 'detail_not_ready';
+  }
+
+  const talkResult = await talkQuest(page, title ? getQuestDialogueLine(title) : undefined);
+  if (talkResult === 'no_action') {
+    return 'talk:no_action';
+  }
+
+  if (await isTurnInEnabled(page)) {
+    const turnIn = await turnInQuest(page);
+    return `talk:${talkResult}:turned_in:${turnIn}`;
+  }
+
+  return `talk:${talkResult}`;
 }
 
 function gatherAction(
@@ -304,11 +376,34 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
     priority: 15,
     tags: ['quest'],
     safety: 'safe',
-    isAllowed: (ctx) => ctx.snapshot.flags.sessionValid && ctx.snapshot.pendingQuests.length > 0,
-    execute: async (ctx) => ({
-      action: 'quest_talk_accept',
-      outcome: await questTalkAccept(ctx.page, ctx.config),
-    }),
+    isAllowed: (ctx) => {
+      if (!ctx.snapshot.flags.sessionValid || ctx.snapshot.pendingQuests.length === 0) {
+        return false;
+      }
+      const easyPending = hasEasyCompletePendingQuest(ctx.snapshot.pendingQuests);
+      return gatherIdle(ctx) || easyPending;
+    },
+    execute: async (ctx) => {
+      const easyPending = hasEasyCompletePendingQuest(ctx.snapshot.pendingQuests);
+      const gatherState = await readGatherState(ctx.page, ctx.config);
+      const interruptGather =
+        easyPending &&
+        Boolean(
+          gatherState.busy ||
+            gatherState.busyElsewhere ||
+            ctx.snapshot.flags.gatherBusy ||
+            ctx.snapshot.currentAction?.busy,
+        );
+      return {
+        action: 'quest_talk_accept',
+        outcome: await questTalkAccept(
+          ctx.page,
+          ctx.config,
+          ctx.snapshot.pendingQuests,
+          interruptGather || ctx.forceInterrupt,
+        ),
+      };
+    },
   },
   {
     id: 'hunt_battle',

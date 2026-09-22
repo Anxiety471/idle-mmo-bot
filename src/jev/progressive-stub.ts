@@ -18,6 +18,7 @@ import {
 } from '../autopilot/early-systems-playbook.js';
 import { evaluateQuestCurriculum } from '../autopilot/quest-curriculum.js';
 import { parseSellGoldThreshold } from '../deterministic/sell-junk-for-gold.js';
+import { hasEasyCompletePendingQuest } from '../deterministic/quest-accept.js';
 
 const HEARTH_QUEST = 'Wood for the Hearth';
 const LOW_HP_THRESHOLD = 25;
@@ -131,6 +132,13 @@ export class ProgressiveStubJev implements SupervisorAdvisor {
 
     for (const def of byPriority) {
       if (def.id === 'quest_turnin' && snapshot.acceptedQuests.some((q) => q.canTurnIn)) {
+        return def.id;
+      }
+      if (
+        def.id === 'quest_talk_accept' &&
+        snapshot.pendingQuests.length > 0 &&
+        hasEasyCompletePendingQuest(snapshot.pendingQuests)
+      ) {
         return def.id;
       }
       if (def.id === 'continue_current' && snapshot.currentAction?.busy) {

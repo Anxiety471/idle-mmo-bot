@@ -349,6 +349,8 @@ When `EARLY_PLAYBOOK` is enabled (default), `evaluatePlaybook()` advances throug
 
 **Quest curriculum (difficulty vs ability):** `evaluateQuestCurriculum()` in `src/autopilot/quest-curriculum.ts` scores each visible quest from snapshot `acceptedQuests` / `pendingQuests` (progress, combat level, inventory). HttpJev receives `questCurriculum` in the snapshot payload plus `[QUEST HIGH/LOW PRIORITY]` tags in action criteria. When an easy gather quest is finishable (e.g. **Wood for the Hearth** → accept → `gather_oak` to 150 → `quest_turnin`), playbook filters deprioritize `fish_cod` and hard hunts (`hunt_battle`) until it completes. Hard kill quests (e.g. Goblin Menace 0/30 at combat 1) stay accepted but do not block easy gather preference.
 
+**Pending accept (Hearth 150/150):** `quest_talk_accept` ranks pending cards by progress-met first (e.g. Wood for the Hearth 150/150 beats Goblin Menace), opens the card, waits for detail, then tries **Accept** / **Talk** plus known Hearth dialogue. Easy-complete pending quests interrupt busy gather (replace dialog → Start anyway) so `/quests` is reachable; playbook/Jev drop `continue_current` while that accept is allowed. If Talk enables Turn In, the same execute path or next `quest_turnin` tick finishes the quest.
+
 ProgressiveStubJev respects playbook hints when no API token. HttpJev receives `curriculumHint` and playbook metadata in the snapshot.
 
 ---

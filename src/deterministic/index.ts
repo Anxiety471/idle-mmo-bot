@@ -39,6 +39,9 @@ export {
   openQuest,
   switchQuestTab,
   waitForQuestTabsSettled,
+  waitForQuestCard,
+  waitForQuestDetail,
+  navigateToQuestsInterrupting,
   talkQuest,
   turnInQuest,
   turnInQuestWhenReady,
@@ -48,6 +51,17 @@ export {
   type TurnInQuestOptions,
   type TurnInQuestOutcome,
 } from './quest.js';
+
+export {
+  HEARTH_QUEST,
+  GOBLIN_QUEST,
+  HEARTH_ACCEPT_DIALOGUE,
+  parseQuestProgressFraction,
+  isQuestProgressMet,
+  rankPendingQuestForAccept,
+  hasEasyCompletePendingQuest,
+  getQuestDialogueLine,
+} from './quest-accept.js';
 
 export { buyCheapBait } from './merchant.js';
 export { sellJunk, sellJunkToVendor, sellHalfCareful } from './inventory.js';
