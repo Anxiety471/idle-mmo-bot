@@ -169,3 +169,83 @@ describe('gather grace', () => {
     assert.equal(progress.counts.codBusyCycles, 6);
   });
 });
+
+describe('sticky baitOwned (no repurchase loop)', () => {
+  const envSnapshot = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
+  let statePath: string;
+
+  afterEach(() => {
+    restoreEnv(envSnapshot);
+    if (statePath) rmSync(statePath, { force: true });
+  });
+
+  it('notePlaybookOutcome does not clear baitOwned on fish_cod missing_requirement', () => {
+    statePath = join('/tmp', `playbook-sticky-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'fish_cod',
+        counts: emptyPlaybookCounts(),
+        baitOwned: true,
+        lastBaitPurchaseAt: new Date().toISOString(),
+      })}\n`,
+    );
+
+    notePlaybookOutcome('fish_cod', 'missing_requirement');
+
+    const saved = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      baitOwned?: boolean;
+      stage?: string;
+    };
+    assert.equal(saved.baitOwned, true);
+    assert.equal(saved.stage, 'fish_cod');
+  });
+
+  it('filterAllowedByPlaybook strips buy_bait when baitOwned even if stage is buy_bait', () => {
+    const playbook = fishCodPlaybook({
+      stage: 'buy_bait',
+      stageIndex: 2,
+      preferredActions: ['buy_bait'],
+      interruptActions: ['buy_bait'],
+      baitOwned: true,
+      gatherGraceActive: false,
+      lastBaitPurchaseAt: new Date().toISOString(),
+    });
+    const snapshot = minimalSnapshot({
+      flags: {
+        hasBait: false,
+        bankNearby: false,
+        gatherBusy: false,
+        inBattle: false,
+        sessionValid: true,
+      },
+      inventory: {},
+    });
+    const allowed = ['buy_bait', 'fish_cod', 'idle', 'continue_current'];
+    const filtered = filterAllowedByPlaybook(allowed, snapshot, playbook);
+    assert.ok(!filtered.includes('buy_bait'), `buy_bait should be stripped, got ${filtered.join(',')}`);
+    assert.ok(filtered.includes('fish_cod') || filtered.includes('idle'));
+  });
+
+  it('notePlaybookOutcome records lastBaitPurchaseAt on purchased', () => {
+    statePath = join('/tmp', `playbook-buy-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({ version: 1, stage: 'buy_bait', counts: emptyPlaybookCounts(), baitOwned: false })}\n`,
+    );
+    notePlaybookOutcome('buy_bait', 'purchased');
+    const saved = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      baitOwned?: boolean;
+      stage?: string;
+      lastBaitPurchaseAt?: string;
+    };
+    assert.equal(saved.baitOwned, true);
+    assert.equal(saved.stage, 'fish_cod');
+    assert.ok(saved.lastBaitPurchaseAt);
+  });
+});
