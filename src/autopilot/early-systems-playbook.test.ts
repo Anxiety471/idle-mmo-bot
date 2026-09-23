@@ -1168,6 +1168,52 @@ describe('strict sequential real-count gates', () => {
     assert.ok(filtered.includes('cook_cod'));
   });
 
+  it('cooks before hunt when Cooked Cod is under the target, and hunts once it matches', () => {
+    statePath = join('/tmp', `playbook-food-threshold-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'hunt_rabbits',
+        counts: {
+          ...coalMetCounts({ sells: 2 }),
+          rawCod: 100,
+          cookedCod: 100,
+          rabbitHunts: 4,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const short = minimalSnapshot({
+      inventory: { 'Cheap Bait': 20, 'Coal Ore': 40, Cod: 12, 'Cooked Cod': 40 },
+      gold: 50,
+    });
+    const shortProgress = evaluatePlaybook(short);
+    const shortFiltered = filterAllowedByPlaybook(
+      ['hunt_rabbits', 'hunt_battle', 'cook_cod', 'idle'],
+      short,
+      shortProgress,
+    );
+    assert.ok(!shortFiltered.includes('hunt_rabbits'));
+    assert.ok(shortFiltered.includes('cook_cod'));
+
+    const ready = minimalSnapshot({
+      inventory: { 'Cheap Bait': 20, 'Coal Ore': 40, Cod: 12, 'Cooked Cod': 100 },
+      gold: 50,
+    });
+    const readyProgress = evaluatePlaybook(ready);
+    const readyFiltered = filterAllowedByPlaybook(
+      ['hunt_rabbits', 'hunt_battle', 'idle'],
+      ready,
+      readyProgress,
+    );
+    assert.ok(readyFiltered.includes('hunt_rabbits'));
+    assert.ok(!readyFiltered.includes('cook_cod'));
+  });
+
   it('snaps manage_pets back to hunt_rabbits when rabbitHunts below target', () => {
     statePath = join('/tmp', `playbook-hunt-snap-${Date.now()}.json`);
     process.env.PLAYBOOK_STATE_PATH = statePath;

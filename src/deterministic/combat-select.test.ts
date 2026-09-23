@@ -230,12 +230,12 @@ describe('battle from monster image', () => {
     }
   });
 
-  it('does not click Battle when the food picker is empty', async () => {
+  it('still clicks Battle when the food picker is empty', async () => {
     const page = await load(BATTLE_FLOW_NO_FOOD);
     try {
       const result = await configureAndBattle(page, 0, 1, 'Balanced');
-      assert.equal(result, 'no_food');
-      assert.equal(await page.locator('body').getAttribute('data-battled'), null);
+      assert.equal(result, 'battle_started');
+      assert.equal(await page.locator('body').getAttribute('data-battled'), '1');
     } finally {
       await page.close();
     }
