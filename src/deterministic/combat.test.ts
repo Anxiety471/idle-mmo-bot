@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { hasHuntProgress, parseHuntMetrics } from './combat.js';
-import type { HuntState } from '../types.js';
+import {
+  enemyNameFromImageSrc,
+  hasHuntProgress,
+  huntingMetricsSection,
+  isIdleBattleText,
+  parseHuntMetrics,
+  pickBattleEnemy,
+} from './combat.js';
+import type { EnemyInfo, HuntState } from '../types.js';
 
 const ACTIVE_HUNT_PANEL = `Stop
 CURRENT ACTION
@@ -16,6 +23,27 @@ ENEMIES NEARBY
 40
 Windy
 Combat`;
+
+/** Live HitoriIdle mobile UI — Image A (active Hunting, label-then-number rows). */
+const LIVE_ACTIVE_HUNT_PANEL = `Battle
+Hunting
++0
+Next enemy in 0:18
+0.23 EXP/s
+Battle
+Stats
+Total Enemies Found
+407
+Enemies Remaining
+448
+Bonus Enemies
+0
+EXP Per Second
+0.23
+Loot Found
+0
+Power Hunt
+Stop`;
 
 const POST_STOP_SELECTION = `Hunt More
 ENEMIES NEARBY
@@ -52,6 +80,56 @@ describe('parseHuntMetrics', () => {
     assert.equal(metrics.totalEnemiesFound, 2);
     assert.equal(metrics.enemiesRemaining, 5);
   });
+
+  it('scopes metrics to CURRENT ACTION and ignores ENEMIES NEARBY zone count', () => {
+    const section = huntingMetricsSection(ACTIVE_HUNT_PANEL);
+    assert.ok(section.includes('Total Enemies Found'));
+    assert.ok(!section.includes('ENEMIES NEARBY'));
+    const metrics = parseHuntMetrics(ACTIVE_HUNT_PANEL);
+    assert.equal(metrics.totalEnemiesFound, 1);
+    assert.equal(metrics.enemiesRemaining, 39);
+  });
+
+  it('does not treat ENEMIES NEARBY 40 as totalEnemiesFound when hunt labels are absent', () => {
+    const text = `Stop
+CURRENT ACTION
+Hunting
+ENEMIES NEARBY
+40
+Windy`;
+    const metrics = parseHuntMetrics(text);
+    assert.equal(metrics.totalEnemiesFound, undefined);
+  });
+
+  it('parses live mobile Hunting panel (label row then value row)', () => {
+    const metrics = parseHuntMetrics(LIVE_ACTIVE_HUNT_PANEL);
+    assert.equal(metrics.totalEnemiesFound, 407);
+    assert.equal(metrics.enemiesRemaining, 448);
+    assert.equal(metrics.bonusEnemies, 0);
+    const section = huntingMetricsSection(LIVE_ACTIVE_HUNT_PANEL);
+    assert.ok(section.includes('Hunting'));
+    assert.ok(section.includes('Total Enemies Found'));
+    assert.ok(!section.includes('Power Hunt'));
+  });
+
+  it('parses side-by-side label value on one line', () => {
+    const text = `Hunting\nTotal Enemies Found 407\nEnemies Remaining 448`;
+    const metrics = parseHuntMetrics(text);
+    assert.equal(metrics.totalEnemiesFound, 407);
+    assert.equal(metrics.enemiesRemaining, 448);
+  });
+
+  it('parses colon-separated hunt metrics in CURRENT ACTION', () => {
+    const text = `CURRENT ACTION
+Hunting
+Total Enemies Found: 2
+Enemies Remaining: 18
+Bonus Enemies: 0`;
+    const metrics = parseHuntMetrics(text);
+    assert.equal(metrics.totalEnemiesFound, 2);
+    assert.equal(metrics.enemiesRemaining, 18);
+    assert.equal(metrics.bonusEnemies, 0);
+  });
 });
 
 describe('hasHuntProgress', () => {
@@ -84,3 +162,73 @@ describe('hasHuntProgress', () => {
 function parseHuntMetricsToState(text: string): HuntState {
   return { enemies: [], defeatedCount: 0, pageText: text, ...parseHuntMetrics(text) };
 }
+
+const MIXED_ENEMIES_NEARBY = `Hunt More
+ENEMIES NEARBY
+3
+Goblin
+Lv. 3
+Rabbit
+Lv. 1
+Duck
+Lv. 2
+STANCE
+Balanced
+Battle`;
+
+describe('pickBattleEnemy', () => {
+  it('prefers Rabbit in a mixed ENEMIES NEARBY list', () => {
+    const enemies: EnemyInfo[] = [
+      { name: 'Goblin', index: 0 },
+      { name: 'Rabbit', index: 1 },
+      { name: 'Duck', index: 2 },
+    ];
+    const picked = pickBattleEnemy(enemies);
+    assert.equal(picked?.name, 'Rabbit');
+    assert.equal(picked?.index, 1);
+  });
+
+  it('falls back to first enemy when Rabbit is absent', () => {
+    const enemies: EnemyInfo[] = [
+      { name: 'Goblin', index: 0 },
+      { name: 'Duck', index: 1 },
+    ];
+    const picked = pickBattleEnemy(enemies);
+    assert.equal(picked?.name, 'Goblin');
+  });
+
+  it('returns undefined for empty list', () => {
+    assert.equal(pickBattleEnemy([]), undefined);
+  });
+});
+
+describe('mixed enemy list metrics isolation', () => {
+  it('does not treat ENEMIES NEARBY pool count as hunt found metric', () => {
+    const metrics = parseHuntMetrics(MIXED_ENEMIES_NEARBY);
+    assert.equal(metrics.totalEnemiesFound, undefined);
+    assert.equal(metrics.enemiesRemaining, undefined);
+  });
+});
+
+describe('isIdleBattleText', () => {
+  it('detects idle Start Hunt screen from live desktop screenshot copy', () => {
+    const idle = `Battle
+ENEMIES NEARBY
+Hunt
+Start a hunt to find nearby enemies.
+Start Hunt
+YOUR CHARACTER`;
+    assert.equal(isIdleBattleText(idle), true);
+    assert.equal(isIdleBattleText(LIVE_ACTIVE_HUNT_PANEL), false);
+  });
+});
+
+describe('enemyNameFromImageSrc', () => {
+  it('maps CDN/meta slugs to enemy names for icon tiles', () => {
+    assert.equal(enemyNameFromImageSrc('/enemies/rabbit-icon.png'), 'Rabbit');
+    assert.equal(enemyNameFromImageSrc('/enemies/duck-icon.png'), 'Duck');
+    assert.equal(enemyNameFromImageSrc('/enemies/crown-goblin.png'), 'Crown Goblin');
+    assert.equal(enemyNameFromImageSrc('/enemies/goblin.png'), 'Goblin');
+    assert.equal(enemyNameFromImageSrc('/enemies/unknown.png'), undefined);
+  });
+});

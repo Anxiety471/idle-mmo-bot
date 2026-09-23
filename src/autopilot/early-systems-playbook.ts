@@ -699,7 +699,7 @@ function stageMeta(stage: EarlyStageId, baitOwned = false): {
         deprioritized: ['gather_oak', 'gather_yew', 'mine_coal'],
         interrupt: ['hunt_rabbits', 'hunt_battle'],
         hint:
-          `EARLY PLAYBOOK stage hunt_rabbits: hunt and battle until ~${HUNT_MIN} successes. Ensure Cooked Cod via FOOD Add. Respect huntFoundCap (early combat may pause hunting until enemies decay).`,
+          `EARLY PLAYBOOK stage hunt_rabbits: hunt and battle any ready enemy until ~${HUNT_MIN} successes (rabbitHunts counter — prefer Rabbit when present). Ensure Cooked Cod via FOOD Add. Respect huntFoundCap.`,
       };
     case 'manage_pets':
       // Legacy stage id kept for logging only — not in STAGE_ORDER; pets inject async instead.

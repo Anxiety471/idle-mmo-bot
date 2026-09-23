@@ -86,7 +86,7 @@ Key `.env` variables (see `.env.example` for full list):
 | `CHARACTER_ROSTER` | _(unset)_ | Comma-separated alts to rotate when gatherBusy (same account); unset = single-character |
 | `ACCOUNT_SLUG` | from `STORAGE_STATE` | Override account folder (`storage-state.json` → `idlebocchi`) |
 | `HEADLESS` | `true` | Set `false` when debugging UI |
-| `POLL_MS` | `5000` | Loop poll interval |
+| `POLL_MS` | `5000` | Loop poll interval; see §4.12 when Cloudflare is hot (429 / blank Quick-check emojis) |
 | `BUY_BAIT` | `false` | Auto-buy Cheap Bait (gold only); or use `--buy-bait` on skill CLI |
 | `FORCE_INTERRUPT` | `false` | Click **Start anyway** on replace dialog; or `--interrupt` |
 | `JEV_API_TOKEN` | _(unset)_ | Without it, autopilot uses ProgressiveStubJev |
@@ -331,6 +331,22 @@ The live `/inventory` UI is mostly **icon + quantity badge** with item names in 
 `sanitizeInventoryCounts` drops page-chrome false positives (e.g. `Code of Conduct` → `Cod`). **`baitOwned` sticky trust (§4.7) remains** as a safety net when scrape still misses Cheap Bait.
 
 **What overseers should watch:** `decisions.jsonl` with empty `inventory: {}` while `market_sell_half` / `cook_cod` should fire — check `/inventory` DOM changes before weakening sell floors. Unit tests: `src/snapshot/inventory-scrape.test.ts`.
+
+### 4.12 Hunt / verify rate-limit hygiene (`src/deterministic/poll-interval.ts`, `human-check.ts`, `combat.ts`)
+
+Rapid sub-second polling on `/combat/battle` (hunt metrics scrape, `decideHuntStop`, `waitForEnemies`, captcha **Verify**) triggers Cloudflare **429** responses and blank Quick-check emoji grids.
+
+**Rules (implemented):**
+
+| Mechanism | Behavior |
+|-----------|----------|
+| **`effectivePollMs`** | Floors all hunt/combat sleeps to **≥ 2000 ms** (default config **5000**) — no 500 ms / sub-second hammering |
+| **Verify budget** | **1** captcha solve attempt per `runCombatRound`; further attempts return `blocked:verify` with **30s+** backoff (`verifyBackoffMs`) |
+| **Start Hunt** | Single attempt per cycle — no 3× rapid Start Hunt + Verify loop |
+| **Blank Quick check** | When emoji choice buttons render empty, **do not** fallback-click — wait for next slow cycle |
+| **DOM scrape** | `readHuntState` skips parallel DOM metric scrape when text metrics already parsed; `scrapeHuntMetricsFromDom` reads labels sequentially |
+
+**Overseer tuning when CF is hot:** set `POLL_MS` to **20000–30000** (20–30 s) for hunt_rabbits / hunt_battle cycles until Quick-check emojis render reliably again. Watch for `blocked:verify` or `failed:hunt_not_started` with long `backoffMs` in `decisions.jsonl` — that is expected backoff, not a stuck loop.
 
 ---
 

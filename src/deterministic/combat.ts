@@ -2,6 +2,13 @@ import type { Locator, Page } from 'playwright';
 import type { AppConfig } from '../config.js';
 import type { BattleState, CombatStepResult, EnemyInfo, HuntState, Stance } from '../types.js';
 import { navigateTo } from '../browser.js';
+import { decodeIdleMmoMetaSlug } from '../snapshot/inventory-scrape.js';
+import {
+  attemptHumanVerify,
+  isHumanCheckPresent,
+  solveHumanCaptchaIfPresent,
+} from './human-check.js';
+import { effectivePollMs, type VerifyBudget } from './poll-interval.js';
 
 /**
  * Deterministic combat click-path helpers.
@@ -21,7 +28,10 @@ const COMBAT_UI_SETTLE_MS = 10_000;
 const ENEMY_CARD_HEIGHT_CLASSES = ['h-24', 'h-20', 'h-28', 'h-32'];
 
 const ACTION_BUTTON_PATTERN =
-  /^(Start Hunt|Stop|Battle|Run Away|Hunt More|Close|Start anyway|Create|Invites|Talk|Overview|Turn In)$/i;
+  /^(Start Hunt|Stop|Cancel Hunt|Battle|Run Away|Hunt More|Close|Start anyway|Create|Invites|Talk|Overview|Turn In)$/i;
+
+/** Live UI may label the hunt-stop control "Stop" or "Cancel Hunt". */
+const HUNT_STOP_BUTTON_NAMES = ['Stop', 'Cancel Hunt'];
 
 /** Nav/chrome labels that are not enemy cards. */
 const NAV_CHROME_PATTERN =
@@ -30,6 +40,22 @@ const NAV_CHROME_PATTERN =
 const PURE_NUMERIC_PATTERN = /^\d+$/;
 const PLAYER_PROFILE_PATTERN = /\bTotal\s*Lv\.?\s*\d+/i;
 const ENEMIES_NEARBY_LABEL_PATTERN = /^ENEMIES\s+NEARBY/i;
+const CURRENT_ACTION_MARKER = 'CURRENT ACTION';
+/** Live mobile Battle UI uses "Hunting" header (not always "CURRENT ACTION"). */
+const HUNTING_PANEL_MARKERS = ['Hunting', CURRENT_ACTION_MARKER];
+const HUNT_METRICS_END_MARKERS = ['ENEMIES NEARBY', 'Power Hunt', 'Character', 'Skills', 'Pets', 'Menu'];
+const ENEMY_TILE_SKIP_PATTERN =
+  /^(Power Hunt|Hunt More|Stop|Cancel Hunt|Battle|Stats|Back|Menu|Character|Skills|Pets)$/i;
+
+/** Map CDN/meta image slugs to enemy display names (icon-only tiles). */
+const ENEMY_SLUG_MAP: Record<string, string> = {
+  rabbit: 'Rabbit',
+  goblin: 'Goblin',
+  duck: 'Duck',
+  'crown-goblin': 'Crown Goblin',
+  crown_goblin: 'Crown Goblin',
+  crown: 'Crown Goblin',
+};
 
 async function pageText(page: Page): Promise<string> {
   return page.locator('body').innerText();
@@ -49,12 +75,76 @@ async function isButtonVisible(page: Page, name: string): Promise<boolean> {
   return btn.first().isVisible();
 }
 
+async function isHuntStopVisible(page: Page): Promise<boolean> {
+  for (const name of HUNT_STOP_BUTTON_NAMES) {
+    if (await isButtonVisible(page, name)) return true;
+  }
+  return false;
+}
+
+async function clickHuntStopButton(page: Page): Promise<boolean> {
+  for (const name of HUNT_STOP_BUTTON_NAMES) {
+    const btn = page.getByRole('button', { name, exact: true });
+    if (await btn.count() === 0) continue;
+    await btn.first().click();
+    return true;
+  }
+  return false;
+}
+
+/** Prefer Hunting / Battle panel text over full body to reduce nav noise. */
+async function readCombatPanelText(page: Page, cachedBodyText?: string): Promise<string> {
+  for (const marker of HUNTING_PANEL_MARKERS) {
+    const heading = page.getByText(marker, { exact: true }).first();
+    if (await heading.count() === 0) continue;
+    const container = heading.locator(
+      'xpath=ancestor::*[self::section or self::div][position()<=5]',
+    );
+    if (await container.count() > 0) {
+      const text = await safeInnerText(container.first());
+      if (text.includes('Total Enemies Found') || text.includes('Enemies Remaining')) {
+        return text;
+      }
+    }
+  }
+
+  const main = page.locator('main');
+  if (await main.count() > 0) {
+    const text = await safeInnerText(main.first());
+    if (text) return text;
+  }
+
+  return cachedBodyText ?? await pageText(page);
+}
+
+type VerifyGuardResult = 'ok' | 'blocked' | 'still_present';
+
+async function solveVerifyOrBlock(
+  page: Page,
+  pollMs: number,
+  budget?: VerifyBudget,
+): Promise<VerifyGuardResult> {
+  if (budget) {
+    const result = await attemptHumanVerify(page, budget, pollMs);
+    if (result === 'blocked') return 'blocked';
+    if (result === 'failed' || (result !== 'not_present' && await isHumanCheckPresent(page))) {
+      return 'still_present';
+    }
+    return 'ok';
+  }
+
+  await solveHumanCaptchaIfPresent(page, { pollMs, maxAttempts: 1 });
+  if (await isHumanCheckPresent(page)) return 'still_present';
+  return 'ok';
+}
+
 /** Wait for any primary combat control after navigation. */
 async function waitForCombatUiSettled(page: Page, timeoutMs = COMBAT_UI_SETTLE_MS): Promise<void> {
   const controls = page
     .getByRole('button', { name: 'Start Hunt', exact: true })
     .or(page.getByRole('button', { name: 'Hunt More', exact: true }))
     .or(page.getByRole('button', { name: 'Stop', exact: true }))
+    .or(page.getByRole('button', { name: 'Cancel Hunt', exact: true }))
     .or(page.getByRole('button', { name: 'Battle', exact: true }));
 
   await controls
@@ -262,6 +352,62 @@ async function collectEnemyCardButtons(page: Page): Promise<Locator[]> {
   return [];
 }
 
+/** Post-Stop ENEMIES NEARBY icon tiles (image + quantity badge, no text names). */
+async function collectEnemyIconTiles(page: Page): Promise<Locator[]> {
+  const widget = await getEnemiesNearbyWidget(page);
+  if (!widget) return [];
+
+  const buttons = widget.getByRole('button');
+  const count = await buttons.count();
+  const tiles: Locator[] = [];
+
+  for (let i = 0; i < count; i++) {
+    const btn = buttons.nth(i);
+    if (!(await btn.isVisible().catch(() => false))) continue;
+    if ((await btn.locator('img').count()) === 0) continue;
+
+    const text = await safeInnerText(btn);
+    const firstLine = text.split('\n')[0]?.trim() ?? '';
+    if (ENEMY_TILE_SKIP_PATTERN.test(firstLine)) continue;
+    if (ACTION_BUTTON_PATTERN.test(firstLine)) continue;
+
+    tiles.push(btn);
+  }
+
+  return tiles;
+}
+
+export function enemyNameFromImageSrc(src: string): string | undefined {
+  const decoded = decodeIdleMmoMetaSlug(src);
+  const rawSlug = (decoded ?? src.split('/').pop()?.replace(/\..*$/, '') ?? '').toLowerCase();
+  const normalized = rawSlug.replace(/[_\s]+/g, '-');
+  const slugs = Object.entries(ENEMY_SLUG_MAP).sort(([a], [b]) => b.length - a.length);
+  for (const [slug, name] of slugs) {
+    if (normalized.includes(slug) || rawSlug.includes(slug.replace(/-/g, ''))) {
+      return name;
+    }
+  }
+  return undefined;
+}
+
+async function enemyNameFromTile(btn: Locator): Promise<string> {
+  const img = btn.locator('img').first();
+  if (await img.count() > 0) {
+    const alt = (await img.getAttribute('alt'))?.trim();
+    if (alt && !PURE_NUMERIC_PATTERN.test(alt)) return alt;
+    const src = await img.getAttribute('src');
+    if (src) {
+      const fromSrc = enemyNameFromImageSrc(src);
+      if (fromSrc) return fromSrc;
+    }
+  }
+  const aria = (await btn.getAttribute('aria-label'))?.trim();
+  if (aria) return aria;
+  const title = (await btn.getAttribute('title'))?.trim();
+  if (title) return title;
+  return 'Enemy';
+}
+
 async function enemyInfosFromButtons(buttons: Locator[]): Promise<EnemyInfo[]> {
   const enemies: EnemyInfo[] = [];
   for (let i = 0; i < buttons.length; i++) {
@@ -271,6 +417,32 @@ async function enemyInfosFromButtons(buttons: Locator[]): Promise<EnemyInfo[]> {
     enemies.push({ name, index: enemies.length });
   }
   return enemies;
+}
+
+/** Text cards or icon tiles from ENEMIES NEARBY (mixed enemy types). */
+async function collectEnemyTiles(page: Page): Promise<{ buttons: Locator[]; enemies: EnemyInfo[] }> {
+  const textCards = await collectEnemyCardButtons(page);
+  const textEnemies = await enemyInfosFromButtons(textCards);
+  if (textEnemies.length > 0) {
+    return { buttons: textCards, enemies: textEnemies };
+  }
+
+  const iconTiles = await collectEnemyIconTiles(page);
+  const enemies: EnemyInfo[] = [];
+  for (let i = 0; i < iconTiles.length; i++) {
+    enemies.push({ name: await enemyNameFromTile(iconTiles[i]), index: i });
+  }
+  return { buttons: iconTiles, enemies };
+}
+
+/**
+ * Pick a battle target from a mixed ENEMIES NEARBY list.
+ * Prefer Rabbit when present; otherwise first ready enemy — never block on rabbit-only.
+ */
+export function pickBattleEnemy(enemies: EnemyInfo[]): EnemyInfo | undefined {
+  if (enemies.length === 0) return undefined;
+  const rabbit = enemies.find((e) => /\brabbit\b/i.test(e.name));
+  return rabbit ?? enemies[0];
 }
 
 async function isEnemyDetailPanelOpen(page: Page): Promise<boolean> {
@@ -444,13 +616,15 @@ export async function openEnemiesNearbyPanel(page: Page): Promise<CombatStepResu
       return 'enemy_selected';
     }
 
-    const countBtn = await findEnemiesNearbyCountButton(page);
-    if (!countBtn) {
+    const { buttons, enemies } = await collectEnemyTiles(page);
+    const picked = pickBattleEnemy(enemies);
+    const targetBtn = picked ? buttons[picked.index] : await findEnemiesNearbyCountButton(page);
+    if (!targetBtn) {
       return 'failed';
     }
 
     await dismissBlockingOverlays(page);
-    await countBtn.click({ force: true, timeout: 5000 }).catch(() => undefined);
+    await targetBtn.click({ force: true, timeout: 5000 }).catch(() => undefined);
     await page
       .getByText(/^STANCE$/i)
       .first()
@@ -474,9 +648,99 @@ export async function openEnemiesNearbyPanel(page: Page): Promise<CombatStepResu
  */
 export async function hasEnemySelectionReady(page: Page): Promise<boolean> {
   if (await isEnemyDetailPanelOpen(page)) return true;
-  if (await findEnemiesNearbyCountButton(page)) return true;
-  const cards = await collectEnemyCardButtons(page);
-  return cards.length > 0;
+  const { enemies } = await collectEnemyTiles(page);
+  return enemies.length > 0;
+}
+
+/**
+ * Post-Stop enemy selection only. The ENEMIES NEARBY count badge (zone pool, e.g. 40)
+ * stays visible during active hunts — must not bypass metrics wait.
+ */
+export async function hasPostHuntEnemySelectionReady(page: Page): Promise<boolean> {
+  if (await isHuntStopVisible(page)) return false;
+  return hasEnemySelectionReady(page);
+}
+
+/** Pure helper: idle Battle copy from live desktop/mobile screenshots. */
+export function isIdleBattleText(text: string): boolean {
+  if (text.includes('Total Enemies Found')) return false;
+  if (/Start a hunt to find nearby enemies/i.test(text)) return true;
+  return text.includes('Start Hunt') && !text.includes('Hunting');
+}
+
+/** Idle Battle screen: Start Hunt prompt, no active hunt metrics or Stop. */
+export async function isIdleBattleScreen(page: Page): Promise<boolean> {
+  if (await isHuntStopVisible(page)) return false;
+  return isIdleBattleText(await pageText(page));
+}
+
+/** Active hunt: Stop visible plus Hunting header or hunt metrics on screen. */
+export async function isHuntActivelyRunning(page: Page): Promise<boolean> {
+  if (!(await isHuntStopVisible(page))) return false;
+  const text = await pageText(page);
+  return text.includes('Hunting') || text.includes('Total Enemies Found');
+}
+
+async function clickStartHuntWithVerify(
+  page: Page,
+  allowInterrupt: boolean,
+  pollMs: number,
+  verifyBudget?: VerifyBudget,
+): Promise<CombatStepResult> {
+  const verify = await solveVerifyOrBlock(page, pollMs, verifyBudget);
+  if (verify === 'blocked' || verify === 'still_present') {
+    return 'failed';
+  }
+
+  await page.getByRole('button', { name: 'Start Hunt', exact: true }).first().click();
+  const dialog = await handleReplaceDialog(page, allowInterrupt);
+  if (dialog === 'no_action') return 'no_action';
+  if (dialog === 'failed') return 'failed';
+
+  await page.waitForTimeout(effectivePollMs(pollMs));
+  const postStartVerify = await solveVerifyOrBlock(page, pollMs, verifyBudget);
+  if (postStartVerify === 'blocked' || postStartVerify === 'still_present') {
+    return 'failed';
+  }
+
+  if (await isHuntActivelyRunning(page)) {
+    return 'hunt_started';
+  }
+  if (await isHuntStopVisible(page)) {
+    return 'hunt_started';
+  }
+  if (!(await isIdleBattleScreen(page))) {
+    return 'hunt_started';
+  }
+
+  if (await isHumanCheckPresent(page)) return 'failed';
+  return 'failed';
+}
+
+async function clickHuntMoreWithVerify(
+  page: Page,
+  allowInterrupt: boolean,
+  pollMs: number,
+  verifyBudget?: VerifyBudget,
+): Promise<CombatStepResult> {
+  const verify = await solveVerifyOrBlock(page, pollMs, verifyBudget);
+  if (verify === 'blocked' || verify === 'still_present') {
+    return 'failed';
+  }
+
+  await page.getByRole('button', { name: 'Hunt More', exact: true }).first().click();
+  const dialog = await handleReplaceDialog(page, allowInterrupt);
+  if (dialog === 'no_action') return 'no_action';
+  if (dialog === 'failed') return 'failed';
+  await page.waitForTimeout(effectivePollMs(pollMs));
+  const postClickVerify = await solveVerifyOrBlock(page, pollMs, verifyBudget);
+  if (postClickVerify === 'blocked' || postClickVerify === 'still_present') {
+    return 'failed';
+  }
+  if (await isHuntActivelyRunning(page) || await isHuntStopVisible(page)) {
+    return 'hunt_started';
+  }
+  return 'failed';
 }
 
 /**
@@ -487,31 +751,33 @@ export async function ensureHuntActive(
   page: Page,
   config: AppConfig,
   allowInterrupt = false,
+  verifyBudget?: VerifyBudget,
 ): Promise<CombatStepResult> {
+  const pollMs = effectivePollMs(config.pollMs);
   await navigateTo(page, config, COMBAT_PATH);
   await waitForCombatUiSettled(page);
-
-  if (await isButtonVisible(page, 'Start Hunt')) {
-    await page.getByRole('button', { name: 'Start Hunt', exact: true }).first().click();
-    const dialog = await handleReplaceDialog(page, allowInterrupt);
-    if (dialog === 'no_action') return 'no_action';
-    if (dialog === 'failed') return 'failed';
-    return 'hunt_started';
+  const initialVerify = await solveVerifyOrBlock(page, pollMs, verifyBudget);
+  if (initialVerify === 'blocked' || initialVerify === 'still_present') {
+    return 'failed';
   }
 
-  if (await isButtonVisible(page, 'Hunt More')) {
-    await page.getByRole('button', { name: 'Hunt More', exact: true }).first().click();
-    const dialog = await handleReplaceDialog(page, allowInterrupt);
-    if (dialog === 'no_action') return 'no_action';
-    if (dialog === 'failed') return 'failed';
-    return 'hunt_started';
-  }
-
-  if (await isButtonVisible(page, 'Stop')) {
+  if (await isHuntActivelyRunning(page)) {
     return 'hunt_already_active';
   }
 
-  if (await hasEnemySelectionReady(page)) {
+  if (await isHuntStopVisible(page) && !(await isIdleBattleScreen(page))) {
+    return 'hunt_already_active';
+  }
+
+  if (await isButtonVisible(page, 'Start Hunt')) {
+    return clickStartHuntWithVerify(page, allowInterrupt, pollMs, verifyBudget);
+  }
+
+  if (await isButtonVisible(page, 'Hunt More')) {
+    return clickHuntMoreWithVerify(page, allowInterrupt, pollMs, verifyBudget);
+  }
+
+  if (await hasEnemySelectionReady(page) && !(await isIdleBattleScreen(page))) {
     return 'enemy_select_ready';
   }
 
@@ -536,30 +802,168 @@ export function hasHuntProgress(state: HuntState): boolean {
   );
 }
 
+/** Slice active Hunting panel; excludes ENEMIES NEARBY post-stop grid counts. */
+export function huntingMetricsSection(pageText: string): string {
+  for (const marker of HUNTING_PANEL_MARKERS) {
+    if (!pageText.includes(marker)) continue;
+    const start = pageText.indexOf(marker);
+    let end = start + 1200;
+    for (const endMarker of HUNT_METRICS_END_MARKERS) {
+      const idx = pageText.indexOf(endMarker, start + marker.length);
+      if (idx > start) end = Math.min(end, idx);
+    }
+    return pageText.slice(start, end);
+  }
+  return '';
+}
+
+function parseMetricNearLabel(text: string, labels: string[]): number | undefined {
+  for (const label of labels) {
+    const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const inline = text.match(
+      new RegExp(`${escaped}\\s*[:\\-]?\\s*(\\d+(?:\\.\\d+)?)`, 'i'),
+    );
+    if (inline?.[1]) return Number.parseInt(inline[1], 10);
+    const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+    const idx = lines.findIndex(
+      (l) =>
+        l.toLowerCase() === label.toLowerCase() ||
+        l.toLowerCase().startsWith(`${label.toLowerCase()} `),
+    );
+    if (idx >= 0) {
+      const sameLine = lines[idx].slice(label.length).match(/(\d+(?:\.\d+)?)/);
+      if (sameLine?.[1]) return Number.parseInt(sameLine[1], 10);
+      for (let j = idx + 1; j < Math.min(idx + 4, lines.length); j++) {
+        const m = lines[j].match(/^(\d+(?:\.\d+)?)$/);
+        if (m?.[1]) return Number.parseInt(m[1], 10);
+      }
+    }
+  }
+  return undefined;
+}
+
 export function parseHuntMetrics(text: string): {
   totalEnemiesFound?: number;
   enemiesRemaining?: number;
   bonusEnemies?: number;
 } {
-  const totalMatch =
-    text.match(/Total Enemies Found[^\d]*(\d+)/i) ??
-    text.match(/Enemies Found[^\d]*(\d+)/i);
-  const remainingMatch = text.match(/Enemies Remaining[^\d]*(\d+)/i);
-  const bonusMatch = text.match(/Bonus Enemies[^\d]*(\d+)/i);
+  const section = huntingMetricsSection(text);
+  const sources = section ? [section, text] : [text];
 
+  let totalEnemiesFound: number | undefined;
+  let enemiesRemaining: number | undefined;
+  let bonusEnemies: number | undefined;
+
+  for (const source of sources) {
+    totalEnemiesFound ??= parseMetricNearLabel(source, [
+      'Total Enemies Found',
+      'Enemies Found',
+      'Enemies Hunted',
+      'Hunted',
+    ]);
+    enemiesRemaining ??= parseMetricNearLabel(source, [
+      'Enemies Remaining',
+      'Remaining Enemies',
+      'Remaining',
+    ]);
+    bonusEnemies ??= parseMetricNearLabel(source, ['Bonus Enemies', 'Bonus']);
+  }
+
+  return { totalEnemiesFound, enemiesRemaining, bonusEnemies };
+}
+
+/** DOM fallback when body.innerText ordering hides hunt metric values. */
+async function scrapeHuntMetricsFromDom(page: Page): Promise<{
+  totalEnemiesFound?: number;
+  enemiesRemaining?: number;
+  bonusEnemies?: number;
+}> {
+  async function readNear(labels: string[]): Promise<number | undefined> {
+    for (const label of labels) {
+      const exact = page.getByText(label, { exact: true }).first();
+      const fuzzy = page.getByText(new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')).first();
+      const labelEl = (await exact.count()) > 0 ? exact : fuzzy;
+      if (await labelEl.count() === 0) continue;
+
+      const line = await safeInnerText(labelEl);
+      const inline = line.match(/:\s*(\d+(?:\.\d+)?)\s*$/);
+      if (inline?.[1]) return Number.parseInt(inline[1], 10);
+
+      // Live UI: label box left, value box right (sibling).
+      const sibling = labelEl.locator('xpath=following-sibling::*[1]');
+      if (await sibling.count() > 0) {
+        const siblingText = await safeInnerText(sibling);
+        const siblingNum = siblingText.match(/^(\d+(?:\.\d+)?)$/);
+        if (siblingNum?.[1]) return Number.parseInt(siblingNum[1], 10);
+      }
+
+      const parent = labelEl.locator('xpath=parent::*');
+      if (await parent.count() > 0) {
+        const lastChild = parent.locator(':scope > *').last();
+        if (await lastChild.count() > 0) {
+          const lastText = await safeInnerText(lastChild);
+          const lastNum = lastText.match(/^(\d+(?:\.\d+)?)$/);
+          if (lastNum?.[1]) return Number.parseInt(lastNum[1], 10);
+        }
+      }
+
+      for (let depth = 1; depth <= 4; depth++) {
+        const container = labelEl.locator(
+          `xpath=ancestor::*[self::div or self::section or self::article][${depth}]`,
+        );
+        if (await container.count() === 0) continue;
+        const parsed = parseMetricNearLabel(await safeInnerText(container), [label]);
+        if (parsed !== undefined) return parsed;
+      }
+    }
+    return undefined;
+  }
+
+  const totalEnemiesFound = await readNear([
+    'Total Enemies Found',
+    'Enemies Found',
+    'Enemies Hunted',
+    'Hunted',
+  ]);
+  const enemiesRemaining = await readNear([
+    'Enemies Remaining',
+    'Remaining Enemies',
+    'Remaining',
+  ]);
+  const bonusEnemies = await readNear(['Bonus Enemies', 'Bonus']);
+
+  return { totalEnemiesFound, enemiesRemaining, bonusEnemies };
+}
+
+function mergeHuntMetrics(
+  primary: ReturnType<typeof parseHuntMetrics>,
+  fallback: ReturnType<typeof parseHuntMetrics>,
+): ReturnType<typeof parseHuntMetrics> {
   return {
-    totalEnemiesFound: totalMatch ? Number.parseInt(totalMatch[1], 10) : undefined,
-    enemiesRemaining: remainingMatch ? Number.parseInt(remainingMatch[1], 10) : undefined,
-    bonusEnemies: bonusMatch ? Number.parseInt(bonusMatch[1], 10) : undefined,
+    totalEnemiesFound: primary.totalEnemiesFound ?? fallback.totalEnemiesFound,
+    enemiesRemaining: primary.enemiesRemaining ?? fallback.enemiesRemaining,
+    bonusEnemies: primary.bonusEnemies ?? fallback.bonusEnemies,
   };
 }
 
 /** Read hunt screen: metrics while hunting (Stop visible) and cards after Stop. */
+function huntMetricsComplete(metrics: ReturnType<typeof parseHuntMetrics>): boolean {
+  return (
+    metrics.totalEnemiesFound !== undefined ||
+    metrics.enemiesRemaining !== undefined ||
+    metrics.bonusEnemies !== undefined
+  );
+}
+
 export async function readHuntState(page: Page): Promise<HuntState> {
   const text = await pageText(page);
-  const cardButtons = await collectEnemyCardButtons(page);
-  const enemies = await enemyInfosFromButtons(cardButtons);
-  const metrics = parseHuntMetrics(text);
+  const panelText = await readCombatPanelText(page, text);
+  const { enemies } = await collectEnemyTiles(page);
+  let metrics = mergeHuntMetrics(parseHuntMetrics(panelText), parseHuntMetrics(text));
+  if (!huntMetricsComplete(metrics)) {
+    const domMetrics = await scrapeHuntMetricsFromDom(page).catch(() => ({}));
+    metrics = mergeHuntMetrics(metrics, domMetrics);
+  }
 
   const defeatedMatch = text.match(/(\d+)\s+defeated/i);
   const defeatedCount = defeatedMatch ? Number.parseInt(defeatedMatch[1], 10) : 0;
@@ -572,17 +976,18 @@ export async function readHuntState(page: Page): Promise<HuntState> {
   };
 }
 
-/** Click Stop on hunt screen and confirm. */
+/** Click Stop / Cancel Hunt on hunt screen and confirm. */
 export async function stopHunt(page: Page): Promise<CombatStepResult> {
-  const stopBtn = page.getByRole('button', { name: 'Stop', exact: true });
-  if (await stopBtn.count() === 0) {
+  if (!(await clickHuntStopButton(page))) {
     return 'no_action';
   }
-  await stopBtn.first().click();
 
-  const confirmStop = page.getByRole('button', { name: 'Stop', exact: true });
-  if (await confirmStop.count() > 1) {
-    await confirmStop.last().click();
+  for (const name of HUNT_STOP_BUTTON_NAMES) {
+    const confirmStop = page.getByRole('button', { name, exact: true });
+    if (await confirmStop.count() > 1) {
+      await confirmStop.last().click();
+      break;
+    }
   }
 
   return 'hunt_stopped';
@@ -718,11 +1123,13 @@ export async function configureAndBattle(
   if (!(await isEnemyDetailPanelOpen(page))) {
     const opened = await openEnemiesNearbyPanel(page);
     if (opened !== 'enemy_selected') {
-      const cardButtons = await collectEnemyCardButtons(page);
-      if (cardButtons.length <= enemyIndex) {
+      const { buttons, enemies } = await collectEnemyTiles(page);
+      const picked = pickBattleEnemy(enemies);
+      const targetIndex = picked?.index ?? enemyIndex;
+      if (buttons.length <= targetIndex) {
         return 'failed';
       }
-      await cardButtons[enemyIndex].click();
+      await buttons[targetIndex].click();
     }
   }
 
@@ -790,11 +1197,15 @@ export async function huntMore(
 export async function waitForEnemies(
   page: Page,
   timeoutMs = 60_000,
+  pollMs?: number,
 ): Promise<HuntState> {
-  const stopBtn = page.getByRole('button', { name: 'Stop', exact: true });
+  const sleepMs = effectivePollMs(pollMs);
+  const huntStop = page.getByRole('button', { name: 'Stop', exact: true }).or(
+    page.getByRole('button', { name: 'Cancel Hunt', exact: true }),
+  );
   const huntMoreBtn = page.getByRole('button', { name: 'Hunt More', exact: true });
 
-  await stopBtn
+  await huntStop
     .or(huntMoreBtn)
     .first()
     .waitFor({ state: 'visible', timeout: timeoutMs })
@@ -808,11 +1219,10 @@ export async function waitForEnemies(
     }
     // ENEMIES NEARBY label is visible during active hunts — only treat selection
     // as ready once Stop is gone (post-hunt) or we already have metrics/cards.
-    const stopVisible = await isButtonVisible(page, 'Stop');
-    if (!stopVisible && (await hasEnemySelectionReady(page))) {
+    if (await hasPostHuntEnemySelectionReady(page)) {
       return state;
     }
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(sleepMs);
   }
 
   return readHuntState(page);
@@ -825,38 +1235,42 @@ export async function waitForEnemies(
 export async function prepareEnemyBattleSelection(
   page: Page,
   timeoutMs = 30_000,
+  pollMs?: number,
 ): Promise<HuntState> {
+  const sleepMs = effectivePollMs(pollMs);
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
+    const state = await readHuntState(page);
+    if (state.enemies.length > 0) {
+      return state;
+    }
+
     if (await isEnemyDetailPanelOpen(page)) {
       const name = await readEnemyNameFromDetailPanel(page);
-      const base = await readHuntState(page);
       if (name) {
-        return { ...base, enemies: [{ name, index: 0 }] };
+        return { ...state, enemies: [{ name, index: 0 }] };
       }
-      return base;
+      return state;
     }
 
     const countBtn = await findEnemiesNearbyCountButton(page);
     if (countBtn) {
       const opened = await openEnemiesNearbyPanel(page);
       if (opened === 'enemy_selected') {
-        const name = await readEnemyNameFromDetailPanel(page);
-        const base = await readHuntState(page);
-        if (name) {
-          return { ...base, enemies: [{ name, index: 0 }] };
+        const refreshed = await readHuntState(page);
+        if (refreshed.enemies.length > 0) {
+          return refreshed;
         }
-        return base;
+        const name = await readEnemyNameFromDetailPanel(page);
+        if (name) {
+          return { ...refreshed, enemies: [{ name, index: 0 }] };
+        }
+        return refreshed;
       }
     }
 
-    const state = await readHuntState(page);
-    if (state.enemies.length > 0) {
-      return state;
-    }
-
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(sleepMs);
   }
 
   return readHuntState(page);
@@ -866,6 +1280,7 @@ export async function prepareEnemyBattleSelection(
 export async function waitForEnemyCards(
   page: Page,
   timeoutMs = 30_000,
+  pollMs?: number,
 ): Promise<HuntState> {
-  return prepareEnemyBattleSelection(page, timeoutMs);
+  return prepareEnemyBattleSelection(page, timeoutMs, pollMs);
 }

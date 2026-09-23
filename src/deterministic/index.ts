@@ -33,8 +33,15 @@ export {
   openEnemiesNearbyPanel,
   prepareEnemyBattleSelection,
   parseHuntMetrics,
+  huntingMetricsSection,
   hasHuntProgress,
   hasEnemySelectionReady,
+  hasPostHuntEnemySelectionReady,
+  pickBattleEnemy,
+  enemyNameFromImageSrc,
+  isIdleBattleScreen,
+  isIdleBattleText,
+  isHuntActivelyRunning,
 } from './combat.js';
 
 export {
@@ -81,6 +88,27 @@ export {
 } from './sell-junk-for-gold.js';
 export { trySmeltCoal } from './craft.js';
 export { huntFoundCap, shouldHardStopHunt } from './hunt-cap.js';
+export {
+  isHumanCheckPresent,
+  solveHumanCaptchaIfPresent,
+  attemptHumanVerify,
+  parseEmojiPromptTarget,
+  emojiForPromptName,
+  areEmojiChoicesBlank,
+  type HumanVerifyResult,
+  type SolveHumanCaptchaOptions,
+} from './human-check.js';
+export {
+  MIN_POLL_MS,
+  DEFAULT_POLL_MS,
+  MAX_VERIFY_ATTEMPTS_PER_CYCLE,
+  effectivePollMs,
+  verifyBackoffMs,
+  createVerifyBudget,
+  canAttemptVerify,
+  recordVerifyAttempt,
+  type VerifyBudget,
+} from './poll-interval.js';
 export { selectBattleFood } from './combat.js';
 export { tryCookCod } from './cook.js';
 export { equipPet, maintainPets, managePets } from './pets.js';

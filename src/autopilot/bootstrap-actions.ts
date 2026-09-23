@@ -7,9 +7,11 @@ import {
   readGatherState,
   readSkillState,
   ensureHuntActive,
+  isIdleBattleScreen,
   waitForEnemies,
   hasHuntProgress,
-  hasEnemySelectionReady,
+  hasPostHuntEnemySelectionReady,
+  pickBattleEnemy,
   prepareEnemyBattleSelection,
   readHuntState,
   stopHunt,
@@ -50,6 +52,15 @@ import {
   shouldPreferBaitRestock,
 } from './early-systems-playbook.js';
 import { pollUntilHuntStop } from '../jev/hunt-cap.js';
+import {
+  attemptHumanVerify,
+  isHumanCheckPresent,
+} from '../deterministic/human-check.js';
+import {
+  createVerifyBudget,
+  effectivePollMs,
+  verifyBackoffMs,
+} from '../deterministic/poll-interval.js';
 
 const HEARTH_QUEST = 'Wood for the Hearth';
 const KILL_QUEST_PATTERN = /goblin|duck|rabbit|menace|fortune|whisper/i;
@@ -94,49 +105,89 @@ function gatherIdle(ctx: ActionAllowContext): boolean {
   return !ctx.snapshot.flags.gatherBusy && !ctx.snapshot.flags.inBattle;
 }
 
-async function runCombatRound(ctx: ActionExecuteContext): Promise<string> {
+export interface CombatRoundResult {
+  outcome: string;
+  backoffMs?: number;
+}
+
+function combatRoundOutcome(outcome: string, config: AppConfig): CombatRoundResult {
+  if (outcome === 'blocked:verify' || outcome === 'failed:hunt_not_started') {
+    return { outcome, backoffMs: verifyBackoffMs(config.pollMs) };
+  }
+  return { outcome };
+}
+
+async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundResult> {
   const { page, config, jev, forceInterrupt } = ctx;
-  const huntBackoffMs = Math.max(config.pollMs * 6, 30_000);
+  const pollMs = effectivePollMs(config.pollMs);
+  const huntBackoffMs = verifyBackoffMs(config.pollMs);
+  const verifyBudget = createVerifyBudget();
   const gatherSnapshot = await readGatherState(page, config);
   const allowInterrupt = forceInterrupt || (await jev.shouldInterruptGather(gatherSnapshot));
-  const huntResult = await ensureHuntActive(page, config, allowInterrupt);
+
+  const preVerify = await attemptHumanVerify(page, verifyBudget, pollMs);
+  if (preVerify === 'blocked') {
+    return combatRoundOutcome('blocked:verify', config);
+  }
+
+  const huntResult = await ensureHuntActive(page, config, allowInterrupt, verifyBudget);
 
   if (huntResult === 'no_action') {
     await sleep(huntBackoffMs);
-    return `blocked:${huntResult}`;
+    return combatRoundOutcome(`blocked:${huntResult}`, config);
   }
-  if (huntResult === 'failed') return `failed:${huntResult}`;
+  if (huntResult === 'failed') {
+    if (await isHumanCheckPresent(page)) {
+      return combatRoundOutcome('blocked:verify', config);
+    }
+    if (await isIdleBattleScreen(page)) {
+      return combatRoundOutcome('failed:hunt_not_started', config);
+    }
+    return combatRoundOutcome(`failed:${huntResult}`, config);
+  }
 
   let huntState: HuntState;
   if (huntResult === 'enemy_select_ready') {
     huntState = await readHuntState(page);
-  } else {
-    const metricsDeadline = Date.now() + Math.max(config.pollMs * 30, 60_000);
-    let afterWait = await waitForEnemies(page);
+  } else if (huntResult === 'hunt_started' || huntResult === 'hunt_already_active') {
+    if (await isIdleBattleScreen(page)) {
+      if (await isHumanCheckPresent(page)) {
+        return combatRoundOutcome('blocked:verify', config);
+      }
+      return combatRoundOutcome('failed:hunt_not_started', config);
+    }
+    const metricsDeadline = Date.now() + Math.max(pollMs * 30, 60_000);
+    let afterWait = await waitForEnemies(page, 60_000, pollMs);
     while (
       !hasHuntProgress(afterWait) &&
-      !(await hasEnemySelectionReady(page)) &&
+      !(await hasPostHuntEnemySelectionReady(page)) &&
       Date.now() < metricsDeadline
     ) {
-      await sleep(config.pollMs);
+      await sleep(pollMs);
       afterWait = await waitForEnemies(
         page,
         Math.min(metricsDeadline - Date.now(), 15_000),
+        pollMs,
       );
     }
-    if (!hasHuntProgress(afterWait) && !(await hasEnemySelectionReady(page))) {
-      return 'hunt_metrics_pending';
+    if (!hasHuntProgress(afterWait) && !(await hasPostHuntEnemySelectionReady(page))) {
+      return combatRoundOutcome('hunt_metrics_pending', config);
     }
     huntState = await pollUntilHuntStop(page, config, jev, afterWait, {
       combatLevel: ctx.snapshot.combatLevel,
       totalLevel: ctx.snapshot.totalLevel,
     });
     const stopResult = await stopHunt(page);
-    huntState = await prepareEnemyBattleSelection(page);
-    if (huntState.enemies.length === 0) return `stop:${stopResult}:no_enemies`;
+    huntState = await prepareEnemyBattleSelection(page, 30_000, pollMs);
+    if (huntState.enemies.length === 0) {
+      return combatRoundOutcome(`stop:${stopResult}:no_enemies`, config);
+    }
+  } else {
+    return combatRoundOutcome(`failed:unexpected_hunt_state:${huntResult}`, config);
   }
 
-  const enemy = huntState.enemies[0];
+  const enemy = pickBattleEnemy(huntState.enemies);
+  if (!enemy) return combatRoundOutcome('stop:no_enemies', config);
   const maxEnemies = await jev.chooseMaxEnemies(enemy);
   const stance = await jev.chooseStance(enemy);
   const battleResult = await configureAndBattle(page, enemy.index, maxEnemies, stance);
@@ -145,12 +196,29 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<string> {
     const battleState = await readBattleState(page);
     if (!battleState.inBattle) break;
     if (await jev.shouldFlee(battleState)) {
-      return `battle:${battleResult}:flee:${await runAway(page)}`;
+      return combatRoundOutcome(
+        `battle:${battleResult}:flee:${await runAway(page)}`,
+        config,
+      );
     }
-    await sleep(config.pollMs);
+    await sleep(pollMs);
   }
 
-  return `battle:${battleResult}:huntMore:${await huntMore(page, allowInterrupt)}`;
+  return combatRoundOutcome(
+    `battle:${battleResult}:huntMore:${await huntMore(page, allowInterrupt)}`,
+    config,
+  );
+}
+
+function combatExecuteResult(
+  action: string,
+  result: CombatRoundResult,
+): { action: string; outcome: string; backoffMs?: number } {
+  return {
+    action,
+    outcome: result.outcome,
+    ...(result.backoffMs !== undefined ? { backoffMs: result.backoffMs } : {}),
+  };
 }
 
 async function questTurnIn(
@@ -468,10 +536,7 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
         Math.max(5, (ctx.snapshot.totalLevel ?? 10) * 0.2);
       return ctx.snapshot.flags.sessionValid && (hasKillQuest(ctx) || combatLagging);
     },
-    execute: async (ctx) => ({
-      action: 'hunt_battle',
-      outcome: await runCombatRound(ctx),
-    }),
+    execute: async (ctx) => combatExecuteResult('hunt_battle', await runCombatRound(ctx)),
   },
   gatherAction('gather_oak', 'Woodcut Oak Logs for quest mats and woodcutting XP', 'woodcutting', 'Oak Log', 25),
   gatherAction('gather_yew', 'Woodcut Yew Logs for higher woodcutting XP', 'woodcutting', 'Yew Log', 35),
@@ -649,7 +714,7 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
   {
     id: 'hunt_rabbits',
     description:
-      'Hunt and battle Rabbits using pre-battle Cooked Cod (FOOD Add). Respects huntFoundCap.',
+      'Hunt and battle any ready enemy (prefer Rabbit) using pre-battle Cooked Cod (FOOD Add). Respects huntFoundCap.',
     bootstrap: true,
     priority: 12,
     tags: ['combat', 'playbook'],
@@ -663,10 +728,7 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
         playbook.stage === 'complete';
       return ctx.snapshot.flags.sessionValid && stageOk;
     },
-    execute: async (ctx) => ({
-      action: 'hunt_rabbits',
-      outcome: await runCombatRound(ctx),
-    }),
+    execute: async (ctx) => combatExecuteResult('hunt_rabbits', await runCombatRound(ctx)),
   },
   {
     id: 'manage_pets',

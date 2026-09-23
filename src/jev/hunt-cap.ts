@@ -2,6 +2,7 @@ import type { Page } from 'playwright';
 import type { AppConfig } from '../config.js';
 import type { HuntState } from '../types.js';
 import { readHuntState } from '../deterministic/combat.js';
+import { effectivePollMs } from '../deterministic/poll-interval.js';
 import type { JevAdvisor } from './types.js';
 
 /** Effective combat level for cap scaling (fallback when combat is 0/missing). */
@@ -57,7 +58,10 @@ export async function pollUntilHuntStop(
   levels: HuntLevelContext = {},
 ): Promise<HuntState> {
   const cap = huntFoundCap(levels.combatLevel, levels.totalLevel);
+  const pollMs = effectivePollMs(config.pollMs);
   let huntState = withHuntLevels(initialState, levels.combatLevel, levels.totalLevel);
+  const maxZeroFoundPolls = Math.max(40, Math.ceil(120_000 / pollMs));
+  let zeroFoundPolls = 0;
 
   while (true) {
     const found = huntState.totalEnemiesFound ?? 0;
@@ -68,7 +72,14 @@ export async function pollUntilHuntStop(
     if (await jev.decideHuntStop(huntState)) {
       break;
     }
-    await sleep(config.pollMs);
+    zeroFoundPolls = found === 0 ? zeroFoundPolls + 1 : 0;
+    if (zeroFoundPolls >= maxZeroFoundPolls) {
+      console.log(
+        `[combat] hunt metrics still 0 after ${zeroFoundPolls} polls — stopping poll loop (scrape or hunt may be stuck)`,
+      );
+      break;
+    }
+    await sleep(pollMs);
     huntState = withHuntLevels(await readHuntState(page), levels.combatLevel, levels.totalLevel);
   }
 
