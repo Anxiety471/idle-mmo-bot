@@ -33,8 +33,10 @@ export {
   openEnemiesNearbyPanel,
   prepareEnemyBattleSelection,
   parseHuntMetrics,
+  huntingMetricsSection,
   hasHuntProgress,
   hasEnemySelectionReady,
+  hasPostHuntEnemySelectionReady,
 } from './combat.js';
 
 export {

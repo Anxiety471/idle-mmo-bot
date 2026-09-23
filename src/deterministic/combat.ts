@@ -30,6 +30,7 @@ const NAV_CHROME_PATTERN =
 const PURE_NUMERIC_PATTERN = /^\d+$/;
 const PLAYER_PROFILE_PATTERN = /\bTotal\s*Lv\.?\s*\d+/i;
 const ENEMIES_NEARBY_LABEL_PATTERN = /^ENEMIES\s+NEARBY/i;
+const CURRENT_ACTION_MARKER = 'CURRENT ACTION';
 
 async function pageText(page: Page): Promise<string> {
   return page.locator('body').innerText();
@@ -480,6 +481,15 @@ export async function hasEnemySelectionReady(page: Page): Promise<boolean> {
 }
 
 /**
+ * Post-Stop enemy selection only. The ENEMIES NEARBY count badge (zone pool, e.g. 40)
+ * stays visible during active hunts — must not bypass metrics wait.
+ */
+export async function hasPostHuntEnemySelectionReady(page: Page): Promise<boolean> {
+  if (await isButtonVisible(page, 'Stop')) return false;
+  return hasEnemySelectionReady(page);
+}
+
+/**
  * Ensure combat is in a hunt-ready state. Handles fresh Start Hunt, post-hunt Hunt More,
  * active hunts (Stop visible), and leftover enemy-select screens.
  */
@@ -536,21 +546,97 @@ export function hasHuntProgress(state: HuntState): boolean {
   );
 }
 
+/** Slice CURRENT ACTION hunt panel; excludes ENEMIES NEARBY zone badge counts. */
+export function huntingMetricsSection(pageText: string): string {
+  if (!pageText.includes(CURRENT_ACTION_MARKER)) return '';
+  const start = pageText.indexOf(CURRENT_ACTION_MARKER);
+  const nearbyIdx = pageText.indexOf('ENEMIES NEARBY', start);
+  const end = nearbyIdx > start ? nearbyIdx : start + 900;
+  return pageText.slice(start, end);
+}
+
+function parseMetricNearLabel(text: string, labels: string[]): number | undefined {
+  for (const label of labels) {
+    const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const inline = text.match(new RegExp(`${escaped}\\s*[:\\-]?\\s*(\\d+)`, 'i'));
+    if (inline?.[1]) return Number.parseInt(inline[1], 10);
+    const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+    const idx = lines.findIndex((l) => l.toLowerCase() === label.toLowerCase());
+    if (idx >= 0) {
+      for (let j = idx + 1; j < Math.min(idx + 4, lines.length); j++) {
+        const m = lines[j].match(/^(\d+)$/);
+        if (m?.[1]) return Number.parseInt(m[1], 10);
+      }
+    }
+  }
+  return undefined;
+}
+
 export function parseHuntMetrics(text: string): {
   totalEnemiesFound?: number;
   enemiesRemaining?: number;
   bonusEnemies?: number;
 } {
-  const totalMatch =
-    text.match(/Total Enemies Found[^\d]*(\d+)/i) ??
-    text.match(/Enemies Found[^\d]*(\d+)/i);
-  const remainingMatch = text.match(/Enemies Remaining[^\d]*(\d+)/i);
-  const bonusMatch = text.match(/Bonus Enemies[^\d]*(\d+)/i);
+  const section = huntingMetricsSection(text);
+  const sources = section ? [section, text] : [text];
 
+  let totalEnemiesFound: number | undefined;
+  let enemiesRemaining: number | undefined;
+  let bonusEnemies: number | undefined;
+
+  for (const source of sources) {
+    totalEnemiesFound ??= parseMetricNearLabel(source, [
+      'Total Enemies Found',
+      'Enemies Found',
+    ]);
+    enemiesRemaining ??= parseMetricNearLabel(source, ['Enemies Remaining', 'Remaining']);
+    bonusEnemies ??= parseMetricNearLabel(source, ['Bonus Enemies', 'Bonus']);
+  }
+
+  return { totalEnemiesFound, enemiesRemaining, bonusEnemies };
+}
+
+/** DOM fallback when body.innerText ordering hides hunt metric values. */
+async function scrapeHuntMetricsFromDom(page: Page): Promise<{
+  totalEnemiesFound?: number;
+  enemiesRemaining?: number;
+  bonusEnemies?: number;
+}> {
+  async function readNear(labels: string[]): Promise<number | undefined> {
+    for (const label of labels) {
+      const labelEl = page.getByText(label, { exact: true }).first();
+      if (await labelEl.count() === 0) continue;
+
+      const line = await safeInnerText(labelEl);
+      const inline = line.match(/:\s*(\d+)\s*$/);
+      if (inline?.[1]) return Number.parseInt(inline[1], 10);
+
+      const container = labelEl.locator('xpath=ancestor::*[self::div or self::section or self::article][1]');
+      if (await container.count() > 0) {
+        const parsed = parseMetricNearLabel(await safeInnerText(container), [label]);
+        if (parsed !== undefined) return parsed;
+      }
+    }
+    return undefined;
+  }
+
+  const [totalEnemiesFound, enemiesRemaining, bonusEnemies] = await Promise.all([
+    readNear(['Total Enemies Found', 'Enemies Found']),
+    readNear(['Enemies Remaining', 'Remaining']),
+    readNear(['Bonus Enemies', 'Bonus']),
+  ]);
+
+  return { totalEnemiesFound, enemiesRemaining, bonusEnemies };
+}
+
+function mergeHuntMetrics(
+  primary: ReturnType<typeof parseHuntMetrics>,
+  fallback: ReturnType<typeof parseHuntMetrics>,
+): ReturnType<typeof parseHuntMetrics> {
   return {
-    totalEnemiesFound: totalMatch ? Number.parseInt(totalMatch[1], 10) : undefined,
-    enemiesRemaining: remainingMatch ? Number.parseInt(remainingMatch[1], 10) : undefined,
-    bonusEnemies: bonusMatch ? Number.parseInt(bonusMatch[1], 10) : undefined,
+    totalEnemiesFound: primary.totalEnemiesFound ?? fallback.totalEnemiesFound,
+    enemiesRemaining: primary.enemiesRemaining ?? fallback.enemiesRemaining,
+    bonusEnemies: primary.bonusEnemies ?? fallback.bonusEnemies,
   };
 }
 
@@ -559,7 +645,16 @@ export async function readHuntState(page: Page): Promise<HuntState> {
   const text = await pageText(page);
   const cardButtons = await collectEnemyCardButtons(page);
   const enemies = await enemyInfosFromButtons(cardButtons);
-  const metrics = parseHuntMetrics(text);
+  let metrics = parseHuntMetrics(text);
+
+  if (
+    metrics.totalEnemiesFound === undefined &&
+    metrics.enemiesRemaining === undefined &&
+    metrics.bonusEnemies === undefined
+  ) {
+    const domMetrics = await scrapeHuntMetricsFromDom(page).catch(() => ({}));
+    metrics = mergeHuntMetrics(metrics, domMetrics);
+  }
 
   const defeatedMatch = text.match(/(\d+)\s+defeated/i);
   const defeatedCount = defeatedMatch ? Number.parseInt(defeatedMatch[1], 10) : 0;
@@ -808,8 +903,7 @@ export async function waitForEnemies(
     }
     // ENEMIES NEARBY label is visible during active hunts — only treat selection
     // as ready once Stop is gone (post-hunt) or we already have metrics/cards.
-    const stopVisible = await isButtonVisible(page, 'Stop');
-    if (!stopVisible && (await hasEnemySelectionReady(page))) {
+    if (await hasPostHuntEnemySelectionReady(page)) {
       return state;
     }
     await page.waitForTimeout(500);

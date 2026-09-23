@@ -58,6 +58,8 @@ export async function pollUntilHuntStop(
 ): Promise<HuntState> {
   const cap = huntFoundCap(levels.combatLevel, levels.totalLevel);
   let huntState = withHuntLevels(initialState, levels.combatLevel, levels.totalLevel);
+  const maxZeroFoundPolls = Math.max(40, Math.ceil(120_000 / config.pollMs));
+  let zeroFoundPolls = 0;
 
   while (true) {
     const found = huntState.totalEnemiesFound ?? 0;
@@ -66,6 +68,13 @@ export async function pollUntilHuntStop(
       break;
     }
     if (await jev.decideHuntStop(huntState)) {
+      break;
+    }
+    zeroFoundPolls = found === 0 ? zeroFoundPolls + 1 : 0;
+    if (zeroFoundPolls >= maxZeroFoundPolls) {
+      console.log(
+        `[combat] hunt metrics still 0 after ${zeroFoundPolls} polls — stopping poll loop (scrape or hunt may be stuck)`,
+      );
       break;
     }
     await sleep(config.pollMs);

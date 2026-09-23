@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { hasHuntProgress, parseHuntMetrics } from './combat.js';
+import { hasHuntProgress, huntingMetricsSection, parseHuntMetrics } from './combat.js';
 import type { HuntState } from '../types.js';
 
 const ACTIVE_HUNT_PANEL = `Stop
@@ -51,6 +51,38 @@ describe('parseHuntMetrics', () => {
     const metrics = parseHuntMetrics('Stop\nEnemies Found\n2\nEnemies Remaining\n5');
     assert.equal(metrics.totalEnemiesFound, 2);
     assert.equal(metrics.enemiesRemaining, 5);
+  });
+
+  it('scopes metrics to CURRENT ACTION and ignores ENEMIES NEARBY zone count', () => {
+    const section = huntingMetricsSection(ACTIVE_HUNT_PANEL);
+    assert.ok(section.includes('Total Enemies Found'));
+    assert.ok(!section.includes('ENEMIES NEARBY'));
+    const metrics = parseHuntMetrics(ACTIVE_HUNT_PANEL);
+    assert.equal(metrics.totalEnemiesFound, 1);
+    assert.equal(metrics.enemiesRemaining, 39);
+  });
+
+  it('does not treat ENEMIES NEARBY 40 as totalEnemiesFound when hunt labels are absent', () => {
+    const text = `Stop
+CURRENT ACTION
+Hunting
+ENEMIES NEARBY
+40
+Windy`;
+    const metrics = parseHuntMetrics(text);
+    assert.equal(metrics.totalEnemiesFound, undefined);
+  });
+
+  it('parses colon-separated hunt metrics in CURRENT ACTION', () => {
+    const text = `CURRENT ACTION
+Hunting
+Total Enemies Found: 2
+Enemies Remaining: 18
+Bonus Enemies: 0`;
+    const metrics = parseHuntMetrics(text);
+    assert.equal(metrics.totalEnemiesFound, 2);
+    assert.equal(metrics.enemiesRemaining, 18);
+    assert.equal(metrics.bonusEnemies, 0);
   });
 });
 
