@@ -1216,6 +1216,42 @@ describe('strict sequential real-count gates', () => {
   });
 
 
+  it('hides legacy hunt_rabbits alias when cook-before-hunt (no active hunt)', () => {
+    statePath = join('/tmp', `playbook-alias-cook-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'hunt_battle_batch',
+        counts: {
+          ...coalMetCounts({ sells: 2 }),
+          rawCod: 100,
+          cookedCod: 100,
+          huntBattles: 4,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const snapshot = minimalSnapshot({
+      inventory: { 'Cheap Bait': 20, 'Coal Ore': 100, Cod: 50, 'Cooked Cod': 17 },
+      gold: 110,
+      combatPhase: 'none',
+    });
+    const progress = evaluatePlaybook(snapshot);
+    const filtered = filterAllowedByPlaybook(
+      ['hunt_battle_batch', 'hunt_rabbits', 'hunt_battle', 'cook_cod', 'idle'],
+      snapshot,
+      progress,
+    );
+    assert.ok(!filtered.includes('hunt_battle_batch'), `filtered=${JSON.stringify(filtered)}`);
+    assert.ok(!filtered.includes('hunt_rabbits'), `legacy alias leaked: ${JSON.stringify(filtered)}`);
+    assert.ok(!filtered.includes('hunt_battle'), `filtered=${JSON.stringify(filtered)}`);
+    assert.ok(filtered.includes('cook_cod'), `filtered=${JSON.stringify(filtered)}`);
+  });
+
   it('keeps hunt_rabbits when cook-before-hunt but an active hunt must finish', () => {
     statePath = join('/tmp', `playbook-orphan-hunt-${Date.now()}.json`);
     process.env.PLAYBOOK_STATE_PATH = statePath;

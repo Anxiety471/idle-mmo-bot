@@ -1211,6 +1211,14 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
 }
 
 
+/** Combat actions for the hunt batch stage (canonical + legacy alias + single-round). */
+export const HUNT_COMBAT_ACTIONS = ['hunt_battle_batch', 'hunt_rabbits', 'hunt_battle'] as const;
+export type HuntCombatAction = (typeof HUNT_COMBAT_ACTIONS)[number];
+
+export function isHuntCombatAction(action: string): action is HuntCombatAction {
+  return (HUNT_COMBAT_ACTIONS as readonly string[]).includes(action);
+}
+
 /**
  * Active hunt / battle must finish even when cook-before-hunt would otherwise
  * hide hunt_battle_batch — otherwise Hunt More orphans a running hunt while we cook.
@@ -1254,25 +1262,25 @@ export function filterAllowedByPlaybook(
   const finishHunt = mustFinishActiveHunt(snapshot);
   if (finishHunt) {
     // Over-cap / active hunt wins over cook gates — stop+battle before cooking.
-    for (const id of ['hunt_battle_batch', 'hunt_battle'] as const) {
+    for (const id of HUNT_COMBAT_ACTIONS) {
       if (allowed.includes(id) && !next.includes(id)) next.push(id);
     }
     next = next.filter((a) => a !== 'cook_cod');
   } else if (coalIncomplete || playbook.stage === 'mine_coal') {
     next = next.filter(
-      (a) => a !== 'fish_cod' && a !== 'cook_cod' && a !== 'hunt_battle_batch' && a !== 'hunt_battle',
+      (a) => a !== 'fish_cod' && a !== 'cook_cod' && !isHuntCombatAction(a),
     );
     if (allowed.includes('mine_coal') && !next.includes('mine_coal')) {
       next.push('mine_coal');
     }
   } else if (fishIncomplete || playbook.stage === 'fish_cod') {
-    next = next.filter((a) => a !== 'cook_cod' && a !== 'hunt_battle_batch' && a !== 'hunt_battle');
+    next = next.filter((a) => a !== 'cook_cod' && !isHuntCombatAction(a));
   } else if (cookIncomplete || playbook.stage === 'cook_cod') {
-    next = next.filter((a) => a !== 'hunt_battle_batch' && a !== 'hunt_battle');
+    next = next.filter((a) => !isHuntCombatAction(a));
   } else if (cookBeforeHunt) {
     // Cook target may already be met while the character ate the stack. Cook again
     // before the next hunt/battle.
-    next = next.filter((a) => a !== 'hunt_battle_batch' && a !== 'hunt_battle');
+    next = next.filter((a) => !isHuntCombatAction(a));
     if (allowed.includes('cook_cod') && !next.includes('cook_cod')) next.push('cook_cod');
   }
 
@@ -1347,7 +1355,7 @@ export function filterAllowedByPlaybook(
         ...(playbook.questCurriculum?.interruptActions ?? []),
       ]);
       for (const id of inject) {
-        if (!finishHunt && cookBeforeHunt && (id === 'hunt_battle_batch' || id === 'hunt_battle')) continue;
+        if (!finishHunt && cookBeforeHunt && isHuntCombatAction(id)) continue;
         if (!next.includes(id)) next.push(id);
       }
     }
@@ -1380,7 +1388,7 @@ export function filterAllowedByPlaybook(
       if (playbook.deprioritizedActions.includes(id)) {
         continue;
       }
-      if (!finishHunt && cookBeforeHunt && (id === 'hunt_battle_batch' || id === 'hunt_battle')) {
+      if (!finishHunt && cookBeforeHunt && isHuntCombatAction(id)) {
         continue;
       }
       if (finishHunt && id === 'cook_cod') {
@@ -1418,12 +1426,12 @@ export function filterAllowedByPlaybook(
   if (!next.includes('idle') && allowed.includes('idle')) next.push('idle');
   if (finishHunt) {
     next = next.filter((a) => a !== 'cook_cod');
-    for (const id of ['hunt_battle_batch', 'hunt_battle'] as const) {
+    for (const id of HUNT_COMBAT_ACTIONS) {
       if (allowed.includes(id) && !next.includes(id)) next.push(id);
     }
     next = [
-      ...(['hunt_battle_batch', 'hunt_battle'] as const).filter((id) => next.includes(id)),
-      ...next.filter((a) => a !== 'hunt_battle_batch' && a !== 'hunt_battle'),
+      ...HUNT_COMBAT_ACTIONS.filter((id) => next.includes(id)),
+      ...next.filter((a) => !isHuntCombatAction(a)),
     ];
   }
   if (next.length === 0) return allowed.includes('idle') ? ['idle'] : allowed;
