@@ -3,7 +3,12 @@ import type { AppConfig } from '../config.js';
 import type { BattleState, CombatStepResult, EnemyInfo, HuntState, Stance } from '../types.js';
 import { navigateTo } from '../browser.js';
 import { decodeIdleMmoMetaSlug } from '../snapshot/inventory-scrape.js';
-import { isHumanCheckPresent, solveHumanCaptchaIfPresent } from './human-check.js';
+import {
+  attemptHumanVerify,
+  isHumanCheckPresent,
+  solveHumanCaptchaIfPresent,
+} from './human-check.js';
+import { effectivePollMs, type VerifyBudget } from './poll-interval.js';
 
 /**
  * Deterministic combat click-path helpers.
@@ -88,7 +93,7 @@ async function clickHuntStopButton(page: Page): Promise<boolean> {
 }
 
 /** Prefer Hunting / Battle panel text over full body to reduce nav noise. */
-async function readCombatPanelText(page: Page): Promise<string> {
+async function readCombatPanelText(page: Page, cachedBodyText?: string): Promise<string> {
   for (const marker of HUNTING_PANEL_MARKERS) {
     const heading = page.getByText(marker, { exact: true }).first();
     if (await heading.count() === 0) continue;
@@ -109,7 +114,28 @@ async function readCombatPanelText(page: Page): Promise<string> {
     if (text) return text;
   }
 
-  return pageText(page);
+  return cachedBodyText ?? await pageText(page);
+}
+
+type VerifyGuardResult = 'ok' | 'blocked' | 'still_present';
+
+async function solveVerifyOrBlock(
+  page: Page,
+  pollMs: number,
+  budget?: VerifyBudget,
+): Promise<VerifyGuardResult> {
+  if (budget) {
+    const result = await attemptHumanVerify(page, budget, pollMs);
+    if (result === 'blocked') return 'blocked';
+    if (result === 'failed' || (result !== 'not_present' && await isHumanCheckPresent(page))) {
+      return 'still_present';
+    }
+    return 'ok';
+  }
+
+  await solveHumanCaptchaIfPresent(page, { pollMs, maxAttempts: 1 });
+  if (await isHumanCheckPresent(page)) return 'still_present';
+  return 'ok';
 }
 
 /** Wait for any primary combat control after navigation. */
@@ -658,31 +684,33 @@ export async function isHuntActivelyRunning(page: Page): Promise<boolean> {
 async function clickStartHuntWithVerify(
   page: Page,
   allowInterrupt: boolean,
+  pollMs: number,
+  verifyBudget?: VerifyBudget,
 ): Promise<CombatStepResult> {
-  const maxAttempts = 3;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    await solveHumanCaptchaIfPresent(page);
-    if (await isHumanCheckPresent(page)) {
-      return 'failed';
-    }
+  const verify = await solveVerifyOrBlock(page, pollMs, verifyBudget);
+  if (verify === 'blocked' || verify === 'still_present') {
+    return 'failed';
+  }
 
-    await page.getByRole('button', { name: 'Start Hunt', exact: true }).first().click();
-    const dialog = await handleReplaceDialog(page, allowInterrupt);
-    if (dialog === 'no_action') return 'no_action';
-    if (dialog === 'failed') return 'failed';
+  await page.getByRole('button', { name: 'Start Hunt', exact: true }).first().click();
+  const dialog = await handleReplaceDialog(page, allowInterrupt);
+  if (dialog === 'no_action') return 'no_action';
+  if (dialog === 'failed') return 'failed';
 
-    await page.waitForTimeout(1000);
-    await solveHumanCaptchaIfPresent(page);
+  await page.waitForTimeout(effectivePollMs(pollMs));
+  const postStartVerify = await solveVerifyOrBlock(page, pollMs, verifyBudget);
+  if (postStartVerify === 'blocked' || postStartVerify === 'still_present') {
+    return 'failed';
+  }
 
-    if (await isHuntActivelyRunning(page)) {
-      return 'hunt_started';
-    }
-    if (await isHuntStopVisible(page)) {
-      return 'hunt_started';
-    }
-    if (!(await isIdleBattleScreen(page))) {
-      return 'hunt_started';
-    }
+  if (await isHuntActivelyRunning(page)) {
+    return 'hunt_started';
+  }
+  if (await isHuntStopVisible(page)) {
+    return 'hunt_started';
+  }
+  if (!(await isIdleBattleScreen(page))) {
+    return 'hunt_started';
   }
 
   if (await isHumanCheckPresent(page)) return 'failed';
@@ -692,14 +720,23 @@ async function clickStartHuntWithVerify(
 async function clickHuntMoreWithVerify(
   page: Page,
   allowInterrupt: boolean,
+  pollMs: number,
+  verifyBudget?: VerifyBudget,
 ): Promise<CombatStepResult> {
-  await solveHumanCaptchaIfPresent(page);
+  const verify = await solveVerifyOrBlock(page, pollMs, verifyBudget);
+  if (verify === 'blocked' || verify === 'still_present') {
+    return 'failed';
+  }
+
   await page.getByRole('button', { name: 'Hunt More', exact: true }).first().click();
   const dialog = await handleReplaceDialog(page, allowInterrupt);
   if (dialog === 'no_action') return 'no_action';
   if (dialog === 'failed') return 'failed';
-  await page.waitForTimeout(1000);
-  await solveHumanCaptchaIfPresent(page);
+  await page.waitForTimeout(effectivePollMs(pollMs));
+  const postClickVerify = await solveVerifyOrBlock(page, pollMs, verifyBudget);
+  if (postClickVerify === 'blocked' || postClickVerify === 'still_present') {
+    return 'failed';
+  }
   if (await isHuntActivelyRunning(page) || await isHuntStopVisible(page)) {
     return 'hunt_started';
   }
@@ -714,10 +751,15 @@ export async function ensureHuntActive(
   page: Page,
   config: AppConfig,
   allowInterrupt = false,
+  verifyBudget?: VerifyBudget,
 ): Promise<CombatStepResult> {
+  const pollMs = effectivePollMs(config.pollMs);
   await navigateTo(page, config, COMBAT_PATH);
   await waitForCombatUiSettled(page);
-  await solveHumanCaptchaIfPresent(page);
+  const initialVerify = await solveVerifyOrBlock(page, pollMs, verifyBudget);
+  if (initialVerify === 'blocked' || initialVerify === 'still_present') {
+    return 'failed';
+  }
 
   if (await isHuntActivelyRunning(page)) {
     return 'hunt_already_active';
@@ -728,11 +770,11 @@ export async function ensureHuntActive(
   }
 
   if (await isButtonVisible(page, 'Start Hunt')) {
-    return clickStartHuntWithVerify(page, allowInterrupt);
+    return clickStartHuntWithVerify(page, allowInterrupt, pollMs, verifyBudget);
   }
 
   if (await isButtonVisible(page, 'Hunt More')) {
-    return clickHuntMoreWithVerify(page, allowInterrupt);
+    return clickHuntMoreWithVerify(page, allowInterrupt, pollMs, verifyBudget);
   }
 
   if (await hasEnemySelectionReady(page) && !(await isIdleBattleScreen(page))) {
@@ -877,11 +919,18 @@ async function scrapeHuntMetricsFromDom(page: Page): Promise<{
     return undefined;
   }
 
-  const [totalEnemiesFound, enemiesRemaining, bonusEnemies] = await Promise.all([
-    readNear(['Total Enemies Found', 'Enemies Found', 'Enemies Hunted', 'Hunted']),
-    readNear(['Enemies Remaining', 'Remaining Enemies', 'Remaining']),
-    readNear(['Bonus Enemies', 'Bonus']),
+  const totalEnemiesFound = await readNear([
+    'Total Enemies Found',
+    'Enemies Found',
+    'Enemies Hunted',
+    'Hunted',
   ]);
+  const enemiesRemaining = await readNear([
+    'Enemies Remaining',
+    'Remaining Enemies',
+    'Remaining',
+  ]);
+  const bonusEnemies = await readNear(['Bonus Enemies', 'Bonus']);
 
   return { totalEnemiesFound, enemiesRemaining, bonusEnemies };
 }
@@ -898,13 +947,23 @@ function mergeHuntMetrics(
 }
 
 /** Read hunt screen: metrics while hunting (Stop visible) and cards after Stop. */
+function huntMetricsComplete(metrics: ReturnType<typeof parseHuntMetrics>): boolean {
+  return (
+    metrics.totalEnemiesFound !== undefined ||
+    metrics.enemiesRemaining !== undefined ||
+    metrics.bonusEnemies !== undefined
+  );
+}
+
 export async function readHuntState(page: Page): Promise<HuntState> {
   const text = await pageText(page);
-  const panelText = await readCombatPanelText(page);
+  const panelText = await readCombatPanelText(page, text);
   const { enemies } = await collectEnemyTiles(page);
   let metrics = mergeHuntMetrics(parseHuntMetrics(panelText), parseHuntMetrics(text));
-  const domMetrics = await scrapeHuntMetricsFromDom(page).catch(() => ({}));
-  metrics = mergeHuntMetrics(metrics, domMetrics);
+  if (!huntMetricsComplete(metrics)) {
+    const domMetrics = await scrapeHuntMetricsFromDom(page).catch(() => ({}));
+    metrics = mergeHuntMetrics(metrics, domMetrics);
+  }
 
   const defeatedMatch = text.match(/(\d+)\s+defeated/i);
   const defeatedCount = defeatedMatch ? Number.parseInt(defeatedMatch[1], 10) : 0;
@@ -1138,7 +1197,9 @@ export async function huntMore(
 export async function waitForEnemies(
   page: Page,
   timeoutMs = 60_000,
+  pollMs?: number,
 ): Promise<HuntState> {
+  const sleepMs = effectivePollMs(pollMs);
   const huntStop = page.getByRole('button', { name: 'Stop', exact: true }).or(
     page.getByRole('button', { name: 'Cancel Hunt', exact: true }),
   );
@@ -1161,7 +1222,7 @@ export async function waitForEnemies(
     if (await hasPostHuntEnemySelectionReady(page)) {
       return state;
     }
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(sleepMs);
   }
 
   return readHuntState(page);
@@ -1174,7 +1235,9 @@ export async function waitForEnemies(
 export async function prepareEnemyBattleSelection(
   page: Page,
   timeoutMs = 30_000,
+  pollMs?: number,
 ): Promise<HuntState> {
+  const sleepMs = effectivePollMs(pollMs);
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
@@ -1207,7 +1270,7 @@ export async function prepareEnemyBattleSelection(
       }
     }
 
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(sleepMs);
   }
 
   return readHuntState(page);
@@ -1217,6 +1280,7 @@ export async function prepareEnemyBattleSelection(
 export async function waitForEnemyCards(
   page: Page,
   timeoutMs = 30_000,
+  pollMs?: number,
 ): Promise<HuntState> {
-  return prepareEnemyBattleSelection(page, timeoutMs);
+  return prepareEnemyBattleSelection(page, timeoutMs, pollMs);
 }

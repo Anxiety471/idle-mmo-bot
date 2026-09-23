@@ -33,6 +33,15 @@ import { createJev } from './jev/index.js';
 import { pollUntilHuntStop } from './jev/hunt-cap.js';
 import { runAutopilot } from './autopilot.js';
 import { readAccountLevels } from './snapshot/account-levels.js';
+import {
+  attemptHumanVerify,
+  isHumanCheckPresent,
+} from './deterministic/human-check.js';
+import {
+  createVerifyBudget,
+  effectivePollMs,
+  verifyBackoffMs,
+} from './deterministic/poll-interval.js';
 import type { HuntState } from './types.js';
 
 const HEARTH_QUEST = 'Wood for the Hearth';
@@ -170,10 +179,11 @@ async function runCombat(
   combatOptions: CombatOptions = {},
 ): Promise<void> {
   const config = loadConfig();
+  const pollMs = effectivePollMs(config.pollMs);
   const forceInterrupt = combatOptions.forceInterrupt ?? config.forceInterrupt;
   const jev = createJev(verbose);
   const session = await launchBrowser(config);
-  const huntBackoffMs = Math.max(config.pollMs * 6, 30_000);
+  const huntBackoffMs = verifyBackoffMs(config.pollMs);
 
   console.log('[combat] Starting hunt → battle loop');
   console.log(
@@ -188,10 +198,24 @@ async function runCombat(
       rounds++;
       console.log(`[combat] Round ${rounds}/${maxRounds}`);
 
+      const verifyBudget = createVerifyBudget();
       const gatherSnapshot = await readGatherState(session.page, config);
       const allowInterrupt =
         forceInterrupt || (await jev.shouldInterruptGather(gatherSnapshot));
-      const huntResult = await ensureHuntActive(session.page, config, allowInterrupt);
+
+      const preVerify = await attemptHumanVerify(session.page, verifyBudget, pollMs);
+      if (preVerify === 'blocked') {
+        console.log(`[combat] Verify budget exhausted — backing off ${huntBackoffMs / 1000}s`);
+        await sleep(huntBackoffMs);
+        continue;
+      }
+
+      const huntResult = await ensureHuntActive(
+        session.page,
+        config,
+        allowInterrupt,
+        verifyBudget,
+      );
       console.log(`[combat] ensureHuntActive → ${huntResult}`);
 
       if (huntResult === 'no_action') {
@@ -204,8 +228,13 @@ async function runCombat(
       }
 
       if (huntResult === 'failed') {
+        if (await isHumanCheckPresent(session.page)) {
+          console.log(`[combat] Human verify blocking hunt — backing off ${huntBackoffMs / 1000}s`);
+          await sleep(huntBackoffMs);
+          continue;
+        }
         console.log('[combat] ensureHuntActive failed — no Start Hunt, Hunt More, Stop, or enemy cards');
-        await sleep(config.pollMs);
+        await sleep(pollMs);
         continue;
       }
 
@@ -216,14 +245,14 @@ async function runCombat(
         console.log('[combat] Post-hunt enemy selection ready — skipping Stop/poll');
         huntState = await readHuntState(session.page);
       } else {
-        const huntStateAfterWait = await waitForEnemies(session.page);
+        const huntStateAfterWait = await waitForEnemies(session.page, 60_000, pollMs);
         if (
           (huntStateAfterWait.totalEnemiesFound ?? 0) === 0 &&
           huntStateAfterWait.enemies.length === 0 &&
           huntStateAfterWait.defeatedCount === 0
         ) {
           console.log('[combat] Hunt active but no hunt metrics yet — polling');
-          await sleep(config.pollMs);
+          await sleep(pollMs);
           continue;
         }
 
@@ -246,19 +275,19 @@ async function runCombat(
         const stopResult = await stopHunt(session.page);
         console.log(`[combat] stopHunt → ${stopResult}`);
 
-        huntState = await prepareEnemyBattleSelection(session.page);
+        huntState = await prepareEnemyBattleSelection(session.page, 30_000, pollMs);
       }
 
       if (huntState.enemies.length === 0) {
         console.log('[combat] Could not open enemy detail panel after Stop — waiting');
-        await sleep(config.pollMs);
+        await sleep(pollMs);
         continue;
       }
 
       const enemy = pickBattleEnemy(huntState.enemies);
       if (!enemy) {
         console.log('[combat] No battle target in enemy list — waiting');
-        await sleep(config.pollMs);
+        await sleep(pollMs);
         continue;
       }
       console.log(`[combat] Selected enemy: ${enemy.name}`);
@@ -282,12 +311,12 @@ async function runCombat(
           console.log(`[combat] flee → ${fleeResult}`);
           break;
         }
-        await sleep(config.pollMs);
+        await sleep(pollMs);
       }
 
       const moreResult = await huntMore(session.page, allowInterrupt);
       console.log(`[combat] huntMore → ${moreResult}`);
-      await sleep(config.pollMs);
+      await sleep(pollMs);
     }
   } finally {
     await session.close();
