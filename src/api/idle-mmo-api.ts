@@ -2,17 +2,22 @@ import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { sanitizeForLog } from '../logging/sanitize.js';
 import {
-  callableEndpoints,
+  documentedEndpoint,
+  plannedRefreshRequests,
   resolveDocumentedPath,
-  unpublishedEndpoints,
   type DocumentedEndpoint,
+  type PathIds,
 } from './documented-endpoints.js';
 import {
+  applyCharacterInformation,
   applyMappedIdentity,
+  collectCharacterRefs,
+  mapCharacterInformation,
+  mapCurrentActionPayload,
   mapIdentityPayload,
-  mapInventoryPayload,
   mapLocationsPayload,
   mapPetsPayload,
+  selectCharacterHashedId,
 } from './map-public-api.js';
 import type {
   PublicApiErrorInfo,
@@ -26,6 +31,9 @@ const require = createRequire(import.meta.url);
 const pkg = require('../../package.json') as { version: string };
 
 export const PUBLIC_API_USER_AGENT = `idle-mmo-bot/${pkg.version} (Contact: local-overseer)`;
+
+/** Origin from the in-game Public API settings page. Paths stay under `/v1`. */
+export const DEFAULT_PUBLIC_API_ORIGIN = 'https://api.idle-mmo.com';
 
 export type IdleMmoApiErrorCode =
   | 'missing-key'
@@ -56,6 +64,8 @@ export interface IdleMmoApiConfig {
   userAgent: string;
   guildId?: string;
   characterName?: string;
+  /** Resolved from `IDLE_MMO_CHARACTER_HASHED_ID` when that value is a single path segment. */
+  characterHashedId?: string;
   minIntervalMs: number;
   maxPerMinute: number;
 }
@@ -73,14 +83,13 @@ export interface IdleMmoApiDeps {
 }
 
 const MISSING_BASE_MESSAGE =
-  'IDLE_MMO_API_KEY is set but IDLE_MMO_API_BASE is unset or invalid. The wiki does not publish the API host — copy it from the in-game API settings page. Playwright scrape kept.';
+  'IDLE_MMO_API_BASE is set but invalid. Use an https origin only, or unset it to use https://api.idle-mmo.com. Playwright scrape kept.';
 
 export function loadIdleMmoApiConfig(env: NodeJS.ProcessEnv = process.env): IdleMmoApiConfigResult {
   const apiKey = env.IDLE_MMO_API_KEY?.trim() ?? '';
   if (!apiKey) return { enabled: false, reason: 'missing-key' };
 
-  const baseRaw = env.IDLE_MMO_API_BASE?.trim() ?? '';
-  if (!baseRaw) return { enabled: false, reason: 'missing-base', message: MISSING_BASE_MESSAGE };
+  const baseRaw = env.IDLE_MMO_API_BASE?.trim() || DEFAULT_PUBLIC_API_ORIGIN;
 
   let baseUrl: string;
   try {
@@ -92,8 +101,13 @@ export function loadIdleMmoApiConfig(env: NodeJS.ProcessEnv = process.env): Idle
 
   const guildRaw = env.IDLE_MMO_GUILD_ID?.trim() || undefined;
   const guildId = guildRaw && /^[A-Za-z0-9_-]{1,128}$/.test(guildRaw) ? guildRaw : undefined;
-  const endpoints = callableEndpoints(guildId);
-  const minIntervalMs = minSafeIntervalMs(endpoints.length, PUBLIC_API_MAX_PER_MINUTE);
+  const characterRaw = env.IDLE_MMO_CHARACTER_HASHED_ID?.trim() || undefined;
+  const characterHashedId =
+    characterRaw && /^[A-Za-z0-9_-]{1,128}$/.test(characterRaw) ? characterRaw : undefined;
+  const minIntervalMs = minSafeIntervalMs(
+    plannedRefreshRequests(Boolean(characterHashedId)),
+    PUBLIC_API_MAX_PER_MINUTE,
+  );
 
   return {
     enabled: true,
@@ -103,13 +117,14 @@ export function loadIdleMmoApiConfig(env: NodeJS.ProcessEnv = process.env): Idle
       userAgent: PUBLIC_API_USER_AGENT,
       guildId,
       characterName: env.CHARACTER_NAME?.trim() || undefined,
+      characterHashedId,
       minIntervalMs,
       maxPerMinute: PUBLIC_API_MAX_PER_MINUTE,
     },
   };
 }
 
-/** Origin only. No default host — the wiki does not publish one. */
+/** Origin only. Defaults to https://api.idle-mmo.com when the env override is unset. */
 export function parseApiBaseUrl(raw: string): string {
   let url: URL;
   try {
@@ -144,26 +159,19 @@ function redact(message: string, secret: string): string {
   return out;
 }
 
-function unavailableResources(guildId: string | undefined): UnavailableResource[] {
-  const unpublished: UnavailableResource[] = unpublishedEndpoints().map((endpoint) => ({
-    id: endpoint.id,
-    role: endpoint.role,
-    reason: 'path-unpublished',
-    snapshotFields: endpoint.snapshotFields,
-    summary: endpoint.summary,
-  }));
-  if (!guildId) {
-    for (const endpoint of callableEndpoints('placeholder').filter((item) => item.guildId)) {
-      unpublished.push({
-        id: endpoint.id,
-        role: endpoint.role,
-        reason: 'missing-guild-id',
-        snapshotFields: endpoint.snapshotFields,
-        summary: endpoint.summary,
-      });
-    }
-  }
-  return unpublished;
+const CHARACTER_REFRESH_IDS = ['character-information', 'current-action', 'character-pets'] as const;
+
+function missingCharacterResources(): UnavailableResource[] {
+  return CHARACTER_REFRESH_IDS.map((id) => {
+    const endpoint = documentedEndpoint(id);
+    return {
+      id: endpoint.id,
+      role: endpoint.role,
+      reason: 'missing-character-id' as const,
+      snapshotFields: endpoint.snapshotFields,
+      summary: endpoint.summary,
+    };
+  });
 }
 
 interface HttpResult {
@@ -196,41 +204,68 @@ export class IdleMmoPublicApi {
     const endpointsUsed: string[] = [];
     const meta: Record<string, unknown> = {};
     const guildMeta: Record<string, unknown> = {};
+    const unavailable: UnavailableResource[] = [];
+    let stop = false;
 
-    for (const endpoint of callableEndpoints(this.config.guildId)) {
-      let path: string;
-      try {
-        path = resolveDocumentedPath(endpoint, this.config.guildId);
-      } catch (error) {
-        errors.push({
-          id: endpoint.id,
-          code: 'unpublished',
-          message: redact(error instanceof Error ? error.message : 'invalid path', this.config.apiKey),
-        });
-        continue;
-      }
+    let characterId = this.config.characterHashedId;
+    if (!characterId) {
+      const resolved = await this.resolveCharacterId(
+        current,
+        patch,
+        endpointsUsed,
+        errors,
+        meta,
+        guildMeta,
+      );
+      characterId = resolved.characterId;
+      stop = resolved.stop;
+    }
 
-      if (current < this.blockedUntil || !this.limiter.tryTake()) {
-        if (this.cache) return { ...this.cache.value, fromCache: true };
-        errors.push({
-          id: endpoint.id,
-          code: 'budget',
-          message: 'Local Public API budget exhausted (20/min). Playwright scrape kept.',
-        });
-        break;
+    if (!stop && characterId) {
+      applyMappedIdentity(patch, { hashedId: characterId, names: [] });
+      for (const id of ['character-information', 'current-action'] as const) {
+        const outcome = await this.fetchEndpoint(
+          documentedEndpoint(id),
+          { characterId },
+          current,
+          patch,
+          endpointsUsed,
+          errors,
+          meta,
+          guildMeta,
+        );
+        if (outcome === 'stop') {
+          stop = true;
+          break;
+        }
+        if (outcome === 'budget') {
+          this.pushBudget(id, errors);
+          stop = true;
+          break;
+        }
       }
+    } else if (!stop) {
+      errors.push({
+        id: 'character-information',
+        code: 'missing-character-id',
+        message:
+          'Character id unresolved. Set IDLE_MMO_CHARACTER_HASHED_ID or CHARACTER_NAME. Inventory stays on the Playwright scrape.',
+      });
+      unavailable.push(...missingCharacterResources());
+    }
 
-      try {
-        const result = await this.request(path);
-        if (result.rateLimitReset) meta.rateLimitReset = result.rateLimitReset;
-        endpointsUsed.push(endpoint.id);
-        this.applyBody(endpoint, result.body, patch, guildMeta);
-        if (endpoint.id === 'auth-check') meta.authOk = true;
-      } catch (error) {
-        const info = this.toErrorInfo(endpoint.id, error);
-        errors.push(info);
-        if (endpoint.id === 'auth-check' || info.code === 'rate-limited') break;
-      }
+    if (!stop && characterId) {
+      const pets = await this.fetchEndpoint(
+        documentedEndpoint('character-pets'),
+        { characterId },
+        current,
+        patch,
+        endpointsUsed,
+        errors,
+        meta,
+        guildMeta,
+      );
+      if (pets === 'budget') meta.petsSkipped = 'budget';
     }
 
     if (Object.keys(guildMeta).length > 0) meta.guild = guildMeta;
@@ -239,6 +274,7 @@ export class IdleMmoPublicApi {
         hashedId: patch.identity.hashedId,
         onlineStatus: patch.identity.onlineStatus,
         names: patch.identity.names,
+        currentStatus: patch.identity.currentStatus,
         matchesCharacter: this.identityMatches(patch.identity.names),
       };
     }
@@ -249,12 +285,75 @@ export class IdleMmoPublicApi {
       fetchedAt: current,
       endpointsUsed,
       errors,
-      unavailable: unavailableResources(this.config.guildId),
+      unavailable,
       patch,
       meta,
     };
     this.cache = { at: current, value: read };
     return read;
+  }
+
+  private async resolveCharacterId(
+    current: number,
+    patch: PublicApiSnapshotPatch,
+    endpointsUsed: string[],
+    errors: PublicApiErrorInfo[],
+    meta: Record<string, unknown>,
+    guildMeta: Record<string, unknown>,
+  ): Promise<{ characterId?: string; stop: boolean }> {
+    const auth = await this.fetchEndpoint(
+      documentedEndpoint('auth-check'),
+      {},
+      current,
+      patch,
+      endpointsUsed,
+      errors,
+      meta,
+      guildMeta,
+    );
+    if (auth === 'stop') return { stop: true };
+    if (auth === 'budget') {
+      this.pushBudget('auth-check', errors);
+      return { stop: true };
+    }
+    if (auth === 'error' || !auth.body) return { stop: false };
+
+    const refs = collectCharacterRefs(auth.body);
+    let characterId = selectCharacterHashedId(refs, this.config.characterName);
+    if (characterId || !this.config.characterName) return { characterId, stop: false };
+
+    const seed = refs.find((ref) => ref.hashedId)?.hashedId;
+    if (!seed) return { stop: false };
+
+    const alts = await this.fetchEndpoint(
+      documentedEndpoint('character-characters'),
+      { characterId: seed },
+      current,
+      patch,
+      endpointsUsed,
+      errors,
+      meta,
+      guildMeta,
+    );
+    if (alts === 'stop') return { stop: true };
+    if (alts === 'budget') {
+      this.pushBudget('character-characters', errors);
+      return { stop: true };
+    }
+    if (alts === 'error' || !alts.body) return { stop: false };
+    characterId = selectCharacterHashedId(
+      [...refs, ...collectCharacterRefs(alts.body)],
+      this.config.characterName,
+    );
+    return { characterId, stop: false };
+  }
+
+  private pushBudget(id: string, errors: PublicApiErrorInfo[]): void {
+    errors.push({
+      id,
+      code: 'budget',
+      message: 'Local Public API budget exhausted (20/min). Playwright scrape kept.',
+    });
   }
 
   /** Test hook. Production snapshot reads always go through the cache. */
@@ -270,28 +369,68 @@ export class IdleMmoPublicApi {
     return names.some((name) => name.toLowerCase() === wanted.toLowerCase());
   }
 
+  private async fetchEndpoint(
+    endpoint: DocumentedEndpoint,
+    ids: PathIds,
+    current: number,
+    patch: PublicApiSnapshotPatch,
+    endpointsUsed: string[],
+    errors: PublicApiErrorInfo[],
+    meta: Record<string, unknown>,
+    guildMeta: Record<string, unknown>,
+  ): Promise<'stop' | 'budget' | 'error' | { body?: unknown }> {
+    if (current < this.blockedUntil || !this.limiter.tryTake()) return 'budget';
+    let path: string;
+    try {
+      path = resolveDocumentedPath(endpoint, ids);
+    } catch (error) {
+      errors.push({
+        id: endpoint.id,
+        code: 'unpublished',
+        message: redact(error instanceof Error ? error.message : 'invalid path', this.config.apiKey),
+      });
+      return 'error';
+    }
+    try {
+      const result = await this.request(path);
+      if (result.rateLimitReset) meta.rateLimitReset = result.rateLimitReset;
+      endpointsUsed.push(endpoint.id);
+      this.applyBody(endpoint, result.body, patch, guildMeta);
+      if (endpoint.id === 'auth-check') meta.authOk = true;
+      return { body: result.body };
+    } catch (error) {
+      const info = this.toErrorInfo(endpoint.id, error);
+      errors.push(info);
+      if (info.code === 'unauthorized' || info.code === 'rate-limited') return 'stop';
+      return 'error';
+    }
+  }
+
   private applyBody(
     endpoint: DocumentedEndpoint,
     body: unknown,
     patch: PublicApiSnapshotPatch,
     guildMeta: Record<string, unknown>,
   ): void {
-    if (endpoint.role === 'auth' || endpoint.role === 'character') {
+    if (endpoint.id === 'auth-check') {
       applyMappedIdentity(patch, mapIdentityPayload(body));
+    }
+    if (endpoint.id === 'character-information') {
+      applyCharacterInformation(patch, mapCharacterInformation(body));
+    }
+    if (endpoint.id === 'current-action') {
+      const action = mapCurrentActionPayload(body);
+      if (action) patch.currentAction = action;
+    }
+    if (endpoint.id === 'character-pets') {
+      const pets = mapPetsPayload(body);
+      if (pets) patch.pets = pets;
     }
     if (endpoint.role === 'locations') {
       const locations = mapLocationsPayload(body);
       if (locations.zones.length > 0) patch.zones = locations.zones;
       if (locations.location) patch.location = locations.location;
       if (locations.weather) patch.weather = locations.weather;
-    }
-    if (endpoint.role === 'inventory') {
-      const inventory = mapInventoryPayload(body);
-      if (inventory) patch.inventory = { ...(patch.inventory ?? {}), ...inventory };
-    }
-    if (endpoint.role === 'pets') {
-      const pets = mapPetsPayload(body);
-      if (pets) patch.pets = pets;
     }
     if (endpoint.role === 'guild') {
       guildMeta[endpoint.id] = sanitizeForLog(body);
@@ -381,10 +520,6 @@ export function parseRateLimitReset(header: string | undefined, now: number): nu
 }
 
 export function formatPublicApiLog(read: PublicApiRead, characterName?: string): string | undefined {
-  if (read.patch.inventory) {
-    const count = Object.keys(read.patch.inventory).length;
-    return `[snapshot] Public API inventory applied (${count} items)`;
-  }
   if (read.fromCache) return undefined;
 
   if (read.endpointsUsed.length === 0 && read.errors.length > 0) {
@@ -394,7 +529,7 @@ export function formatPublicApiLog(read: PublicApiRead, characterName?: string):
 
   const used = read.endpointsUsed.join(', ') || 'none';
   const errorCodes = [...new Set(read.errors.map((error) => error.code))];
-  let line = `[snapshot] Public API read ${used}; inventory, action, quests, and combat paths are unpublished`;
+  let line = `[snapshot] Public API read ${used}; inventory remains Playwright scrape`;
   if (errorCodes.length > 0) line += `; errors=${errorCodes.join(',')}`;
   const identity = read.meta.identity as { matchesCharacter?: boolean } | undefined;
   if (characterName && identity?.matchesCharacter === false) {
@@ -408,7 +543,7 @@ const loggedStatus = new Set<string>();
 
 function fingerprint(config: IdleMmoApiConfig): string {
   const keyHash = createHash('sha256').update(config.apiKey).digest('hex').slice(0, 12);
-  return `${config.baseUrl}|${config.guildId ?? ''}|${config.minIntervalMs}|${keyHash}`;
+  return `${config.baseUrl}|${config.guildId ?? ''}|${config.characterHashedId ?? ''}|${config.characterName ?? ''}|${config.minIntervalMs}|${keyHash}`;
 }
 
 export function resetPublicApiForTests(): void {

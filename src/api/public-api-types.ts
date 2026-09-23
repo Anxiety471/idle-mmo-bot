@@ -28,19 +28,23 @@ export interface PublicApiSnapshotPatch {
   currentAction?: CurrentActionInfo;
   bankNearby?: boolean;
   weather?: string;
-  /** Equipped / listed pets when a documented pets payload is mapped. */
+  /** Listed pets from `GET /v1/character/{hashed_character_id}/pets`. */
   pets?: Record<string, unknown>[];
+  /** Equipped pet fields from character information. */
+  equippedPet?: Record<string, unknown>;
   identity?: {
     hashedId?: string;
     onlineStatus?: string;
     names?: string[];
+    /** Documented `current_status`. Not translated into combat phase. */
+    currentStatus?: unknown;
   };
 }
 
 export interface UnavailableResource {
   id: string;
   role: string;
-  reason: 'path-unpublished' | 'missing-guild-id';
+  reason: 'path-unpublished' | 'missing-guild-id' | 'missing-character-id';
   snapshotFields: string[];
   summary: string;
 }

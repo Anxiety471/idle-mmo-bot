@@ -1,12 +1,15 @@
 /**
- * IdleMMO Public API routes that appear in official public docs.
+ * IdleMMO Public API allowlist.
  *
- * Sources (do not add a path that is not in one of these):
- * - https://wiki.idle-mmo.com/more/api — `GET /v1/auth/check`, Bearer auth, 20/min
- * - https://web.idle-mmo.com/patch-notes?page=4 — guild hall, energizing pool, world locations
- * - https://web.idle-mmo.com/patch-notes?page=3 — guild activity path + `v1.character.characters`
+ * Source of truth: Account settings → Public API
+ * https://web.idle-mmo.com/settings/api
+ * Extracted 2026-09-23. Every path below is one of the 24 routes on that page.
  *
- * Resources named in patch notes without a `/v1/` path stay `path: null` and are never requested.
+ * Autopilot refresh calls only `resolve`, `priority`, and (when the local
+ * 20/min budget still has a slot) `optional` routes. `off` routes stay
+ * callable for an explicit future read but are not requested every cycle.
+ *
+ * There is no character inventory route on the official page. Do not add one.
  */
 
 export type PublicApiRole =
@@ -14,21 +17,23 @@ export type PublicApiRole =
   | 'locations'
   | 'guild'
   | 'character'
-  | 'inventory'
   | 'action'
   | 'pets'
   | 'items'
-  | 'world-bosses';
+  | 'combat'
+  | 'shrine';
+
+/** Which autopilot refresh wave may call this route. */
+export type RefreshTier = 'resolve' | 'priority' | 'optional' | 'off';
 
 export interface DocumentedEndpoint {
   id: string;
   method: 'GET';
-  /** Null when official notes name the resource but do not publish a path. */
-  path: string | null;
-  /** Path template contains `{id}` filled from `IDLE_MMO_GUILD_ID`. */
-  guildId?: boolean;
+  path: string;
   scopes: string[];
   role: PublicApiRole;
+  /** `off` = allowlisted, not polled by autopilot refresh. */
+  refresh: RefreshTier;
   summary: string;
   snapshotFields: string[];
 }
@@ -38,219 +43,331 @@ export const DOCUMENTED_ENDPOINTS: readonly DocumentedEndpoint[] = [
     id: 'auth-check',
     method: 'GET',
     path: '/v1/auth/check',
-    scopes: [],
+    scopes: ['v1.auth.check'],
     role: 'auth',
-    summary: 'Bearer token check. Wiki example. Identity fields are read only when the JSON includes documented keys.',
+    refresh: 'resolve',
+    summary: 'Authentication check. Used to discover hashed_character_id when IDLE_MMO_CHARACTER_HASHED_ID is unset.',
     snapshotFields: ['extensions.publicApi.identity', 'extensions.publicApi.authOk'],
   },
   {
     id: 'world-locations',
     method: 'GET',
     path: '/v1/world/locations/list',
-    scopes: [],
+    scopes: ['v1.world.locations.list'],
     role: 'locations',
-    summary: 'Location list with weather forecast. Dates are UTC (patch notes).',
+    refresh: 'off',
+    summary: 'World locations list. Allowlisted. Not called on the autopilot refresh wave.',
     snapshotFields: ['zones', 'location', 'features.weather'],
+  },
+  {
+    id: 'world-bosses',
+    method: 'GET',
+    path: '/v1/combat/world_bosses/list',
+    scopes: ['v1.combat.world_bosses.list'],
+    role: 'combat',
+    refresh: 'off',
+    summary: 'World bosses list. Allowlisted catalog. Not called every refresh cycle.',
+    snapshotFields: [],
+  },
+  {
+    id: 'dungeons-list',
+    method: 'GET',
+    path: '/v1/combat/dungeons/list',
+    scopes: ['v1.combat.dungeons.list'],
+    role: 'combat',
+    refresh: 'off',
+    summary: 'Dungeons list. Allowlisted catalog. Not called every refresh cycle.',
+    snapshotFields: [],
+  },
+  {
+    id: 'enemies-list',
+    method: 'GET',
+    path: '/v1/combat/enemies/list',
+    scopes: ['v1.combat.enemies.list'],
+    role: 'combat',
+    refresh: 'off',
+    summary: 'Enemies list. Allowlisted catalog. Not called every refresh cycle.',
+    snapshotFields: [],
+  },
+  {
+    id: 'item-search',
+    method: 'GET',
+    path: '/v1/item/search',
+    scopes: ['v1.item.search'],
+    role: 'items',
+    refresh: 'off',
+    summary: 'Global item catalog search. Not per-character inventory. Not called every refresh cycle.',
+    snapshotFields: [],
+  },
+  {
+    id: 'item-inspection',
+    method: 'GET',
+    path: '/v1/item/{hashed_item_id}/inspect',
+    scopes: ['v1.item.inspect'],
+    role: 'items',
+    refresh: 'off',
+    summary: 'Global item inspect. Not a character bag. Not called every refresh cycle.',
+    snapshotFields: [],
+  },
+  {
+    id: 'item-market-history',
+    method: 'GET',
+    path: '/v1/item/{hashed_item_id}/market-history',
+    scopes: ['v1.item.market_history'],
+    role: 'items',
+    refresh: 'off',
+    summary: 'Item market history. Not a character bag. Not called every refresh cycle.',
+    snapshotFields: [],
+  },
+  {
+    id: 'character-information',
+    method: 'GET',
+    path: '/v1/character/{hashed_character_id}/information',
+    scopes: ['v1.character.view'],
+    role: 'character',
+    refresh: 'priority',
+    summary:
+      'Character view. Maps gold, tokens, total_level, skills, location, equipped_pet, current_status, name, and hashed_id from the documented example.',
+    snapshotFields: [
+      'gold',
+      'tokens',
+      'totalLevel',
+      'skillLevels',
+      'location',
+      'extensions.publicApi.equippedPet',
+      'extensions.publicApi.identity',
+    ],
+  },
+  {
+    id: 'character-metrics',
+    method: 'GET',
+    path: '/v1/character/{hashed_character_id}/metrics',
+    scopes: ['v1.character.metrics'],
+    role: 'character',
+    refresh: 'off',
+    summary: 'Lifetime metrics (for example battle.food_used). Not bag stacks. Not called every refresh cycle.',
+    snapshotFields: [],
+  },
+  {
+    id: 'character-effects',
+    method: 'GET',
+    path: '/v1/character/{hashed_character_id}/effects',
+    scopes: ['v1.character.effects'],
+    role: 'character',
+    refresh: 'off',
+    summary: 'Character effects. Allowlisted. Not called every refresh cycle.',
+    snapshotFields: [],
+  },
+  {
+    id: 'character-characters',
+    method: 'GET',
+    path: '/v1/character/{hashed_character_id}/characters',
+    scopes: ['v1.character.characters'],
+    role: 'character',
+    refresh: 'resolve',
+    summary:
+      'Alt characters. Called only when auth/check did not already match CHARACTER_NAME to a hashed id.',
+    snapshotFields: ['extensions.publicApi.identity'],
+  },
+  {
+    id: 'character-museum',
+    method: 'GET',
+    path: '/v1/character/{hashed_character_id}/museum',
+    scopes: ['v1.character.museum'],
+    role: 'character',
+    refresh: 'off',
+    summary: 'Museum collectibles. Not character bag inventory. Not called every refresh cycle.',
+    snapshotFields: [],
+  },
+  {
+    id: 'current-action',
+    method: 'GET',
+    path: '/v1/character/{hashed_character_id}/current-action',
+    scopes: ['v1.character.current_action'],
+    role: 'action',
+    refresh: 'priority',
+    summary:
+      'Current action. Maps type, item, title, started_at, and expires_at. An active type (for example MINING) sets gatherBusy. Battle fields are not invented.',
+    snapshotFields: ['currentAction', 'flags.gatherBusy'],
+  },
+  {
+    id: 'character-pets',
+    method: 'GET',
+    path: '/v1/character/{hashed_character_id}/pets',
+    scopes: ['v1.character.pets'],
+    role: 'pets',
+    refresh: 'optional',
+    summary: 'Character pets. Same refresh wave as information and current-action when the local rate budget still has a slot.',
+    snapshotFields: ['extensions.publicApi.pets'],
+  },
+  {
+    id: 'companion-exchange',
+    method: 'GET',
+    path: '/v1/pets/companion-exchange/listings',
+    scopes: ['v1.pets.companion_exchange.listings'],
+    role: 'pets',
+    refresh: 'off',
+    summary: 'Companion exchange listings. Allowlisted. Not called every refresh cycle.',
+    snapshotFields: [],
+  },
+  {
+    id: 'guild-information',
+    method: 'GET',
+    path: '/v1/guild/{id}/information',
+    scopes: ['v1.guild.information'],
+    role: 'guild',
+    refresh: 'off',
+    summary: 'Guild information. Allowlisted. Not called every refresh cycle.',
+    snapshotFields: ['extensions.publicApi.guild'],
+  },
+  {
+    id: 'guild-members',
+    method: 'GET',
+    path: '/v1/guild/{id}/members',
+    scopes: ['v1.guild.members'],
+    role: 'guild',
+    refresh: 'off',
+    summary: 'Guild members. Allowlisted. Not called every refresh cycle.',
+    snapshotFields: ['extensions.publicApi.guild.members'],
   },
   {
     id: 'guild-activity',
     method: 'GET',
     path: '/v1/guild/{id}/activity',
-    guildId: true,
-    scopes: ['guild endpoint scope', 'v1.character.characters'],
+    scopes: ['v1.guild.activity'],
     role: 'guild',
-    summary: 'Guild activity. Requires the guild scope plus v1.character.characters.',
+    refresh: 'off',
+    summary: 'Guild activity. Allowlisted. Not called every refresh cycle.',
     snapshotFields: ['extensions.publicApi.guild.activity'],
   },
   {
     id: 'guild-energizing-pool',
     method: 'GET',
     path: '/v1/guild/{id}/energizing-pool/information',
-    guildId: true,
-    scopes: ['guild endpoint scope', 'v1.character.characters'],
+    scopes: ['v1.guild.energizing_pool.information'],
     role: 'guild',
-    summary: 'Guild energizing pool information.',
+    refresh: 'off',
+    summary: 'Guild energizing pool. Allowlisted. Not called every refresh cycle.',
     snapshotFields: ['extensions.publicApi.guild.energizingPool'],
   },
   {
     id: 'guild-hall',
     method: 'GET',
     path: '/v1/guild/{id}/hall',
-    guildId: true,
-    scopes: ['guild endpoint scope', 'v1.character.characters'],
+    scopes: ['v1.guild.hall'],
     role: 'guild',
-    summary:
-      'Guild hall, including stockpile quantities. Stockpile is guild storage and is not copied onto character inventory.',
+    refresh: 'off',
+    summary: 'Guild hall. Not character inventory and not called every refresh cycle.',
     snapshotFields: ['extensions.publicApi.guild.hall'],
   },
   {
-    id: 'character-information',
+    id: 'guild-conquest',
     method: 'GET',
-    path: null,
-    scopes: [],
-    role: 'character',
-    summary:
-      'Character information endpoint (equipped pet base name, custom name, pet id, quality, evolution; location details). Path is not in the wiki or patch notes.',
-    snapshotFields: [
-      'location',
-      'extensions.publicApi.pets',
-      'extensions.publicApi.identity',
-      'totalLevel',
-      'combatLevel',
-      'gold',
-      'tokens',
-      'skillLevels',
-    ],
-  },
-  {
-    id: 'character-inspection',
-    method: 'GET',
-    path: null,
-    scopes: [],
-    role: 'character',
-    summary:
-      'Character inspection. Documented fields: online_status. last_activity was deprecated and then removed — ignored if present.',
-    snapshotFields: ['extensions.publicApi.identity.onlineStatus', 'extensions.publicApi.identity.hashedId'],
-  },
-  {
-    id: 'inventory',
-    method: 'GET',
-    path: null,
-    scopes: [],
-    role: 'inventory',
-    summary:
-      'Character item quantities (Cooked Cod, Raw Cod, Coal, bait, and other stacks). No inventory path is published on the wiki or in patch notes. quantity/chance casting is documented only as a cross-endpoint fix.',
-    snapshotFields: ['inventory', 'flags.hasBait'],
-  },
-  {
-    id: 'current-action',
-    method: 'GET',
-    path: null,
-    scopes: [],
-    role: 'action',
-    summary:
-      'Characters current action endpoint (including world-boss lobby). Response schema is not published, so progress/busy/health are not inferred.',
-    snapshotFields: ['currentAction', 'flags.gatherBusy', 'flags.inBattle', 'combatPhase'],
-  },
-  {
-    id: 'pets',
-    method: 'GET',
-    path: null,
-    scopes: [],
-    role: 'pets',
-    summary:
-      'Pets endpoint: base name separate from custom name, total_experience, evolution, stat breakdown. Happiness and hunger were removed. Private pet inventories return 403.',
-    snapshotFields: ['extensions.publicApi.pets'],
-  },
-  {
-    id: 'character-pet',
-    method: 'GET',
-    path: null,
-    scopes: [],
-    role: 'pets',
-    summary: 'Character pet endpoint (equipped pet stats). Path unpublished.',
-    snapshotFields: ['extensions.publicApi.pets'],
-  },
-  {
-    id: 'item-inspection',
-    method: 'GET',
-    path: null,
-    scopes: [],
-    role: 'items',
-    summary:
-      'Item inspection: upgrade_requirements hashed item id, dungeon list for alchemy chests, effects. Not a character inventory listing.',
-    snapshotFields: [],
-  },
-  {
-    id: 'item-search',
-    method: 'GET',
-    path: null,
-    scopes: [],
-    role: 'items',
-    summary: 'Item search with an optional type filter. Path unpublished. Not used for autopilot quantities.',
-    snapshotFields: [],
-  },
-  {
-    id: 'pet-exchange',
-    method: 'GET',
-    path: null,
-    scopes: [],
-    role: 'items',
-    summary: 'Pet Exchange endpoint. Path unpublished.',
-    snapshotFields: [],
-  },
-  {
-    id: 'guild-members',
-    method: 'GET',
-    path: null,
-    scopes: [],
+    path: '/v1/guild/conquest/view',
+    scopes: ['v1.guild.conquest.view'],
     role: 'guild',
-    summary: 'Guild members list, including hashed_id. Path unpublished.',
-    snapshotFields: ['extensions.publicApi.guild.members'],
+    refresh: 'off',
+    summary: 'Guild conquest view. Allowlisted. Not called every refresh cycle.',
+    snapshotFields: [],
   },
   {
-    id: 'world-bosses',
+    id: 'guild-conquest-zone',
     method: 'GET',
-    path: null,
-    scopes: [],
-    role: 'world-bosses',
-    summary:
-      'Patch notes say world-boss timers must use the Public API. The path is not published. Spawn data is not scraped from undocumented routes.',
-    snapshotFields: ['extensions.publicApi.worldBosses'],
+    path: '/v1/guild/conquest/zone/{zone_id}/inspect',
+    scopes: ['v1.guild.conquest.zone.inspect'],
+    role: 'guild',
+    refresh: 'off',
+    summary: 'Guild conquest zone inspect. Allowlisted. Not called every refresh cycle.',
+    snapshotFields: [],
+  },
+  {
+    id: 'shrine-progress',
+    method: 'GET',
+    path: '/v1/shrine/progress',
+    scopes: ['v1.shrine.progress'],
+    role: 'shrine',
+    refresh: 'off',
+    summary: 'Shrine progress. Allowlisted. Not called every refresh cycle.',
+    snapshotFields: [],
   },
 ];
 
-const GUILD_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+export const PATH_SEGMENT = /^[A-Za-z0-9_-]{1,128}$/;
 
-export function callableEndpoints(guildId: string | undefined): DocumentedEndpoint[] {
-  return DOCUMENTED_ENDPOINTS.filter((endpoint) => {
-    if (!endpoint.path) return false;
-    if (endpoint.guildId && !guildId) return false;
-    return true;
-  });
+const PLACEHOLDERS: Record<string, keyof PathIds> = {
+  '{id}': 'guildId',
+  '{hashed_character_id}': 'characterId',
+  '{hashed_item_id}': 'itemId',
+  '{zone_id}': 'zoneId',
+};
+
+export interface PathIds {
+  guildId?: string;
+  characterId?: string;
+  itemId?: string;
+  zoneId?: string;
 }
 
-export function unpublishedEndpoints(): DocumentedEndpoint[] {
-  return DOCUMENTED_ENDPOINTS.filter((endpoint) => !endpoint.path);
+export function documentedEndpoint(id: string): DocumentedEndpoint {
+  const endpoint = DOCUMENTED_ENDPOINTS.find((item) => item.id === id);
+  if (!endpoint) throw new Error(`Unknown documented endpoint "${id}"`);
+  return endpoint;
 }
 
-export function resolveDocumentedPath(endpoint: DocumentedEndpoint, guildId?: string): string {
-  if (!endpoint.path) {
-    throw new Error(`Public API resource "${endpoint.id}" has no published /v1 path`);
-  }
+/** Worst-case requests on one autopilot refresh, including optional pets. */
+export function plannedRefreshRequests(hasCharacterId: boolean): number {
+  const priority = DOCUMENTED_ENDPOINTS.filter((endpoint) => endpoint.refresh === 'priority').length;
+  const optional = DOCUMENTED_ENDPOINTS.filter((endpoint) => endpoint.refresh === 'optional').length;
+  if (hasCharacterId) return priority + optional;
+  const resolve = DOCUMENTED_ENDPOINTS.filter((endpoint) => endpoint.refresh === 'resolve').length;
+  return resolve + priority + optional;
+}
+
+export function resolveDocumentedPath(endpoint: DocumentedEndpoint, ids: PathIds = {}): string {
   let path = endpoint.path;
-  if (endpoint.guildId) {
-    if (!guildId || !GUILD_ID_PATTERN.test(guildId)) {
-      throw new Error('IDLE_MMO_GUILD_ID is missing or not a single path segment');
+  for (const [token, key] of Object.entries(PLACEHOLDERS)) {
+    if (!path.includes(token)) continue;
+    const value = ids[key];
+    if (!value || !PATH_SEGMENT.test(value)) {
+      throw new Error(`Public API resource "${endpoint.id}" is missing a valid ${token} segment`);
     }
-    path = path.replace('{id}', guildId);
+    path = path.split(token).join(value);
+  }
+  if (path.includes('{') || path.includes('}')) {
+    throw new Error(`Public API resource "${endpoint.id}" has an unresolved path token`);
   }
   assertDocumentedPath(path);
   return path;
 }
 
-/** Reject anything that is not an exact resolved path from the official catalog. */
+const SEGMENT_SOURCE = '[A-Za-z0-9_-]{1,128}';
+
+function templateRegex(template: string): RegExp {
+  const parts = template.split(/(\{[a-z_]+\})/g).map((part) => {
+    if (!part.startsWith('{')) return part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (!Object.prototype.hasOwnProperty.call(PLACEHOLDERS, part)) {
+      throw new Error(`Undocumented path token ${part}`);
+    }
+    return SEGMENT_SOURCE;
+  });
+  return new RegExp(`^${parts.join('')}$`);
+}
+
+/** Reject anything that is not an exact resolved path from the official 24-route catalog. */
 export function assertDocumentedPath(path: string): void {
   if (
     !path.startsWith('/v1/') ||
     path.includes('..') ||
     path.includes('//') ||
     path.includes('?') ||
-    path.includes('#')
+    path.includes('#') ||
+    path.includes('{') ||
+    path.toLowerCase().includes('inventory')
   ) {
     throw new Error('Refusing non-public Public API path');
   }
   for (const endpoint of DOCUMENTED_ENDPOINTS) {
-    if (!endpoint.path) continue;
-    if (!endpoint.guildId) {
-      if (endpoint.path === path) return;
-      continue;
-    }
-    const [prefix, suffix] = endpoint.path.split('{id}');
-    if (!prefix || suffix === undefined) continue;
-    if (!path.startsWith(prefix) || !path.endsWith(suffix)) continue;
-    const id = path.slice(prefix.length, path.length - suffix.length);
-    if (GUILD_ID_PATTERN.test(id)) return;
+    if (templateRegex(endpoint.path).test(path)) return;
   }
   throw new Error('Refusing Public API path that is not in the official catalog');
 }

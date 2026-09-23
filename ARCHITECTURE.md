@@ -41,7 +41,7 @@ Loads `BASE_URL`, `POLL_MS`, `HEADLESS`, `STORAGE_STATE`, `BUY_BAIT` from enviro
 
 ### `src/api/`
 
-Read-only IdleMMO Public API client (`IDLE_MMO_API_KEY`, optional `IDLE_MMO_API_BASE`). Allowlisted `GET /v1/…` routes only, 20 requests/minute with a cache. `readGameSnapshot()` merges any fields the API actually returned and keeps the Playwright scrape for the rest. See [docs/IDLE_MMO_PUBLIC_API.md](docs/IDLE_MMO_PUBLIC_API.md).
+Read-only IdleMMO Public API client (`IDLE_MMO_API_KEY`, origin default `https://api.idle-mmo.com`). Allowlisted `GET /v1/…` routes only, 20 requests/minute with a cache. Autopilot refresh overlays character information, current action, and pets. Inventory stays on the Playwright scrape. See [docs/IDLE_MMO_PUBLIC_API.md](docs/IDLE_MMO_PUBLIC_API.md).
 
 ### `src/browser.ts`
 
