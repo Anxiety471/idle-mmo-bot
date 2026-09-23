@@ -12,3 +12,7 @@ logs/
 
 storage-state-hitoriidle.json
 logs-hitoriidle/
+
+# Secret env files (API keys, etc.)
+.env*
+!.env.example
