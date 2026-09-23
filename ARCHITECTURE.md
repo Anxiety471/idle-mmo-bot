@@ -39,6 +39,10 @@ New actions need: `id`, `description`, `isAllowed(snapshot)`, `execute(page)`, `
 
 Loads `BASE_URL`, `POLL_MS`, `HEADLESS`, `STORAGE_STATE`, `BUY_BAIT` from environment (via dotenv).
 
+### `src/api/`
+
+Read-only IdleMMO Public API client (`IDLE_MMO_API_KEY`, optional `IDLE_MMO_API_BASE`). Allowlisted `GET /v1/…` routes only, 20 requests/minute with a cache. `readGameSnapshot()` merges any fields the API actually returned and keeps the Playwright scrape for the rest. See [docs/IDLE_MMO_PUBLIC_API.md](docs/IDLE_MMO_PUBLIC_API.md).
+
 ### `src/browser.ts`
 
 Launches Chromium, optionally loads `storageState` for session cookies, provides `navigateTo` helper.
