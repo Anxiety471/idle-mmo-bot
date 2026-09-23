@@ -188,6 +188,9 @@ export interface GameSnapshot {
   acceptedQuests: SnapshotQuest[];
   pendingQuests: SnapshotQuest[];
   combatPhase: CombatPhase;
+  /** While hunting: Total Enemies Found from the battle panel (if scraped). */
+  totalEnemiesFound?: number;
+  enemiesRemaining?: number;
   zones?: SnapshotZone[];
   features?: Record<string, boolean | string | number>;
   discovered?: {

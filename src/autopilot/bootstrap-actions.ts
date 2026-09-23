@@ -12,6 +12,7 @@ import {
   hasHuntProgress,
   hasPostHuntEnemySelectionReady,
   needsCookBeforeHunt,
+  isHuntActivelyRunning,
   pickBattleEnemy,
   prepareEnemyBattleSelection,
   readHuntState,
@@ -46,6 +47,7 @@ import type { SnapshotQuest } from '../types.js';
 import type { ActionAllowContext, ActionDefinition, ActionExecuteContext } from './action-types.js';
 import { registerAction } from './action-registry.js';
 import { tryCookCod } from '../deterministic/cook.js';
+import { shouldHardStopHunt } from '../deterministic/hunt-cap.js';
 import { equipPet, managePets } from '../deterministic/pets.js';
 import {
   getPlaybookFromSnapshot,
@@ -133,11 +135,23 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
 
   const playbook = getPlaybookFromSnapshot(ctx.snapshot);
   const cookTarget = playbook?.targets.cookMin ?? 100;
-  if (needsCookBeforeHunt(ctx.snapshot.inventory, cookTarget)) {
+  const huntActive = await isHuntActivelyRunning(page);
+  const huntPeek = huntActive ? await readHuntState(page) : null;
+  const foundNow = huntPeek?.totalEnemiesFound ?? ctx.snapshot.totalEnemiesFound;
+  const mustBattle =
+    huntActive ||
+    shouldHardStopHunt(foundNow, ctx.snapshot.combatLevel, ctx.snapshot.totalLevel) ||
+    ctx.snapshot.combatPhase === 'enemy_select';
+  if (!mustBattle && needsCookBeforeHunt(ctx.snapshot.inventory, cookTarget)) {
     const cooked = ctx.snapshot.inventory['Cooked Cod'] ?? 0;
     console.log(`[combat] Cooked Cod ${cooked}/${cookTarget} — cooking before hunt`);
     const cookResult = await tryCookCod(page, config, true);
     return combatRoundOutcome(`cook_before_hunt:${cookResult}`, config);
+  }
+  if (mustBattle && needsCookBeforeHunt(ctx.snapshot.inventory, cookTarget)) {
+    console.log(
+      `[combat] skipping cook-before-hunt — hunt active/over cap (found=${foundNow ?? 'n/a'})`,
+    );
   }
 
   const huntResult = await ensureHuntActive(page, config, allowInterrupt, verifyBudget);
@@ -212,6 +226,13 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
       );
     }
     await sleep(pollMs);
+  }
+
+  // Do not start a fresh hunt when bag food is below the cook gate — that orphans
+  // hunting while the supervisor leaves combat to cook.
+  if (needsCookBeforeHunt(ctx.snapshot.inventory, cookTarget)) {
+    console.log('[combat] skipping Hunt More — Cooked Cod below cook target');
+    return combatRoundOutcome(`battle:${battleResult}:huntMore:skipped_cook_gate`, config);
   }
 
   return combatRoundOutcome(
