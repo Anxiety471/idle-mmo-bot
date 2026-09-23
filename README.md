@@ -40,6 +40,9 @@ Set `STORAGE_STATE=./storage-state.json` in `.env`. This file is gitignored — 
 | `JEV_MODEL` | `jev-latest` | Jev model sent to TypeSafe System One API |
 | `JEV_NOUL_THRESHOLD` | `0.6` | Noul yes threshold for interrupt / flee |
 | `HUNT_FOUND_CAP` | `100` | Stop hunting and battle when **Total Enemies Found** reaches this count |
+| `IDLE_MMO_API_KEY` | _(unset)_ | IdleMMO Public API bearer token. Unset keeps the DOM inventory scrape |
+| `IDLE_MMO_API_BASE` | `https://api.idle-mmo.com` | Public API host (see [docs/IDLE_MMO_PUBLIC_API.md](./docs/IDLE_MMO_PUBLIC_API.md)) |
+| `IDLE_MMO_INVENTORY_PATH` | _(unset)_ | Documented `/v1/` inventory path copied from in-game API settings |
 
 ## Commands
 
@@ -191,6 +194,10 @@ Smoke-test the API without launching the browser:
 export JEV_API_TOKEN=your-key
 npm run jev-smoke
 ```
+
+## Public API reads
+
+When `IDLE_MMO_API_KEY` is set, each snapshot calls the [IdleMMO Public API](https://wiki.idle-mmo.com/more/api) (`GET /v1/auth/check`, character information, current action) and **prefers API item quantities** over the inventory scrape for overlapping stacks. The scrape remains the fallback when the key is unset or the API fails. Inventory has no path on the public wiki — set `IDLE_MMO_INVENTORY_PATH` from the in-game API settings page. Details, scopes, and the 20 requests/minute cache: [docs/IDLE_MMO_PUBLIC_API.md](./docs/IDLE_MMO_PUBLIC_API.md).
 
 ## For overseer bots
 
