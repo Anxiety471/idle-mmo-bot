@@ -139,6 +139,8 @@ export const BOOTSTRAP_ACTION_IDS = {
   sell_junk: 'sell_junk',
   sell_junk_for_gold: 'sell_junk_for_gold',
   market_sell_half: 'market_sell_half',
+  hunt_battle_batch: 'hunt_battle_batch',
+  /** @deprecated alias — prefer hunt_battle_batch */
   hunt_rabbits: 'hunt_rabbits',
   explore_map: 'explore_map',
   idle: 'idle',

@@ -75,7 +75,7 @@ const QUEST_DEFINITIONS: QuestDefinition[] = [
 const QUEST_DEPRIORITIZE_WHEN_EASY: AutopilotAction[] = [
   'fish_cod',
   'hunt_battle',
-  'hunt_rabbits',
+  'hunt_battle_batch',
 ];
 
 function invCount(snapshot: GameSnapshot, names: string[]): number {

@@ -736,9 +736,9 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
     }),
   },
   {
-    id: 'hunt_rabbits',
+    id: 'hunt_battle_batch',
     description:
-      'Hunt and battle any ready enemy (prefer Rabbit) using pre-battle Cooked Cod (FOOD Add). Respects huntFoundCap.',
+      'Hunt and battle any ready enemy (prefer Rabbit) using pre-battle Cooked Cod (FOOD Add). Stops hunting at huntFoundCap and battles found enemies (battle now).',
     bootstrap: true,
     priority: 12,
     tags: ['combat', 'playbook'],
@@ -748,6 +748,27 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
       const stageOk =
         !playbook ||
         playbook.complete ||
+        playbook.stage === 'hunt_battle_batch' ||
+        playbook.stage === 'hunt_rabbits' ||
+        playbook.stage === 'complete';
+      return ctx.snapshot.flags.sessionValid && stageOk;
+    },
+    execute: async (ctx) => combatExecuteResult('hunt_battle_batch', await runCombatRound(ctx)),
+  },
+  {
+    // Legacy action id kept so older decisions / filters still resolve during rollout.
+    id: 'hunt_rabbits',
+    description: 'Deprecated alias for hunt_battle_batch',
+    bootstrap: true,
+    priority: 12,
+    tags: ['combat', 'playbook', 'legacy'],
+    safety: 'safe',
+    isAllowed: (ctx) => {
+      const playbook = getPlaybookFromSnapshot(ctx.snapshot);
+      const stageOk =
+        !playbook ||
+        playbook.complete ||
+        playbook.stage === 'hunt_battle_batch' ||
         playbook.stage === 'hunt_rabbits' ||
         playbook.stage === 'complete';
       return ctx.snapshot.flags.sessionValid && stageOk;
