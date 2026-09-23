@@ -39,6 +39,10 @@ New actions need: `id`, `description`, `isAllowed(snapshot)`, `execute(page)`, `
 
 Loads `BASE_URL`, `POLL_MS`, `HEADLESS`, `STORAGE_STATE`, `BUY_BAIT` from environment (via dotenv).
 
+### Public API snapshot overlay
+
+`src/api/idle-mmo-api.ts` reads the IdleMMO Public API (`https://api.idle-mmo.com`, bearer `IDLE_MMO_API_KEY`, `/v1/` only, 20 requests/minute). `src/snapshot/api-merge.ts` prefers those item quantities over the Playwright scrape for overlapping keys and keeps the scrape when the API is off or fails. See [docs/IDLE_MMO_PUBLIC_API.md](./docs/IDLE_MMO_PUBLIC_API.md).
+
 ### `src/browser.ts`
 
 Launches Chromium, optionally loads `storageState` for session cookies, provides `navigateTo` helper.

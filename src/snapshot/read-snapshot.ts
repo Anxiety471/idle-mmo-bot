@@ -16,6 +16,7 @@ import {
   scrapeInventoryFromDom,
 } from './inventory-scrape.js';
 import { parseHuntMetrics } from '../deterministic/combat.js';
+import { applyPublicApiToSnapshot } from './api-merge.js';
 
 const SKILL_IDS: SkillId[] = [
   'woodcutting',
@@ -215,6 +216,10 @@ export async function readGameSnapshot(page: Page, config: AppConfig): Promise<G
   } catch {
     // Map enricher is best-effort.
   }
+
+  snapshot = await applyPublicApiToSnapshot(snapshot, {
+    characterName: config.characterName,
+  });
 
   return snapshot;
 }

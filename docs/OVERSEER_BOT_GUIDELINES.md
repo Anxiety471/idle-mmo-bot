@@ -58,6 +58,7 @@ Bootstrap actions register at startup via `registerBootstrapActions()` in `src/a
 | Secret | Purpose | How to set |
 |--------|---------|------------|
 | `JEV_API_TOKEN` | TypeSafe HttpJev (`TYPESAFE_API_KEY` alias also works) | Owner secure secret form / env on the runner |
+| `IDLE_MMO_API_KEY` | IdleMMO Public API bearer token (read-only snapshot overlay) | Owner secure secret form / env on the runner. See [IDLE_MMO_PUBLIC_API.md](./IDLE_MMO_PUBLIC_API.md) |
 | Game session | Logged-in cookies for Playwright | Capture once → `storage-state.json` (gitignored) |
 
 **Never** print tokens, passwords, API keys, or `storage-state.json` contents in chat or logs you share.
@@ -96,6 +97,9 @@ Key `.env` variables (see `.env.example` for full list):
 | `AUTOPILOT_LOG_DIR` | `./logs` | Structured JSONL output directory |
 | `EARLY_PLAYBOOK` | on (enabled) | Early-systems curriculum filters; set `false` to disable |
 | `PLAYBOOK_STATE_PATH` | `logs/playbook-state.json` | Playbook stage persistence |
+| `IDLE_MMO_API_KEY` | _(unset)_ | Public API reads. Unset = DOM scrape only. Never print the key |
+| `IDLE_MMO_API_BASE` | `https://api.idle-mmo.com` | Public API host |
+| `IDLE_MMO_INVENTORY_PATH` | _(unset)_ | `/v1/` inventory path copied from in-game API settings |
 
 See [docs/CHARACTER_MANAGEMENT.md](./CHARACTER_MANAGEMENT.md) for multi-account + multi-character path layout and bootstrap env knobs (`SKIP_CHARACTER_ENSURE`, `CREATE_CHARACTER_IF_MISSING`, etc.).
 
@@ -346,6 +350,12 @@ Rapid sub-second polling on `/combat/battle` (hunt metrics scrape, `decideHuntSt
 | **DOM scrape** | `readHuntState` skips parallel DOM metric scrape when text metrics already parsed; `scrapeHuntMetricsFromDom` reads labels sequentially |
 
 **Overseer tuning when CF is hot:** set `POLL_MS` to **20000–30000** (20–30 s) for hunt_battle_batch / hunt_battle cycles until Quick-check emojis render reliably again. Watch for `blocked:verify` or `failed:hunt_not_started` with long `backoffMs` in `decisions.jsonl` — that is expected backoff, not a stuck loop.
+
+### 4.13 Public API quantities (`src/api/idle-mmo-api.ts`, `src/snapshot/api-merge.ts`)
+
+When `IDLE_MMO_API_KEY` is set, `readGameSnapshot()` still scrapes, then overlays the [Public API](https://wiki.idle-mmo.com/more/api). API counts replace scrape counts for the same item (Cooked Cod, Raw Cod, Coal Ore, Cheap Bait, and any other returned stack). Scrape-only items remain. A missing key, `401`/`429`, or character-name mismatch keeps the DOM inventory. Look for `[snapshot] API inventory used (N stacks)` — that line has no secrets.
+
+Cook-before-hunt still calls `needsCookBeforeHunt(snapshot.inventory, cookMin)`. Do not lower `cookMin` or the battle-food floor because a scrape undercounted Cooked Cod; fix the count via the API instead. Full env, scopes, and the inventory-path gap: [IDLE_MMO_PUBLIC_API.md](./IDLE_MMO_PUBLIC_API.md).
 
 ---
 
