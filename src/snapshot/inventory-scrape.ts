@@ -30,8 +30,13 @@ export const ITEM_SLUG_MAP: Record<string, string> = {
   'cheap-bait': 'Cheap Bait',
   cheap_bait: 'Cheap Bait',
   bait: 'Cheap Bait',
+  // Melriel Cheap Bait CDN skin meta decodes to "small 3.png" (not bait.png).
+  'small 3': 'Cheap Bait',
+  'small-3': 'Cheap Bait',
+  small_3: 'Cheap Bait',
   'raw-cod': 'Raw Cod',
   raw_cod: 'Raw Cod',
+  // IdleMMO CDN meta for raw catch is cod.png → treat as Raw Cod.
   'cooked-cod': 'Cooked Cod',
   cooked_cod: 'Cooked Cod',
   'cooked cod': 'Cooked Cod',
@@ -46,7 +51,7 @@ export const ITEM_SLUG_MAP: Record<string, string> = {
   'yew-log': 'Yew Log',
   yew_log: 'Yew Log',
   yew: 'Yew Log',
-  cod: 'Cod',
+  cod: 'Raw Cod',
   salmon: 'Salmon',
   tuna: 'Tuna',
 };
@@ -118,7 +123,7 @@ function itemNameFromSlug(slug: string): string | undefined {
     if (mapSlug.length <= 3) continue;
     if (key.includes(mapSlug)) return name;
   }
-  if (key === 'cod') return 'Cod';
+  if (key === 'cod') return 'Raw Cod';
   return undefined;
 }
 
@@ -204,9 +209,8 @@ export function sanitizeInventoryCounts(
   const inventory: Record<string, number> = {};
   if (!raw || typeof raw !== 'object') return inventory;
   for (const [key, qty] of Object.entries(raw)) {
-    if (/^cod$/i.test(key) && !/raw\s*cod|cooked\s*cod|burnt\s*cod/i.test(key) && qty >= 200) {
-      continue;
-    }
+    // Bare "Cod" from page chrome is rare; prefer keeping real stacks (CDN meta cod.png
+    // is mapped to Raw Cod). Still drop explicit chrome deny keys.
     if (CHROME_ITEM_DENY.test(key)) continue;
     const matched = matchKnownItem(key) ?? key;
     if (CHROME_ITEM_DENY.test(matched)) continue;
@@ -283,7 +287,7 @@ export const INVENTORY_DOM_STATIC_SCRIPT = String.raw`([known, slugMap]) => {
         if (String(slug).length <= 3) continue;
         if (k.includes(slug)) return name;
       }
-      if (k === 'cod') return 'Cod';
+      if (k === 'cod') return 'Raw Cod';
       return null;
     };
     // IdleMMO CDN: …-meta<base64(filename)>=-.png → coal.png / oak.png / …
@@ -301,7 +305,16 @@ export const INVENTORY_DOM_STATIC_SCRIPT = String.raw`([known, slugMap]) => {
   };
   const qtyNear = (el) => {
     const root = el.closest('button, [role="button"], a, li, div') || el.parentElement;
-    const text = (root && root.textContent ? root.textContent : '').replace(/\s+/g, ' ');
+    if (!root) return 0;
+    // Prefer top-left stack badge (qty) over bottom-right quality pip.
+    const topBadge = root.querySelector(
+      '.absolute.top-0, [class*="top-0"][class*="left-0"], [class*="-mt-2"][class*="-ml-2"]',
+    );
+    if (topBadge) {
+      const q = parseQty((topBadge.textContent || '').replace(/\s+/g, ' ').trim());
+      if (q > 0) return q;
+    }
+    const text = (root.textContent ? root.textContent : '').replace(/\s+/g, ' ');
     const m = text.match(/(\d+(?:\.\d+)?[kK]?)/);
     return parseQty(m && m[1]) || 0;
   };
