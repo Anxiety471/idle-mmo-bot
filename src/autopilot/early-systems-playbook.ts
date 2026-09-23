@@ -18,7 +18,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getLogDir } from '../logging/jsonl-writer.js';
-import { needsCookBeforeHunt } from '../deterministic/combat.js';
+import { cookedCodCount, needsCookBeforeHunt } from '../deterministic/combat.js';
 import { shouldHardStopHunt } from '../deterministic/hunt-cap.js';
 import { hasEasyCompletePendingQuest } from '../deterministic/quest-accept.js';
 import type { AutopilotAction, AutopilotContext, GameSnapshot } from '../types.js';
@@ -367,7 +367,7 @@ function syncCountsFromSnapshot(
   const next = { ...counts };
   const coal = invCount(snapshot, ['Coal Ore', 'Coal']);
   const rawCod = invCount(snapshot, ['Cod', 'Raw Cod']);
-  const cooked = invCount(snapshot, ['Cooked Cod']);
+  const cooked = cookedCodCount(snapshot.inventory);
   // CURRENT ACTION "+N" is a live floor while icon inventory under-reports.
   const produced =
     /coal/i.test(snapshot.currentAction?.resource ?? snapshot.currentAction?.label ?? '')
@@ -376,7 +376,10 @@ function syncCountsFromSnapshot(
   if (coal > 0) next.coal = Math.max(next.coal, coal);
   if (produced > 0) next.coal = Math.max(next.coal, produced);
   if (rawCod > 0) next.rawCod = Math.max(next.rawCod, rawCod);
-  if (cooked > 0) next.cookedCod = Math.max(next.cookedCod, cooked);
+  // Coal and raw cod only ratchet up (icon inventory under-reports and is not
+  // eaten). Cooked Cod is consumed in battles and by pets, so a positive bag
+  // scrape replaces the soft counter — including clamping it down.
+  syncCookedCodCount(next, snapshot, cooked);
 
   const resource = snapshot.currentAction?.resource ?? snapshot.currentAction?.label ?? '';
   if (/coal/i.test(resource)) next.coalBusyCycles += 1;
@@ -500,9 +503,51 @@ export function fishTargetMet(counts: PlaybookCounts): boolean {
   return counts.rawCod >= COD_MIN;
 }
 
-/** Hard cook gate: cookedCod counter / inventory sync only. */
-export function cookTargetMet(counts: PlaybookCounts): boolean {
+/**
+ * Hard cook gate. A positive Cooked Cod bag scrape is authoritative and uses
+ * the same threshold as needsCookBeforeHunt (full cookMin, not a battle-food
+ * floor). Soft counts alone must not pass while the bag is short. A zero or
+ * missing stack falls back to the soft counter because icon inventory often
+ * omits Cooked Cod entirely.
+ */
+export function cookTargetMet(
+  counts: PlaybookCounts,
+  inventory?: Record<string, number> | null,
+): boolean {
+  if (inventory) {
+    const bag = cookedCodCount(inventory);
+    if (bag > 0) return bag >= COOK_MIN;
+  }
   return counts.cookedCod >= COOK_MIN;
+}
+
+/**
+ * Bag Cooked Cod wins when the scrape reports a stack. Otherwise credit only a
+ * live cooking CURRENT ACTION "+N" (producedCount). Cook restarts are not food.
+ */
+function syncCookedCodCount(
+  next: PlaybookCounts,
+  snapshot: GameSnapshot,
+  bagCooked: number,
+): void {
+  if (bagCooked > 0) {
+    next.cookedCod = bagCooked;
+    return;
+  }
+  const produced = cookingProducedCount(snapshot);
+  if (produced > 0) next.cookedCod = Math.max(next.cookedCod, produced);
+}
+
+function cookingProducedCount(snapshot: GameSnapshot): number {
+  const action = snapshot.currentAction;
+  if (!action) return 0;
+  const busy = Boolean(action.busy || snapshot.flags.gatherBusy);
+  if (!busy) return 0;
+  const resource = action.resource ?? action.label ?? '';
+  const cooking = action.skill === 'cooking' || /cook/i.test(resource);
+  if (!cooking) return 0;
+  const produced = action.producedCount ?? 0;
+  return produced > 0 ? produced : 0;
 }
 
 function huntBattleCount(counts: PlaybookCounts): number {
@@ -616,10 +661,14 @@ function deriveStage(
   if (!fishTargetMet(counts)) {
     if (hasBait || idx >= STAGE_ORDER.indexOf('buy_bait')) return 'fish_cod';
   }
-  if (fishTargetMet(counts) && !cookTargetMet(counts)) {
+  if (fishTargetMet(counts) && !cookTargetMet(counts, snapshot.inventory)) {
     if (idx >= STAGE_ORDER.indexOf('fish_cod') || hasBait) return 'cook_cod';
   }
-  if (cookTargetMet(counts) && !huntTargetMet(counts) && idx >= STAGE_ORDER.indexOf('cook_cod')) {
+  if (
+    cookTargetMet(counts, snapshot.inventory) &&
+    !huntTargetMet(counts) &&
+    idx >= STAGE_ORDER.indexOf('cook_cod')
+  ) {
     return 'hunt_battle_batch';
   }
   // Pets are async — never a sequential stage after hunt.
@@ -805,14 +854,14 @@ export function evaluatePlaybook(
   if (persistedStage === 'manage_pets') {
     persistedStage = 'hunt_battle_batch';
   }
-  if (persistedStage === 'sell_extras' && cookTargetMet(counts)) {
+  if (persistedStage === 'sell_extras' && cookTargetMet(counts, snapshot.inventory)) {
     persistedStage = 'hunt_battle_batch';
   }
 
   let stage = deriveStage(counts, snapshot, persistedStage, baitOwned);
   const coalMet = coalTargetMet(counts);
   const fishMet = fishTargetMet(counts);
-  const cookMet = cookTargetMet(counts);
+  const cookMet = cookTargetMet(counts, snapshot.inventory);
   const huntMet = huntTargetMet(counts);
   // Treat legacy stages (removed from STAGE_ORDER) for snap-back comparisons.
   const persistedIdx =
@@ -1003,7 +1052,7 @@ export function evaluatePlaybook(
     (stage === 'hunt_battle_batch' ||
       stage === 'hunt_rabbits' ||
       stage === 'cook_cod' ||
-      cookTargetMet(counts))
+      cookTargetMet(counts, snapshot.inventory))
   ) {
     preferredActions = [
       'cook_cod',
@@ -1192,9 +1241,9 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
     lastGatherSkill = 'fishing';
     lastGatherResource = 'Cod';
   }
-  if (action === 'cook_cod' && /restarted|already_busy|kept_current/i.test(outcome)) {
-    counts.cookedCod = Math.max(counts.cookedCod, counts.cookedCod + 1);
-  }
+  // cook_cod restarted / already_busy / kept_current means cooking is in
+  // progress, not that one Cooked Cod landed in the bag. Credit comes from
+  // the inventory scrape (and cooking producedCount) in syncCountsFromSnapshot.
   let lastCoalProgressSeen = persisted.lastCoalProgressSeen;
   let staleCoalBusyCycles = persisted.staleCoalBusyCycles ?? 0;
   if (action === 'mine_coal' && /restarted|already_busy/i.test(outcome)) {
@@ -1273,7 +1322,7 @@ export function filterAllowedByPlaybook(
   // Strict sequential gates: drop later-stage actions while earlier real targets unmet.
   const coalIncomplete = !coalTargetMet(playbook.counts);
   const fishIncomplete = !fishTargetMet(playbook.counts);
-  const cookIncomplete = !cookTargetMet(playbook.counts);
+  const cookIncomplete = !cookTargetMet(playbook.counts, snapshot.inventory);
   const cookBeforeHunt = needsCookBeforeHunt(snapshot.inventory, playbook.targets.cookMin);
   const finishHunt = mustFinishActiveHunt(snapshot);
   if (finishHunt) {
