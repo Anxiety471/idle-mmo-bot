@@ -2,6 +2,7 @@ import type { Locator, Page } from 'playwright';
 import type { AppConfig } from '../config.js';
 import type { BattleState, CombatStepResult, EnemyInfo, HuntState, Stance } from '../types.js';
 import { navigateTo } from '../browser.js';
+import { decodeIdleMmoMetaSlug } from '../snapshot/inventory-scrape.js';
 
 /**
  * Deterministic combat click-path helpers.
@@ -34,6 +35,21 @@ const PURE_NUMERIC_PATTERN = /^\d+$/;
 const PLAYER_PROFILE_PATTERN = /\bTotal\s*Lv\.?\s*\d+/i;
 const ENEMIES_NEARBY_LABEL_PATTERN = /^ENEMIES\s+NEARBY/i;
 const CURRENT_ACTION_MARKER = 'CURRENT ACTION';
+/** Live mobile Battle UI uses "Hunting" header (not always "CURRENT ACTION"). */
+const HUNTING_PANEL_MARKERS = ['Hunting', CURRENT_ACTION_MARKER];
+const HUNT_METRICS_END_MARKERS = ['ENEMIES NEARBY', 'Power Hunt', 'Character', 'Skills', 'Pets', 'Menu'];
+const ENEMY_TILE_SKIP_PATTERN =
+  /^(Power Hunt|Hunt More|Stop|Cancel Hunt|Battle|Stats|Back|Menu|Character|Skills|Pets)$/i;
+
+/** Map CDN/meta image slugs to enemy display names (icon-only tiles). */
+const ENEMY_SLUG_MAP: Record<string, string> = {
+  rabbit: 'Rabbit',
+  goblin: 'Goblin',
+  duck: 'Duck',
+  'crown-goblin': 'Crown Goblin',
+  crown_goblin: 'Crown Goblin',
+  crown: 'Crown Goblin',
+};
 
 async function pageText(page: Page): Promise<string> {
   return page.locator('body').innerText();
@@ -70,23 +86,26 @@ async function clickHuntStopButton(page: Page): Promise<boolean> {
   return false;
 }
 
-/** Prefer main combat content over full body to reduce nav/sidebar noise. */
+/** Prefer Hunting / Battle panel text over full body to reduce nav noise. */
 async function readCombatPanelText(page: Page): Promise<string> {
+  for (const marker of HUNTING_PANEL_MARKERS) {
+    const heading = page.getByText(marker, { exact: true }).first();
+    if (await heading.count() === 0) continue;
+    const container = heading.locator(
+      'xpath=ancestor::*[self::section or self::div][position()<=5]',
+    );
+    if (await container.count() > 0) {
+      const text = await safeInnerText(container.first());
+      if (text.includes('Total Enemies Found') || text.includes('Enemies Remaining')) {
+        return text;
+      }
+    }
+  }
+
   const main = page.locator('main');
   if (await main.count() > 0) {
     const text = await safeInnerText(main.first());
     if (text) return text;
-  }
-
-  const currentAction = page.getByText(CURRENT_ACTION_MARKER, { exact: true }).first();
-  if (await currentAction.count() > 0) {
-    const container = currentAction.locator(
-      'xpath=ancestor::*[self::section or self::div][position()<=4]',
-    );
-    if (await container.count() > 0) {
-      const text = await safeInnerText(container.first());
-      if (text) return text;
-    }
   }
 
   return pageText(page);
@@ -306,6 +325,62 @@ async function collectEnemyCardButtons(page: Page): Promise<Locator[]> {
   return [];
 }
 
+/** Post-Stop ENEMIES NEARBY icon tiles (image + quantity badge, no text names). */
+async function collectEnemyIconTiles(page: Page): Promise<Locator[]> {
+  const widget = await getEnemiesNearbyWidget(page);
+  if (!widget) return [];
+
+  const buttons = widget.getByRole('button');
+  const count = await buttons.count();
+  const tiles: Locator[] = [];
+
+  for (let i = 0; i < count; i++) {
+    const btn = buttons.nth(i);
+    if (!(await btn.isVisible().catch(() => false))) continue;
+    if ((await btn.locator('img').count()) === 0) continue;
+
+    const text = await safeInnerText(btn);
+    const firstLine = text.split('\n')[0]?.trim() ?? '';
+    if (ENEMY_TILE_SKIP_PATTERN.test(firstLine)) continue;
+    if (ACTION_BUTTON_PATTERN.test(firstLine)) continue;
+
+    tiles.push(btn);
+  }
+
+  return tiles;
+}
+
+export function enemyNameFromImageSrc(src: string): string | undefined {
+  const decoded = decodeIdleMmoMetaSlug(src);
+  const rawSlug = (decoded ?? src.split('/').pop()?.replace(/\..*$/, '') ?? '').toLowerCase();
+  const normalized = rawSlug.replace(/[_\s]+/g, '-');
+  const slugs = Object.entries(ENEMY_SLUG_MAP).sort(([a], [b]) => b.length - a.length);
+  for (const [slug, name] of slugs) {
+    if (normalized.includes(slug) || rawSlug.includes(slug.replace(/-/g, ''))) {
+      return name;
+    }
+  }
+  return undefined;
+}
+
+async function enemyNameFromTile(btn: Locator): Promise<string> {
+  const img = btn.locator('img').first();
+  if (await img.count() > 0) {
+    const alt = (await img.getAttribute('alt'))?.trim();
+    if (alt && !PURE_NUMERIC_PATTERN.test(alt)) return alt;
+    const src = await img.getAttribute('src');
+    if (src) {
+      const fromSrc = enemyNameFromImageSrc(src);
+      if (fromSrc) return fromSrc;
+    }
+  }
+  const aria = (await btn.getAttribute('aria-label'))?.trim();
+  if (aria) return aria;
+  const title = (await btn.getAttribute('title'))?.trim();
+  if (title) return title;
+  return 'Enemy';
+}
+
 async function enemyInfosFromButtons(buttons: Locator[]): Promise<EnemyInfo[]> {
   const enemies: EnemyInfo[] = [];
   for (let i = 0; i < buttons.length; i++) {
@@ -315,6 +390,22 @@ async function enemyInfosFromButtons(buttons: Locator[]): Promise<EnemyInfo[]> {
     enemies.push({ name, index: enemies.length });
   }
   return enemies;
+}
+
+/** Text cards or icon tiles from ENEMIES NEARBY (mixed enemy types). */
+async function collectEnemyTiles(page: Page): Promise<{ buttons: Locator[]; enemies: EnemyInfo[] }> {
+  const textCards = await collectEnemyCardButtons(page);
+  const textEnemies = await enemyInfosFromButtons(textCards);
+  if (textEnemies.length > 0) {
+    return { buttons: textCards, enemies: textEnemies };
+  }
+
+  const iconTiles = await collectEnemyIconTiles(page);
+  const enemies: EnemyInfo[] = [];
+  for (let i = 0; i < iconTiles.length; i++) {
+    enemies.push({ name: await enemyNameFromTile(iconTiles[i]), index: i });
+  }
+  return { buttons: iconTiles, enemies };
 }
 
 /**
@@ -498,13 +589,15 @@ export async function openEnemiesNearbyPanel(page: Page): Promise<CombatStepResu
       return 'enemy_selected';
     }
 
-    const countBtn = await findEnemiesNearbyCountButton(page);
-    if (!countBtn) {
+    const { buttons, enemies } = await collectEnemyTiles(page);
+    const picked = pickBattleEnemy(enemies);
+    const targetBtn = picked ? buttons[picked.index] : await findEnemiesNearbyCountButton(page);
+    if (!targetBtn) {
       return 'failed';
     }
 
     await dismissBlockingOverlays(page);
-    await countBtn.click({ force: true, timeout: 5000 }).catch(() => undefined);
+    await targetBtn.click({ force: true, timeout: 5000 }).catch(() => undefined);
     await page
       .getByText(/^STANCE$/i)
       .first()
@@ -528,9 +621,8 @@ export async function openEnemiesNearbyPanel(page: Page): Promise<CombatStepResu
  */
 export async function hasEnemySelectionReady(page: Page): Promise<boolean> {
   if (await isEnemyDetailPanelOpen(page)) return true;
-  if (await findEnemiesNearbyCountButton(page)) return true;
-  const cards = await collectEnemyCardButtons(page);
-  return cards.length > 0;
+  const { enemies } = await collectEnemyTiles(page);
+  return enemies.length > 0;
 }
 
 /**
@@ -599,25 +691,39 @@ export function hasHuntProgress(state: HuntState): boolean {
   );
 }
 
-/** Slice CURRENT ACTION hunt panel; excludes ENEMIES NEARBY zone badge counts. */
+/** Slice active Hunting panel; excludes ENEMIES NEARBY post-stop grid counts. */
 export function huntingMetricsSection(pageText: string): string {
-  if (!pageText.includes(CURRENT_ACTION_MARKER)) return '';
-  const start = pageText.indexOf(CURRENT_ACTION_MARKER);
-  const nearbyIdx = pageText.indexOf('ENEMIES NEARBY', start);
-  const end = nearbyIdx > start ? nearbyIdx : start + 900;
-  return pageText.slice(start, end);
+  for (const marker of HUNTING_PANEL_MARKERS) {
+    if (!pageText.includes(marker)) continue;
+    const start = pageText.indexOf(marker);
+    let end = start + 1200;
+    for (const endMarker of HUNT_METRICS_END_MARKERS) {
+      const idx = pageText.indexOf(endMarker, start + marker.length);
+      if (idx > start) end = Math.min(end, idx);
+    }
+    return pageText.slice(start, end);
+  }
+  return '';
 }
 
 function parseMetricNearLabel(text: string, labels: string[]): number | undefined {
   for (const label of labels) {
     const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const inline = text.match(new RegExp(`${escaped}\\s*[:\\-]?\\s*(\\d+)`, 'i'));
+    const inline = text.match(
+      new RegExp(`${escaped}\\s*[:\\-]?\\s*(\\d+(?:\\.\\d+)?)`, 'i'),
+    );
     if (inline?.[1]) return Number.parseInt(inline[1], 10);
     const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
-    const idx = lines.findIndex((l) => l.toLowerCase() === label.toLowerCase());
+    const idx = lines.findIndex(
+      (l) =>
+        l.toLowerCase() === label.toLowerCase() ||
+        l.toLowerCase().startsWith(`${label.toLowerCase()} `),
+    );
     if (idx >= 0) {
+      const sameLine = lines[idx].slice(label.length).match(/(\d+(?:\.\d+)?)/);
+      if (sameLine?.[1]) return Number.parseInt(sameLine[1], 10);
       for (let j = idx + 1; j < Math.min(idx + 4, lines.length); j++) {
-        const m = lines[j].match(/^(\d+)$/);
+        const m = lines[j].match(/^(\d+(?:\.\d+)?)$/);
         if (m?.[1]) return Number.parseInt(m[1], 10);
       }
     }
@@ -669,18 +775,32 @@ async function scrapeHuntMetricsFromDom(page: Page): Promise<{
       if (await labelEl.count() === 0) continue;
 
       const line = await safeInnerText(labelEl);
-      const inline = line.match(/:\s*(\d+)\s*$/);
+      const inline = line.match(/:\s*(\d+(?:\.\d+)?)\s*$/);
       if (inline?.[1]) return Number.parseInt(inline[1], 10);
 
+      // Live UI: label box left, value box right (sibling).
       const sibling = labelEl.locator('xpath=following-sibling::*[1]');
       if (await sibling.count() > 0) {
         const siblingText = await safeInnerText(sibling);
-        const siblingNum = siblingText.match(/^(\d+)$/);
+        const siblingNum = siblingText.match(/^(\d+(?:\.\d+)?)$/);
         if (siblingNum?.[1]) return Number.parseInt(siblingNum[1], 10);
       }
 
-      const container = labelEl.locator('xpath=ancestor::*[self::div or self::section or self::article][1]');
-      if (await container.count() > 0) {
+      const parent = labelEl.locator('xpath=parent::*');
+      if (await parent.count() > 0) {
+        const lastChild = parent.locator(':scope > *').last();
+        if (await lastChild.count() > 0) {
+          const lastText = await safeInnerText(lastChild);
+          const lastNum = lastText.match(/^(\d+(?:\.\d+)?)$/);
+          if (lastNum?.[1]) return Number.parseInt(lastNum[1], 10);
+        }
+      }
+
+      for (let depth = 1; depth <= 4; depth++) {
+        const container = labelEl.locator(
+          `xpath=ancestor::*[self::div or self::section or self::article][${depth}]`,
+        );
+        if (await container.count() === 0) continue;
         const parsed = parseMetricNearLabel(await safeInnerText(container), [label]);
         if (parsed !== undefined) return parsed;
       }
@@ -712,8 +832,7 @@ function mergeHuntMetrics(
 export async function readHuntState(page: Page): Promise<HuntState> {
   const text = await pageText(page);
   const panelText = await readCombatPanelText(page);
-  const cardButtons = await collectEnemyCardButtons(page);
-  const enemies = await enemyInfosFromButtons(cardButtons);
+  const { enemies } = await collectEnemyTiles(page);
   let metrics = mergeHuntMetrics(parseHuntMetrics(panelText), parseHuntMetrics(text));
   const domMetrics = await scrapeHuntMetricsFromDom(page).catch(() => ({}));
   metrics = mergeHuntMetrics(metrics, domMetrics);
@@ -876,13 +995,13 @@ export async function configureAndBattle(
   if (!(await isEnemyDetailPanelOpen(page))) {
     const opened = await openEnemiesNearbyPanel(page);
     if (opened !== 'enemy_selected') {
-      const cardButtons = await collectEnemyCardButtons(page);
-      const picked = pickBattleEnemy(await enemyInfosFromButtons(cardButtons));
+      const { buttons, enemies } = await collectEnemyTiles(page);
+      const picked = pickBattleEnemy(enemies);
       const targetIndex = picked?.index ?? enemyIndex;
-      if (cardButtons.length <= targetIndex) {
+      if (buttons.length <= targetIndex) {
         return 'failed';
       }
-      await cardButtons[targetIndex].click();
+      await buttons[targetIndex].click();
     }
   }
 

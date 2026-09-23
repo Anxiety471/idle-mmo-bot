@@ -38,6 +38,7 @@ export {
   hasEnemySelectionReady,
   hasPostHuntEnemySelectionReady,
   pickBattleEnemy,
+  enemyNameFromImageSrc,
 } from './combat.js';
 
 export {

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  enemyNameFromImageSrc,
   hasHuntProgress,
   huntingMetricsSection,
   parseHuntMetrics,
@@ -21,6 +22,27 @@ ENEMIES NEARBY
 40
 Windy
 Combat`;
+
+/** Live HitoriIdle mobile UI — Image A (active Hunting, label-then-number rows). */
+const LIVE_ACTIVE_HUNT_PANEL = `Battle
+Hunting
++0
+Next enemy in 0:18
+0.23 EXP/s
+Battle
+Stats
+Total Enemies Found
+407
+Enemies Remaining
+448
+Bonus Enemies
+0
+EXP Per Second
+0.23
+Loot Found
+0
+Power Hunt
+Stop`;
 
 const POST_STOP_SELECTION = `Hunt More
 ENEMIES NEARBY
@@ -76,6 +98,24 @@ ENEMIES NEARBY
 Windy`;
     const metrics = parseHuntMetrics(text);
     assert.equal(metrics.totalEnemiesFound, undefined);
+  });
+
+  it('parses live mobile Hunting panel (label row then value row)', () => {
+    const metrics = parseHuntMetrics(LIVE_ACTIVE_HUNT_PANEL);
+    assert.equal(metrics.totalEnemiesFound, 407);
+    assert.equal(metrics.enemiesRemaining, 448);
+    assert.equal(metrics.bonusEnemies, 0);
+    const section = huntingMetricsSection(LIVE_ACTIVE_HUNT_PANEL);
+    assert.ok(section.includes('Hunting'));
+    assert.ok(section.includes('Total Enemies Found'));
+    assert.ok(!section.includes('Power Hunt'));
+  });
+
+  it('parses side-by-side label value on one line', () => {
+    const text = `Hunting\nTotal Enemies Found 407\nEnemies Remaining 448`;
+    const metrics = parseHuntMetrics(text);
+    assert.equal(metrics.totalEnemiesFound, 407);
+    assert.equal(metrics.enemiesRemaining, 448);
   });
 
   it('parses colon-separated hunt metrics in CURRENT ACTION', () => {
@@ -166,5 +206,15 @@ describe('mixed enemy list metrics isolation', () => {
     const metrics = parseHuntMetrics(MIXED_ENEMIES_NEARBY);
     assert.equal(metrics.totalEnemiesFound, undefined);
     assert.equal(metrics.enemiesRemaining, undefined);
+  });
+});
+
+describe('enemyNameFromImageSrc', () => {
+  it('maps CDN/meta slugs to enemy names for icon tiles', () => {
+    assert.equal(enemyNameFromImageSrc('/enemies/rabbit-icon.png'), 'Rabbit');
+    assert.equal(enemyNameFromImageSrc('/enemies/duck-icon.png'), 'Duck');
+    assert.equal(enemyNameFromImageSrc('/enemies/crown-goblin.png'), 'Crown Goblin');
+    assert.equal(enemyNameFromImageSrc('/enemies/goblin.png'), 'Goblin');
+    assert.equal(enemyNameFromImageSrc('/enemies/unknown.png'), undefined);
   });
 });
