@@ -9,6 +9,7 @@ import {
   needsCookBeforeHunt,
   hasHuntProgress,
   huntingMetricsSection,
+  isActiveHuntPanelText,
   isIdleBattleText,
   parseHuntMetrics,
   pickBattleEnemy,
@@ -104,6 +105,48 @@ ENEMIES NEARBY
 Windy`;
     const metrics = parseHuntMetrics(text);
     assert.equal(metrics.totalEnemiesFound, undefined);
+  });
+
+  it('parses the live hunt strip at 121 found and treats it as ready to battle', () => {
+    const text = `Battle
+Total Enemies Found
+121
+Enemies Remaining
+831
+Bonus Enemies
+?
+0
+EXP Per Second
+0.22
+Loot Found
+0
+Power Hunt
+Stop
+What is hunting?`;
+    const metrics = parseHuntMetrics(text);
+    assert.equal(metrics.totalEnemiesFound, 121);
+    assert.equal(metrics.enemiesRemaining, 831);
+    assert.equal(metrics.bonusEnemies, 0);
+    assert.equal(isActiveHuntPanelText(text), true);
+  });
+
+  it('parses stacked labels then values, ignoring Enemies Remaining as the found count', () => {
+    const text = `Total Enemies Found
+Enemies Remaining
+Bonus Enemies
+EXP Per Second
+Loot Found
+121
+831
+0
+0.22
+0
+Power Hunt
+Stop`;
+    const metrics = parseHuntMetrics(text);
+    assert.equal(metrics.totalEnemiesFound, 121);
+    assert.equal(metrics.enemiesRemaining, 831);
+    assert.equal(metrics.bonusEnemies, 0);
   });
 
   it('parses live mobile Hunting panel (label row then value row)', () => {

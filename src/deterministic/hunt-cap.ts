@@ -1,20 +1,23 @@
 /**
- * Hard stop for hunting: Total Enemies Found must not exceed this.
- * Scales with combat level (fallback: total level / 10), hard max 10.
- *
- * combat 1 → 1, combat 3 → 2, combat 5 → 3, … combat 19+ → 10
+ * Hard stop for hunting: battle once Total Enemies Found reaches this count.
+ * Default is 100 (same batch size as coal / fish / cook). Override with HUNT_FOUND_CAP.
+ * Combat level does not change the cap — Jev cannot hunt past it or battle before it.
  */
+export const DEFAULT_HUNT_FOUND_CAP = 100;
+
 export function huntFoundCap(
-  combatLevel?: number | null,
-  totalLevel?: number | null,
+  _combatLevel?: number | null,
+  _totalLevel?: number | null,
 ): number {
-  const combat = Math.max(0, Math.floor(combatLevel ?? 0));
-  const total = Math.max(0, Math.floor(totalLevel ?? 0));
-  const level = combat > 0 ? combat : Math.max(1, Math.ceil(total / 10));
-  return Math.min(10, Math.max(1, Math.ceil(level / 2)));
+  const raw = process.env.HUNT_FOUND_CAP?.trim();
+  if (raw) {
+    const n = Number.parseInt(raw, 10);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return DEFAULT_HUNT_FOUND_CAP;
 }
 
-/** True when found count has hit the hard stop — Jev must not keep hunting. */
+/** True when Total Enemies Found has hit the battle threshold — stop and battle. */
 export function shouldHardStopHunt(
   found: number | null | undefined,
   combatLevel?: number | null,

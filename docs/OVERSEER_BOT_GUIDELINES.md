@@ -181,7 +181,7 @@ Create a **paused or active hourly watch** (Cursor automation / scheduled agent)
 Store project conventions in **mem0** (or your persistent memory store) so future sessions do not re-derive them:
 
 - Early-systems playbook stage order (§5)
-- Hunt found-cap formula — Jev cannot override (§4)
+- Hunt found-cap — Total Enemies Found ≥ 100 (or `HUNT_FOUND_CAP`); Jev cannot override (§4)
 - Pre-battle FOOD packing for heal — not mid-fight (§4)
 - No membership / real-money spend; gold Cheap Bait only (§4)
 - Protected sell list (`PROTECTED_ITEMS` in `src/deterministic/inventory.ts`)
@@ -194,14 +194,13 @@ Store project conventions in **mem0** (or your persistent memory store) so futur
 
 ### 4.1 Hunt found-cap (code-enforced; Jev cannot override)
 
-From `src/jev/hunt-cap.ts` (also mirrored in `src/deterministic/hunt-cap.ts`):
+From `src/deterministic/hunt-cap.ts` (re-exported by `src/jev/hunt-cap.ts`):
 
 ```
-level = combatLevel if > 0, else max(1, ceil(totalLevel / 10))
-huntFoundCap = min(10, max(1, ceil(level / 2)))
+huntFoundCap = HUNT_FOUND_CAP if set and > 0, else 100
 ```
 
-Examples: combat 1 → stop at **1** found; combat 20 → cap **10**. `pollUntilHuntStop()` checks the hard cap **before every Jev call**. Do not add Jev logic that tries to exceed this.
+While hunting, read **Total Enemies Found** on `/combat/battle`. Battle when that count is ≥ the cap. Default **100**. A live panel at **121 found / 831 remaining** must Stop and battle now — **Enemies Remaining** is not a reason to keep hunting, and combat level does not shrink the cap. `pollUntilHuntStop()` uses this counter only. Do not add Jev logic that battles earlier or hunts past the cap.
 
 ### 4.2 Pre-battle FOOD packing heal (not mid-fight)
 

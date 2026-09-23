@@ -16,7 +16,7 @@ const LOW_HP_THRESHOLD = 25;
  * StubJev — conservative defaults for unattended runs.
  *
  * - Never interrupt an active gather
- * - Stop hunt when Total Enemies Found >= huntFoundCap (combat 1 → cap 1)
+ * - Stop hunt when Total Enemies Found >= huntFoundCap (default 100)
  * - Balanced stance, max 1 enemy
  * - Flee only when HP is detectably low
  * - Prefer "Wood for the Hearth" quest
