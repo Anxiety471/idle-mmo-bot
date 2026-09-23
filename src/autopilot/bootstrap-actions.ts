@@ -7,6 +7,7 @@ import {
   readGatherState,
   readSkillState,
   ensureHuntActive,
+  isIdleBattleScreen,
   waitForEnemies,
   hasHuntProgress,
   hasPostHuntEnemySelectionReady,
@@ -51,6 +52,7 @@ import {
   shouldPreferBaitRestock,
 } from './early-systems-playbook.js';
 import { pollUntilHuntStop } from '../jev/hunt-cap.js';
+import { isHumanCheckPresent } from '../deterministic/human-check.js';
 
 const HEARTH_QUEST = 'Wood for the Hearth';
 const KILL_QUEST_PATTERN = /goblin|duck|rabbit|menace|fortune|whisper/i;
@@ -106,12 +108,20 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<string> {
     await sleep(huntBackoffMs);
     return `blocked:${huntResult}`;
   }
-  if (huntResult === 'failed') return `failed:${huntResult}`;
+  if (huntResult === 'failed') {
+    if (await isHumanCheckPresent(page)) return 'blocked:verify';
+    if (await isIdleBattleScreen(page)) return 'failed:hunt_not_started';
+    return `failed:${huntResult}`;
+  }
 
   let huntState: HuntState;
   if (huntResult === 'enemy_select_ready') {
     huntState = await readHuntState(page);
-  } else {
+  } else if (huntResult === 'hunt_started' || huntResult === 'hunt_already_active') {
+    if (await isIdleBattleScreen(page)) {
+      if (await isHumanCheckPresent(page)) return 'blocked:verify';
+      return 'failed:hunt_not_started';
+    }
     const metricsDeadline = Date.now() + Math.max(config.pollMs * 30, 60_000);
     let afterWait = await waitForEnemies(page);
     while (
@@ -135,6 +145,8 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<string> {
     const stopResult = await stopHunt(page);
     huntState = await prepareEnemyBattleSelection(page);
     if (huntState.enemies.length === 0) return `stop:${stopResult}:no_enemies`;
+  } else {
+    return `failed:unexpected_hunt_state:${huntResult}`;
   }
 
   const enemy = pickBattleEnemy(huntState.enemies);

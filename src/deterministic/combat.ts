@@ -3,6 +3,7 @@ import type { AppConfig } from '../config.js';
 import type { BattleState, CombatStepResult, EnemyInfo, HuntState, Stance } from '../types.js';
 import { navigateTo } from '../browser.js';
 import { decodeIdleMmoMetaSlug } from '../snapshot/inventory-scrape.js';
+import { isHumanCheckPresent, solveHumanCaptchaIfPresent } from './human-check.js';
 
 /**
  * Deterministic combat click-path helpers.
@@ -634,6 +635,77 @@ export async function hasPostHuntEnemySelectionReady(page: Page): Promise<boolea
   return hasEnemySelectionReady(page);
 }
 
+/** Pure helper: idle Battle copy from live desktop/mobile screenshots. */
+export function isIdleBattleText(text: string): boolean {
+  if (text.includes('Total Enemies Found')) return false;
+  if (/Start a hunt to find nearby enemies/i.test(text)) return true;
+  return text.includes('Start Hunt') && !text.includes('Hunting');
+}
+
+/** Idle Battle screen: Start Hunt prompt, no active hunt metrics or Stop. */
+export async function isIdleBattleScreen(page: Page): Promise<boolean> {
+  if (await isHuntStopVisible(page)) return false;
+  return isIdleBattleText(await pageText(page));
+}
+
+/** Active hunt: Stop visible plus Hunting header or hunt metrics on screen. */
+export async function isHuntActivelyRunning(page: Page): Promise<boolean> {
+  if (!(await isHuntStopVisible(page))) return false;
+  const text = await pageText(page);
+  return text.includes('Hunting') || text.includes('Total Enemies Found');
+}
+
+async function clickStartHuntWithVerify(
+  page: Page,
+  allowInterrupt: boolean,
+): Promise<CombatStepResult> {
+  const maxAttempts = 3;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await solveHumanCaptchaIfPresent(page);
+    if (await isHumanCheckPresent(page)) {
+      return 'failed';
+    }
+
+    await page.getByRole('button', { name: 'Start Hunt', exact: true }).first().click();
+    const dialog = await handleReplaceDialog(page, allowInterrupt);
+    if (dialog === 'no_action') return 'no_action';
+    if (dialog === 'failed') return 'failed';
+
+    await page.waitForTimeout(1000);
+    await solveHumanCaptchaIfPresent(page);
+
+    if (await isHuntActivelyRunning(page)) {
+      return 'hunt_started';
+    }
+    if (await isHuntStopVisible(page)) {
+      return 'hunt_started';
+    }
+    if (!(await isIdleBattleScreen(page))) {
+      return 'hunt_started';
+    }
+  }
+
+  if (await isHumanCheckPresent(page)) return 'failed';
+  return 'failed';
+}
+
+async function clickHuntMoreWithVerify(
+  page: Page,
+  allowInterrupt: boolean,
+): Promise<CombatStepResult> {
+  await solveHumanCaptchaIfPresent(page);
+  await page.getByRole('button', { name: 'Hunt More', exact: true }).first().click();
+  const dialog = await handleReplaceDialog(page, allowInterrupt);
+  if (dialog === 'no_action') return 'no_action';
+  if (dialog === 'failed') return 'failed';
+  await page.waitForTimeout(1000);
+  await solveHumanCaptchaIfPresent(page);
+  if (await isHuntActivelyRunning(page) || await isHuntStopVisible(page)) {
+    return 'hunt_started';
+  }
+  return 'failed';
+}
+
 /**
  * Ensure combat is in a hunt-ready state. Handles fresh Start Hunt, post-hunt Hunt More,
  * active hunts (Stop visible), and leftover enemy-select screens.
@@ -645,28 +717,25 @@ export async function ensureHuntActive(
 ): Promise<CombatStepResult> {
   await navigateTo(page, config, COMBAT_PATH);
   await waitForCombatUiSettled(page);
+  await solveHumanCaptchaIfPresent(page);
 
-  if (await isButtonVisible(page, 'Start Hunt')) {
-    await page.getByRole('button', { name: 'Start Hunt', exact: true }).first().click();
-    const dialog = await handleReplaceDialog(page, allowInterrupt);
-    if (dialog === 'no_action') return 'no_action';
-    if (dialog === 'failed') return 'failed';
-    return 'hunt_started';
-  }
-
-  if (await isButtonVisible(page, 'Hunt More')) {
-    await page.getByRole('button', { name: 'Hunt More', exact: true }).first().click();
-    const dialog = await handleReplaceDialog(page, allowInterrupt);
-    if (dialog === 'no_action') return 'no_action';
-    if (dialog === 'failed') return 'failed';
-    return 'hunt_started';
-  }
-
-  if (await isHuntStopVisible(page)) {
+  if (await isHuntActivelyRunning(page)) {
     return 'hunt_already_active';
   }
 
-  if (await hasEnemySelectionReady(page)) {
+  if (await isHuntStopVisible(page) && !(await isIdleBattleScreen(page))) {
+    return 'hunt_already_active';
+  }
+
+  if (await isButtonVisible(page, 'Start Hunt')) {
+    return clickStartHuntWithVerify(page, allowInterrupt);
+  }
+
+  if (await isButtonVisible(page, 'Hunt More')) {
+    return clickHuntMoreWithVerify(page, allowInterrupt);
+  }
+
+  if (await hasEnemySelectionReady(page) && !(await isIdleBattleScreen(page))) {
     return 'enemy_select_ready';
   }
 

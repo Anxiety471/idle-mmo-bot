@@ -4,6 +4,7 @@ import {
   enemyNameFromImageSrc,
   hasHuntProgress,
   huntingMetricsSection,
+  isIdleBattleText,
   parseHuntMetrics,
   pickBattleEnemy,
 } from './combat.js';
@@ -206,6 +207,19 @@ describe('mixed enemy list metrics isolation', () => {
     const metrics = parseHuntMetrics(MIXED_ENEMIES_NEARBY);
     assert.equal(metrics.totalEnemiesFound, undefined);
     assert.equal(metrics.enemiesRemaining, undefined);
+  });
+});
+
+describe('isIdleBattleText', () => {
+  it('detects idle Start Hunt screen from live desktop screenshot copy', () => {
+    const idle = `Battle
+ENEMIES NEARBY
+Hunt
+Start a hunt to find nearby enemies.
+Start Hunt
+YOUR CHARACTER`;
+    assert.equal(isIdleBattleText(idle), true);
+    assert.equal(isIdleBattleText(LIVE_ACTIVE_HUNT_PANEL), false);
   });
 });
 

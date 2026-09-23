@@ -9,6 +9,7 @@ import {
   type SkillConfig,
   type SkillId,
 } from './skills.js';
+import { solveHumanCaptchaIfPresent } from './human-check.js';
 
 /**
  * Deterministic skill gather/craft helpers (woodcutting, mining, fishing, etc.).
@@ -265,67 +266,6 @@ async function clickStartButton(page: Page): Promise<boolean> {
   return true;
 }
 
-/** Idle MMO human-check: Verify → emoji challenge → confirm. */
-async function solveHumanCaptchaIfPresent(page: Page): Promise<boolean> {
-  const human = page.getByText(/make sure you're human/i);
-  const verifyPeek = page.getByRole('button', { name: /^Verify$/i });
-  if (!(await human.isVisible().catch(() => false)) && (await verifyPeek.count()) === 0) {
-    return false;
-  }
-
-  if ((await verifyPeek.count()) > 0) {
-    await verifyPeek.first().click({ force: true }).catch(() => undefined);
-    await page.waitForTimeout(800);
-  }
-
-  const body = await page.locator('body').innerText();
-  const promptMatch = body.match(/Press the\s+(.+?)\s+emoji to continue/i);
-  const targetName = (promptMatch?.[1] || '').trim().toLowerCase();
-
-  const NAME_TO_EMOJI: Record<string, string> = {
-    sun: '☀️',
-    star: '⭐',
-    moon: '🌙',
-    cloud: '☁️',
-    fire: '🔥',
-    water: '💧',
-    tree: '🌳',
-    fish: '🐟',
-    heart: '❤️',
-    flower: '🌸',
-    rainbow: '🌈',
-  };
-  const targetEmoji =
-    NAME_TO_EMOJI[targetName] || NAME_TO_EMOJI[targetName.replace(/\s+emoji$/, '')];
-
-  const optionButtons = page.locator('button');
-  const count = await optionButtons.count();
-  let clicked = false;
-  for (let i = 0; i < count; i++) {
-    const label = ((await optionButtons.nth(i).innerText().catch(() => '')) || '').trim();
-    const aria = (await optionButtons.nth(i).getAttribute('aria-label').catch(() => '')) || '';
-    const hay = `${label} ${aria}`;
-    if (targetEmoji && hay.includes(targetEmoji)) {
-      await optionButtons.nth(i).click({ force: true }).catch(() => undefined);
-      clicked = true;
-      break;
-    }
-    if (targetName && new RegExp(targetName, 'i').test(hay) && hay.length < 40) {
-      await optionButtons.nth(i).click({ force: true }).catch(() => undefined);
-      clicked = true;
-      break;
-    }
-  }
-  if (!clicked && targetEmoji) {
-    const byText = page.getByText(targetEmoji, { exact: true });
-    if ((await byText.count()) > 0) {
-      await byText.first().click({ force: true }).catch(() => undefined);
-      clicked = true;
-    }
-  }
-  await page.waitForTimeout(1000);
-  return clicked || (await verifyPeek.count()) > 0;
-}
 
 /**
  * Probe other gather skill pages for CURRENT ACTION.
