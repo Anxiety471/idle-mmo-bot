@@ -1169,6 +1169,32 @@ export function inventoryCanCookBattleFood(
   return cod >= 1 && coal >= 1;
 }
 
+/** Live Cooked Cod stacks (empty inventory is 0). */
+export function cookedCodCount(
+  inventory: Record<string, number> | null | undefined,
+): number {
+  if (!inventory) return 0;
+  let total = 0;
+  for (const [name, qty] of Object.entries(inventory)) {
+    if (!qty || qty <= 0) continue;
+    if (/cooked\s*cod/i.test(name)) total += qty;
+  }
+  return total;
+}
+
+/**
+ * Cook before hunt when Cooked Cod is empty or still under the cook target.
+ * Reaching the target (or more) is enough — do not keep cooking past it.
+ */
+export function needsCookBeforeHunt(
+  inventory: Record<string, number> | null | undefined,
+  threshold: number,
+): boolean {
+  if (!inventoryCanCookBattleFood(inventory)) return false;
+  const target = Number.isFinite(threshold) && threshold > 0 ? threshold : 1;
+  return cookedCodCount(inventory) < target;
+}
+
 async function buttonMatchesFoodLabel(btn: Locator, label: string): Promise<boolean> {
   const needle = label.toLowerCase();
   const bits = [
@@ -1258,7 +1284,7 @@ async function closeFoodPickerOnly(page: Page): Promise<void> {
  * Idle MMO heals via food packed BEFORE Battle (effective HP), not mid-fight clicks.
  * Flow: FOOD → Add → food picker (Nx badge or Cooked Cod icon) → quantity Max → Add.
  */
-export async function selectBattleFood(page: Page): Promise<'added' | 'none' | 'no_food' | 'failed'> {
+export async function selectBattleFood(page: Page): Promise<'added' | 'none' | 'failed'> {
   try {
     const foodHeading = page.getByText(/^FOOD$/i).first();
     if (!(await foodHeading.isVisible({ timeout: 2000 }).catch(() => false))) {
@@ -1280,9 +1306,9 @@ export async function selectBattleFood(page: Page): Promise<'added' | 'none' | '
     const foodItem = await findBattleFoodButton(page);
 
     if (!foodItem) {
-      console.log('[combat] FOOD Add opened but no cooked food — cook Cooked Cod first');
+      console.log('[combat] FOOD Add opened but no cooked food in picker');
       await closeFoodPickerOnly(page);
-      return 'no_food';
+      return 'none';
     }
 
     await foodItem.click({ timeout: 5000 }).catch(() => undefined);
@@ -1387,8 +1413,8 @@ export async function configureAndBattle(
   }
 
   // Live order: food, then Max on the ENEMIES row, then Battle.
-  const packed = await selectBattleFood(page);
-  if (packed === 'no_food') return 'no_food';
+  // An empty picker does not abort the fight — cooking is decided before the hunt.
+  await selectBattleFood(page);
   await setMaxEnemies(page, maxEnemies);
   await setStance(page, stance);
 
@@ -1443,8 +1469,7 @@ export async function huntMore(
     (await isEnemyDetailPanelOpen(page) || (await isShowBattleEntityModal(page))) &&
     !(await isFightInProgress(page))
   ) {
-    const packed = await selectBattleFood(page);
-    if (packed === 'no_food') return 'no_food';
+    await selectBattleFood(page);
     await setMaxEnemies(page, Number.MAX_SAFE_INTEGER);
     const battleBtn = await visibleBattleButton(page);
     if (battleBtn) {

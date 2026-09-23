@@ -109,7 +109,13 @@ export {
   recordVerifyAttempt,
   type VerifyBudget,
 } from './poll-interval.js';
-export { selectBattleFood, inventoryHasBattleFood, inventoryCanCookBattleFood } from './combat.js';
+export {
+  selectBattleFood,
+  inventoryHasBattleFood,
+  inventoryCanCookBattleFood,
+  cookedCodCount,
+  needsCookBeforeHunt,
+} from './combat.js';
 export { tryCookCod, cookInterruptDecision } from './cook.js';
 export { equipPet, maintainPets, managePets } from './pets.js';
 export type { ManagePetsOptions, PetsStepResult } from './pets.js';
