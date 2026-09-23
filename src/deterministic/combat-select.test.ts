@@ -7,6 +7,7 @@ import {
   pickBattleEnemy,
   prepareEnemyBattleSelection,
   readHuntState,
+  stopHunt,
 } from './combat.js';
 
 let browser: Browser;
@@ -247,6 +248,84 @@ describe('battle from monster image', () => {
       const result = await huntMore(page, false);
       assert.equal(result, 'battle_started');
       assert.equal(await page.locator('body').getAttribute('data-battled'), '1');
+    } finally {
+      await page.close();
+    }
+  });
+});
+
+/** Confirm copy from the live "Stop Hunting" dialog (Close + purple Stop). */
+const STOP_HUNTING_DIALOG = `<!DOCTYPE html>
+<html><body>
+  <div id="dialog">
+    <h2>Stop Hunting</h2>
+    <p>The enemies you've already hunted will be ready to battle right away.</p>
+    <p>You can jump back into hunting anytime, as long as you haven't hit your limit. Any new enemies you discover will be added to the ones you're already found.</p>
+    <button type="button" id="close">Close</button>
+    <button type="button" id="confirm">Stop</button>
+  </div>
+  <div id="nearby" hidden>ENEMIES NEARBY</div>
+  <button type="button" id="hunt-more" hidden>Hunt More</button>
+  <script>
+    document.getElementById('close').addEventListener('click', () => {
+      document.body.dataset.closed = '1';
+    });
+    document.getElementById('confirm').addEventListener('click', () => {
+      document.body.dataset.stopped = '1';
+      document.getElementById('dialog').hidden = true;
+      document.getElementById('nearby').hidden = false;
+      document.getElementById('hunt-more').hidden = false;
+    });
+  </script>
+</body></html>`;
+
+/** Panel Stop only opens the dialog and then hides, so a second Stop is not already in the DOM. */
+const STOP_OPENS_CONFIRM = `<!DOCTYPE html>
+<html><body>
+  <button type="button" id="panel-stop">Stop</button>
+  <div id="dialog" hidden>
+    <h2>Stop Hunting</h2>
+    <p>The enemies you've already hunted will be ready to battle right away.</p>
+    <button type="button" id="close">Close</button>
+    <button type="button" id="confirm">Stop</button>
+  </div>
+  <div id="nearby" hidden>ENEMIES NEARBY</div>
+  <script>
+    document.getElementById('panel-stop').addEventListener('click', () => {
+      document.getElementById('panel-stop').remove();
+      document.getElementById('dialog').hidden = false;
+    });
+    document.getElementById('close').addEventListener('click', () => {
+      document.body.dataset.closed = '1';
+    });
+    document.getElementById('confirm').addEventListener('click', () => {
+      document.body.dataset.stopped = '1';
+      document.getElementById('dialog').hidden = true;
+      document.getElementById('nearby').hidden = false;
+    });
+  </script>
+</body></html>`;
+
+describe('Stop Hunting confirm', () => {
+  it('clicks the dialog Stop button and not Close', async () => {
+    const page = await load(STOP_HUNTING_DIALOG);
+    try {
+      const result = await stopHunt(page);
+      assert.equal(result, 'hunt_stopped');
+      assert.equal(await page.locator('body').getAttribute('data-stopped'), '1');
+      assert.equal(await page.locator('body').getAttribute('data-closed'), null);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('confirms Stop after the panel control opens the dialog', async () => {
+    const page = await load(STOP_OPENS_CONFIRM);
+    try {
+      const result = await stopHunt(page);
+      assert.equal(result, 'hunt_stopped');
+      assert.equal(await page.locator('body').getAttribute('data-stopped'), '1');
+      assert.equal(await page.locator('body').getAttribute('data-closed'), null);
     } finally {
       await page.close();
     }

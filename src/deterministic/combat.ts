@@ -591,9 +591,43 @@ async function findEnemiesNearbyCountButton(page: Page): Promise<Locator | null>
   return null;
 }
 
+/**
+ * Live hunt stop opens a "Stop Hunting" confirm (Close + purple Stop).
+ * Click that Stop. Do not click Close — that leaves the hunt running.
+ */
+async function confirmStopHuntingDialog(page: Page): Promise<boolean> {
+  const stops = page.getByRole('button', { name: 'Stop', exact: true });
+  const count = await stops.count();
+  for (let i = count - 1; i >= 0; i--) {
+    const btn = stops.nth(i);
+    if (!(await btn.isVisible().catch(() => false))) continue;
+    if (!(await isStopHuntingConfirmButton(btn))) continue;
+    await btn.click({ timeout: 5_000 }).catch(() => undefined);
+    return true;
+  }
+  return false;
+}
+
+/** True when this Stop sits in the confirm dialog, not the hunt-panel control that opens it. */
+async function isStopHuntingConfirmButton(btn: Locator): Promise<boolean> {
+  const scopes = btn.locator(
+    'xpath=ancestor::*[self::div or self::section or self::dialog or self::form][position()<=6]',
+  );
+  const count = await scopes.count();
+  for (let i = 0; i < count; i++) {
+    const text = await safeInnerText(scopes.nth(i));
+    if (text.length > 1200) continue;
+    if (!/Stop Hunting/i.test(text)) continue;
+    if (/ready to battle right away/i.test(text) || /\bClose\b/.test(text)) return true;
+  }
+  return false;
+}
+
 async function dismissBlockingOverlays(page: Page): Promise<void> {
   // Leave the battle-entity modal alone — Escape/Close would drop the monster we just opened.
   if ((await isEnemyDetailPanelOpen(page)) || (await isShowBattleEntityModal(page))) return;
+  // Escape/Close on "Stop Hunting" cancels the stop. Confirm it instead.
+  if (await confirmStopHuntingDialog(page)) return;
 
   await page.keyboard.press('Escape').catch(() => undefined);
 
@@ -1110,18 +1144,21 @@ export async function readHuntState(page: Page): Promise<HuntState> {
   };
 }
 
-/** Click Stop / Cancel Hunt on hunt screen and confirm. */
+/** Click Stop / Cancel Hunt on hunt screen, then the "Stop Hunting" confirm. */
 export async function stopHunt(page: Page): Promise<CombatStepResult> {
-  if (!(await clickHuntStopButton(page))) {
+  const alreadyConfirming = await confirmStopHuntingDialog(page);
+  if (!alreadyConfirming && !(await clickHuntStopButton(page))) {
     return 'no_action';
   }
 
-  for (const name of HUNT_STOP_BUTTON_NAMES) {
-    const confirmStop = page.getByRole('button', { name, exact: true });
-    if (await confirmStop.count() > 1) {
-      await confirmStop.last().click();
-      break;
-    }
+  if (!alreadyConfirming) {
+    await page
+      .getByText('Stop Hunting', { exact: true })
+      .or(page.getByText(/ready to battle right away/i))
+      .first()
+      .waitFor({ state: 'visible', timeout: 4_000 })
+      .catch(() => undefined);
+    await confirmStopHuntingDialog(page);
   }
 
   await page
