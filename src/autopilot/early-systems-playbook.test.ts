@@ -1380,6 +1380,86 @@ describe('async opportunistic pets', () => {
   });
 });
 
+describe('skip sell_extras after cook', () => {
+  const envSnapshot = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
+  let statePath = '';
+
+  afterEach(() => {
+    restoreEnv(envSnapshot);
+    if (statePath) rmSync(statePath, { force: true });
+  });
+
+  it('advances to hunt_rabbits when cook target met and hunts unmet (skips sell_extras)', () => {
+    statePath = join('/tmp', `playbook-skip-sell-extras-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'cook_cod',
+        counts: {
+          ...coalMetCounts({ sells: 1 }),
+          rawCod: 100,
+          cookedCod: 100,
+          rabbitHunts: 0,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const progress = evaluatePlaybook(
+      minimalSnapshot({
+        inventory: { 'Cheap Bait': 20, 'Coal Ore': 100, Cod: 100, 'Cooked Cod': 100 },
+        gold: 50,
+      }),
+    );
+
+    assert.equal(cookTargetMet(progress.counts), true);
+    assert.equal(huntTargetMet(progress.counts), false);
+    assert.equal(progress.stage, 'hunt_rabbits');
+    assert.notEqual(progress.stage, 'sell_extras');
+
+    const saved = JSON.parse(readFileSync(statePath, 'utf8')) as { stage?: string };
+    assert.equal(saved.stage, 'hunt_rabbits');
+  });
+
+  it('normalizes persisted sell_extras to hunt_rabbits when cook met without sells >= 2', () => {
+    statePath = join('/tmp', `playbook-legacy-sell-extras-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'sell_extras',
+        counts: {
+          ...coalMetCounts({ sells: 1 }),
+          rawCod: 100,
+          cookedCod: 100,
+          rabbitHunts: 5,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const progress = evaluatePlaybook(
+      minimalSnapshot({
+        inventory: { 'Cheap Bait': 20, 'Coal Ore': 100, Cod: 100, 'Cooked Cod': 100 },
+        gold: 50,
+      }),
+    );
+
+    assert.equal(cookTargetMet(progress.counts), true);
+    assert.equal(huntTargetMet(progress.counts), false);
+    assert.equal(progress.counts.sells, 1);
+    assert.equal(progress.stage, 'hunt_rabbits');
+
+    const saved = JSON.parse(readFileSync(statePath, 'utf8')) as { stage?: string };
+    assert.equal(saved.stage, 'hunt_rabbits');
+  });
+});
+
 describe('stale coal gather', () => {
   const envSnapshot = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
   let statePath: string;
