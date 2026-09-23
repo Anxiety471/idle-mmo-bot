@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { hasHuntProgress, huntingMetricsSection, parseHuntMetrics } from './combat.js';
-import type { HuntState } from '../types.js';
+import {
+  hasHuntProgress,
+  huntingMetricsSection,
+  parseHuntMetrics,
+  pickBattleEnemy,
+} from './combat.js';
+import type { EnemyInfo, HuntState } from '../types.js';
 
 const ACTIVE_HUNT_PANEL = `Stop
 CURRENT ACTION
@@ -116,3 +121,50 @@ describe('hasHuntProgress', () => {
 function parseHuntMetricsToState(text: string): HuntState {
   return { enemies: [], defeatedCount: 0, pageText: text, ...parseHuntMetrics(text) };
 }
+
+const MIXED_ENEMIES_NEARBY = `Hunt More
+ENEMIES NEARBY
+3
+Goblin
+Lv. 3
+Rabbit
+Lv. 1
+Duck
+Lv. 2
+STANCE
+Balanced
+Battle`;
+
+describe('pickBattleEnemy', () => {
+  it('prefers Rabbit in a mixed ENEMIES NEARBY list', () => {
+    const enemies: EnemyInfo[] = [
+      { name: 'Goblin', index: 0 },
+      { name: 'Rabbit', index: 1 },
+      { name: 'Duck', index: 2 },
+    ];
+    const picked = pickBattleEnemy(enemies);
+    assert.equal(picked?.name, 'Rabbit');
+    assert.equal(picked?.index, 1);
+  });
+
+  it('falls back to first enemy when Rabbit is absent', () => {
+    const enemies: EnemyInfo[] = [
+      { name: 'Goblin', index: 0 },
+      { name: 'Duck', index: 1 },
+    ];
+    const picked = pickBattleEnemy(enemies);
+    assert.equal(picked?.name, 'Goblin');
+  });
+
+  it('returns undefined for empty list', () => {
+    assert.equal(pickBattleEnemy([]), undefined);
+  });
+});
+
+describe('mixed enemy list metrics isolation', () => {
+  it('does not treat ENEMIES NEARBY pool count as hunt found metric', () => {
+    const metrics = parseHuntMetrics(MIXED_ENEMIES_NEARBY);
+    assert.equal(metrics.totalEnemiesFound, undefined);
+    assert.equal(metrics.enemiesRemaining, undefined);
+  });
+});

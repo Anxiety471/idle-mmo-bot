@@ -84,7 +84,9 @@ function detectCombatPhase(text: string, path: string): CombatPhase {
   if (!path.includes('/combat')) return 'none';
   if (text.includes('Run Away')) return 'battle';
   if (text.includes('STANCE') && text.includes('Battle')) return 'enemy_select';
-  if (text.includes('Stop') && text.includes('Total Enemies Found')) return 'hunt';
+  if ((text.includes('Stop') || text.includes('Cancel Hunt')) && text.includes('Total Enemies Found')) {
+    return 'hunt';
+  }
   if (text.includes('Start Hunt') || text.includes('Hunt More')) return 'none';
   return 'none';
 }

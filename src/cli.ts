@@ -19,6 +19,7 @@ import {
   readBattleState,
   runAway,
   huntMore,
+  pickBattleEnemy,
   readQuestState,
   openQuest,
   talkQuest,
@@ -254,7 +255,12 @@ async function runCombat(
         continue;
       }
 
-      const enemy = huntState.enemies[0];
+      const enemy = pickBattleEnemy(huntState.enemies);
+      if (!enemy) {
+        console.log('[combat] No battle target in enemy list — waiting');
+        await sleep(config.pollMs);
+        continue;
+      }
       console.log(`[combat] Selected enemy: ${enemy.name}`);
       const maxEnemies = await jev.chooseMaxEnemies(enemy);
       const stance = await jev.chooseStance(enemy);

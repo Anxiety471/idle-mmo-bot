@@ -21,7 +21,10 @@ const COMBAT_UI_SETTLE_MS = 10_000;
 const ENEMY_CARD_HEIGHT_CLASSES = ['h-24', 'h-20', 'h-28', 'h-32'];
 
 const ACTION_BUTTON_PATTERN =
-  /^(Start Hunt|Stop|Battle|Run Away|Hunt More|Close|Start anyway|Create|Invites|Talk|Overview|Turn In)$/i;
+  /^(Start Hunt|Stop|Cancel Hunt|Battle|Run Away|Hunt More|Close|Start anyway|Create|Invites|Talk|Overview|Turn In)$/i;
+
+/** Live UI may label the hunt-stop control "Stop" or "Cancel Hunt". */
+const HUNT_STOP_BUTTON_NAMES = ['Stop', 'Cancel Hunt'];
 
 /** Nav/chrome labels that are not enemy cards. */
 const NAV_CHROME_PATTERN =
@@ -50,12 +53,52 @@ async function isButtonVisible(page: Page, name: string): Promise<boolean> {
   return btn.first().isVisible();
 }
 
+async function isHuntStopVisible(page: Page): Promise<boolean> {
+  for (const name of HUNT_STOP_BUTTON_NAMES) {
+    if (await isButtonVisible(page, name)) return true;
+  }
+  return false;
+}
+
+async function clickHuntStopButton(page: Page): Promise<boolean> {
+  for (const name of HUNT_STOP_BUTTON_NAMES) {
+    const btn = page.getByRole('button', { name, exact: true });
+    if (await btn.count() === 0) continue;
+    await btn.first().click();
+    return true;
+  }
+  return false;
+}
+
+/** Prefer main combat content over full body to reduce nav/sidebar noise. */
+async function readCombatPanelText(page: Page): Promise<string> {
+  const main = page.locator('main');
+  if (await main.count() > 0) {
+    const text = await safeInnerText(main.first());
+    if (text) return text;
+  }
+
+  const currentAction = page.getByText(CURRENT_ACTION_MARKER, { exact: true }).first();
+  if (await currentAction.count() > 0) {
+    const container = currentAction.locator(
+      'xpath=ancestor::*[self::section or self::div][position()<=4]',
+    );
+    if (await container.count() > 0) {
+      const text = await safeInnerText(container.first());
+      if (text) return text;
+    }
+  }
+
+  return pageText(page);
+}
+
 /** Wait for any primary combat control after navigation. */
 async function waitForCombatUiSettled(page: Page, timeoutMs = COMBAT_UI_SETTLE_MS): Promise<void> {
   const controls = page
     .getByRole('button', { name: 'Start Hunt', exact: true })
     .or(page.getByRole('button', { name: 'Hunt More', exact: true }))
     .or(page.getByRole('button', { name: 'Stop', exact: true }))
+    .or(page.getByRole('button', { name: 'Cancel Hunt', exact: true }))
     .or(page.getByRole('button', { name: 'Battle', exact: true }));
 
   await controls
@@ -274,6 +317,16 @@ async function enemyInfosFromButtons(buttons: Locator[]): Promise<EnemyInfo[]> {
   return enemies;
 }
 
+/**
+ * Pick a battle target from a mixed ENEMIES NEARBY list.
+ * Prefer Rabbit when present; otherwise first ready enemy — never block on rabbit-only.
+ */
+export function pickBattleEnemy(enemies: EnemyInfo[]): EnemyInfo | undefined {
+  if (enemies.length === 0) return undefined;
+  const rabbit = enemies.find((e) => /\brabbit\b/i.test(e.name));
+  return rabbit ?? enemies[0];
+}
+
 async function isEnemyDetailPanelOpen(page: Page): Promise<boolean> {
   const hasStance = await page
     .getByText(/^STANCE$/i)
@@ -485,7 +538,7 @@ export async function hasEnemySelectionReady(page: Page): Promise<boolean> {
  * stays visible during active hunts — must not bypass metrics wait.
  */
 export async function hasPostHuntEnemySelectionReady(page: Page): Promise<boolean> {
-  if (await isButtonVisible(page, 'Stop')) return false;
+  if (await isHuntStopVisible(page)) return false;
   return hasEnemySelectionReady(page);
 }
 
@@ -517,7 +570,7 @@ export async function ensureHuntActive(
     return 'hunt_started';
   }
 
-  if (await isButtonVisible(page, 'Stop')) {
+  if (await isHuntStopVisible(page)) {
     return 'hunt_already_active';
   }
 
@@ -588,8 +641,14 @@ export function parseHuntMetrics(text: string): {
     totalEnemiesFound ??= parseMetricNearLabel(source, [
       'Total Enemies Found',
       'Enemies Found',
+      'Enemies Hunted',
+      'Hunted',
     ]);
-    enemiesRemaining ??= parseMetricNearLabel(source, ['Enemies Remaining', 'Remaining']);
+    enemiesRemaining ??= parseMetricNearLabel(source, [
+      'Enemies Remaining',
+      'Remaining Enemies',
+      'Remaining',
+    ]);
     bonusEnemies ??= parseMetricNearLabel(source, ['Bonus Enemies', 'Bonus']);
   }
 
@@ -604,12 +663,21 @@ async function scrapeHuntMetricsFromDom(page: Page): Promise<{
 }> {
   async function readNear(labels: string[]): Promise<number | undefined> {
     for (const label of labels) {
-      const labelEl = page.getByText(label, { exact: true }).first();
+      const exact = page.getByText(label, { exact: true }).first();
+      const fuzzy = page.getByText(new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')).first();
+      const labelEl = (await exact.count()) > 0 ? exact : fuzzy;
       if (await labelEl.count() === 0) continue;
 
       const line = await safeInnerText(labelEl);
       const inline = line.match(/:\s*(\d+)\s*$/);
       if (inline?.[1]) return Number.parseInt(inline[1], 10);
+
+      const sibling = labelEl.locator('xpath=following-sibling::*[1]');
+      if (await sibling.count() > 0) {
+        const siblingText = await safeInnerText(sibling);
+        const siblingNum = siblingText.match(/^(\d+)$/);
+        if (siblingNum?.[1]) return Number.parseInt(siblingNum[1], 10);
+      }
 
       const container = labelEl.locator('xpath=ancestor::*[self::div or self::section or self::article][1]');
       if (await container.count() > 0) {
@@ -621,8 +689,8 @@ async function scrapeHuntMetricsFromDom(page: Page): Promise<{
   }
 
   const [totalEnemiesFound, enemiesRemaining, bonusEnemies] = await Promise.all([
-    readNear(['Total Enemies Found', 'Enemies Found']),
-    readNear(['Enemies Remaining', 'Remaining']),
+    readNear(['Total Enemies Found', 'Enemies Found', 'Enemies Hunted', 'Hunted']),
+    readNear(['Enemies Remaining', 'Remaining Enemies', 'Remaining']),
     readNear(['Bonus Enemies', 'Bonus']),
   ]);
 
@@ -643,18 +711,12 @@ function mergeHuntMetrics(
 /** Read hunt screen: metrics while hunting (Stop visible) and cards after Stop. */
 export async function readHuntState(page: Page): Promise<HuntState> {
   const text = await pageText(page);
+  const panelText = await readCombatPanelText(page);
   const cardButtons = await collectEnemyCardButtons(page);
   const enemies = await enemyInfosFromButtons(cardButtons);
-  let metrics = parseHuntMetrics(text);
-
-  if (
-    metrics.totalEnemiesFound === undefined &&
-    metrics.enemiesRemaining === undefined &&
-    metrics.bonusEnemies === undefined
-  ) {
-    const domMetrics = await scrapeHuntMetricsFromDom(page).catch(() => ({}));
-    metrics = mergeHuntMetrics(metrics, domMetrics);
-  }
+  let metrics = mergeHuntMetrics(parseHuntMetrics(panelText), parseHuntMetrics(text));
+  const domMetrics = await scrapeHuntMetricsFromDom(page).catch(() => ({}));
+  metrics = mergeHuntMetrics(metrics, domMetrics);
 
   const defeatedMatch = text.match(/(\d+)\s+defeated/i);
   const defeatedCount = defeatedMatch ? Number.parseInt(defeatedMatch[1], 10) : 0;
@@ -667,17 +729,18 @@ export async function readHuntState(page: Page): Promise<HuntState> {
   };
 }
 
-/** Click Stop on hunt screen and confirm. */
+/** Click Stop / Cancel Hunt on hunt screen and confirm. */
 export async function stopHunt(page: Page): Promise<CombatStepResult> {
-  const stopBtn = page.getByRole('button', { name: 'Stop', exact: true });
-  if (await stopBtn.count() === 0) {
+  if (!(await clickHuntStopButton(page))) {
     return 'no_action';
   }
-  await stopBtn.first().click();
 
-  const confirmStop = page.getByRole('button', { name: 'Stop', exact: true });
-  if (await confirmStop.count() > 1) {
-    await confirmStop.last().click();
+  for (const name of HUNT_STOP_BUTTON_NAMES) {
+    const confirmStop = page.getByRole('button', { name, exact: true });
+    if (await confirmStop.count() > 1) {
+      await confirmStop.last().click();
+      break;
+    }
   }
 
   return 'hunt_stopped';
@@ -814,10 +877,12 @@ export async function configureAndBattle(
     const opened = await openEnemiesNearbyPanel(page);
     if (opened !== 'enemy_selected') {
       const cardButtons = await collectEnemyCardButtons(page);
-      if (cardButtons.length <= enemyIndex) {
+      const picked = pickBattleEnemy(await enemyInfosFromButtons(cardButtons));
+      const targetIndex = picked?.index ?? enemyIndex;
+      if (cardButtons.length <= targetIndex) {
         return 'failed';
       }
-      await cardButtons[enemyIndex].click();
+      await cardButtons[targetIndex].click();
     }
   }
 
@@ -886,10 +951,12 @@ export async function waitForEnemies(
   page: Page,
   timeoutMs = 60_000,
 ): Promise<HuntState> {
-  const stopBtn = page.getByRole('button', { name: 'Stop', exact: true });
+  const huntStop = page.getByRole('button', { name: 'Stop', exact: true }).or(
+    page.getByRole('button', { name: 'Cancel Hunt', exact: true }),
+  );
   const huntMoreBtn = page.getByRole('button', { name: 'Hunt More', exact: true });
 
-  await stopBtn
+  await huntStop
     .or(huntMoreBtn)
     .first()
     .waitFor({ state: 'visible', timeout: timeoutMs })
@@ -923,31 +990,33 @@ export async function prepareEnemyBattleSelection(
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
+    const state = await readHuntState(page);
+    if (state.enemies.length > 0) {
+      return state;
+    }
+
     if (await isEnemyDetailPanelOpen(page)) {
       const name = await readEnemyNameFromDetailPanel(page);
-      const base = await readHuntState(page);
       if (name) {
-        return { ...base, enemies: [{ name, index: 0 }] };
+        return { ...state, enemies: [{ name, index: 0 }] };
       }
-      return base;
+      return state;
     }
 
     const countBtn = await findEnemiesNearbyCountButton(page);
     if (countBtn) {
       const opened = await openEnemiesNearbyPanel(page);
       if (opened === 'enemy_selected') {
-        const name = await readEnemyNameFromDetailPanel(page);
-        const base = await readHuntState(page);
-        if (name) {
-          return { ...base, enemies: [{ name, index: 0 }] };
+        const refreshed = await readHuntState(page);
+        if (refreshed.enemies.length > 0) {
+          return refreshed;
         }
-        return base;
+        const name = await readEnemyNameFromDetailPanel(page);
+        if (name) {
+          return { ...refreshed, enemies: [{ name, index: 0 }] };
+        }
+        return refreshed;
       }
-    }
-
-    const state = await readHuntState(page);
-    if (state.enemies.length > 0) {
-      return state;
     }
 
     await page.waitForTimeout(500);

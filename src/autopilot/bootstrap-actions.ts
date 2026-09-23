@@ -10,6 +10,7 @@ import {
   waitForEnemies,
   hasHuntProgress,
   hasPostHuntEnemySelectionReady,
+  pickBattleEnemy,
   prepareEnemyBattleSelection,
   readHuntState,
   stopHunt,
@@ -136,7 +137,8 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<string> {
     if (huntState.enemies.length === 0) return `stop:${stopResult}:no_enemies`;
   }
 
-  const enemy = huntState.enemies[0];
+  const enemy = pickBattleEnemy(huntState.enemies);
+  if (!enemy) return 'stop:no_enemies';
   const maxEnemies = await jev.chooseMaxEnemies(enemy);
   const stance = await jev.chooseStance(enemy);
   const battleResult = await configureAndBattle(page, enemy.index, maxEnemies, stance);
@@ -649,7 +651,7 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
   {
     id: 'hunt_rabbits',
     description:
-      'Hunt and battle Rabbits using pre-battle Cooked Cod (FOOD Add). Respects huntFoundCap.',
+      'Hunt and battle any ready enemy (prefer Rabbit) using pre-battle Cooked Cod (FOOD Add). Respects huntFoundCap.',
     bootstrap: true,
     priority: 12,
     tags: ['combat', 'playbook'],

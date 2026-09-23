@@ -37,6 +37,7 @@ export {
   hasHuntProgress,
   hasEnemySelectionReady,
   hasPostHuntEnemySelectionReady,
+  pickBattleEnemy,
 } from './combat.js';
 
 export {
