@@ -60,6 +60,20 @@ describe('itemNameFromImageSrc', () => {
     assert.equal(decodeIdleMmoMetaSlug(cookedSrc), 'cooked cod');
     assert.equal(itemNameFromImageSrc(cookedSrc), 'Cooked Cod');
   });
+
+  it('decodes Cheap Bait meta small 3.png and cod.png → Raw Cod (live Melriel skins)', () => {
+    // Live IdleBocchi inventory: Cheap Bait uses small 3.png, not bait.png.
+    const baitSrc =
+      'https://cdn.idle-mmo.com/cdn-cgi/image/width=150,height=150,format=auto/uploaded/skins/3SIaLLz6ogS0VLjBjFrFumeePMSZ7r-metac21hbGwgMy5wbmc=-.png';
+    assert.equal(decodeIdleMmoMetaSlug(baitSrc), 'small 3');
+    assert.equal(itemNameFromImageSrc(baitSrc), 'Cheap Bait');
+    assert.equal(parseQuantityString('8 1'), 8);
+
+    const rawCodSrc =
+      'https://cdn.idle-mmo.com/cdn-cgi/image/width=150,height=150,format=auto/uploaded/skins/SwtHyQb12EbLINXI8f1NM7iDDCrwTI-metaY29kLnBuZw==-.png';
+    assert.equal(decodeIdleMmoMetaSlug(rawCodSrc), 'cod');
+    assert.equal(itemNameFromImageSrc(rawCodSrc), 'Raw Cod');
+  });
 });
 
 describe('parseInventoryCounts', () => {
@@ -109,14 +123,16 @@ describe('sanitizeInventoryCounts', () => {
     assert.deepEqual(sanitizeInventoryCounts(undefined), {});
   });
 
-  it('drops Code of Conduct false positives and huge Cod stacks', () => {
+  it('drops Code of Conduct chrome keys but keeps large Cod / Raw Cod stacks', () => {
     const counts = sanitizeInventoryCounts({
       Cod: 500,
+      'Raw Cod': 495,
       'Code of Conduct': 1,
       'Oak Log': 10,
     });
     assert.equal(counts['Oak Log'], 10);
-    assert.equal(counts.Cod, undefined);
+    assert.equal(counts.Cod, 500);
+    assert.equal(counts['Raw Cod'], 495);
     assert.equal(counts['Code of Conduct'], undefined);
   });
 
@@ -137,7 +153,7 @@ describe('buildInventoryMap', () => {
       'Oak Log': 25,
       'Coal Ore': 30,
       'Cheap Bait': 20,
-      Cod: 12,
+      'Raw Cod': 12,
       'Cooked Cod': 5,
     };
     const inventory = buildInventoryMap(text, dom);
