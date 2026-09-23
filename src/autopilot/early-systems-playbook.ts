@@ -26,7 +26,15 @@ import { getLogDir } from '../logging/jsonl-writer.js';
 import { cookedCodCount, needsCookBeforeHunt } from '../deterministic/combat.js';
 import { shouldHardStopHunt } from '../deterministic/hunt-cap.js';
 import { hasEasyCompletePendingQuest } from '../deterministic/quest-accept.js';
-import type { AutopilotAction, AutopilotContext, GameSnapshot, GatherState } from '../types.js';
+import { GATHER_SKILL_IDS } from '../deterministic/skills.js';
+import type {
+  ActiveGatherElsewhere,
+  AutopilotAction,
+  AutopilotContext,
+  GameSnapshot,
+  GatherState,
+  SkillId,
+} from '../types.js';
 import {
   evaluateQuestCurriculum,
   getQuestCurriculumFromSnapshot,
@@ -1696,6 +1704,35 @@ export function getPlaybookFromSnapshot(snapshot: GameSnapshot): PlaybookProgres
   const raw = snapshot.extensions?.earlySystemsPlaybook;
   if (!raw || typeof raw !== 'object') return undefined;
   return raw as PlaybookProgress;
+}
+
+function isSkillId(value: unknown): value is SkillId {
+  return typeof value === 'string' && (GATHER_SKILL_IDS as readonly string[]).includes(value);
+}
+
+/**
+ * Playwright gather scrapes (often woodcutting) can look idle while the Public API
+ * current action is busy on another skill. Copy that into busyElsewhere so
+ * shouldInterruptGatherForPlaybook sees the real gather. Already-busy scrapes win.
+ */
+export function enrichGatherStateFromSnapshot(
+  state: GatherState,
+  snapshot: GameSnapshot,
+): GatherState {
+  if (state.busy || state.busyElsewhere) return state;
+  const action = snapshot.currentAction;
+  const apiBusy = Boolean(action?.busy || snapshot.flags.gatherBusy);
+  if (!apiBusy) return state;
+
+  const rawSkill = action?.skill;
+  const skill = isSkillId(rawSkill) ? rawSkill : 'mining';
+  const resource = action?.resource ?? action?.label;
+  const elsewhere: ActiveGatherElsewhere = {
+    skill,
+    ...(resource !== undefined ? { resource } : {}),
+    ...(action?.producedCount !== undefined ? { producedCount: action.producedCount } : {}),
+  };
+  return { ...state, busyElsewhere: elsewhere };
 }
 
 function activeGather(state: GatherState): { resource: string; skill?: GatherState['skill'] } {

@@ -7,6 +7,7 @@ import type { AutopilotContext, GameSnapshot, GatherState } from '../types.js';
 import {
   coalTargetMet,
   cookTargetMet,
+  enrichGatherStateFromSnapshot,
   evaluatePlaybook,
   filterAllowedByPlaybook,
   fishTargetMet,
@@ -2443,5 +2444,195 @@ describe('post-cook quest talk does not outrank hunt', () => {
       ),
       false,
     );
+  });
+});
+
+describe('enrichGatherStateFromSnapshot', () => {
+  function huntBook(overrides: Partial<PlaybookProgress> = {}): PlaybookProgress {
+    return {
+      enabled: true,
+      stage: 'hunt_battle_batch',
+      stageIndex: 5,
+      stageGoal: 'hunt',
+      preferredActions: ['hunt_battle_batch', 'hunt_battle'],
+      deprioritizedActions: ['gather_oak', 'gather_yew', 'mine_coal'],
+      interruptActions: ['hunt_battle_batch', 'hunt_battle'],
+      counts: emptyPlaybookCounts(),
+      baitOwned: true,
+      targets: { coalMin: 100, coalMax: 100, codMin: 100, codMax: 100, cookMin: 100, huntMin: 120 },
+      curriculumHint: 'hunt',
+      complete: false,
+      gatherGraceActive: false,
+      fishCodBackoffActive: false,
+      consecutiveFishCodFailures: 0,
+      staleCoalGather: false,
+      staleCoalBusyCycles: 0,
+      ...overrides,
+    };
+  }
+
+  function playwrightIdle(): GatherState {
+    return { busy: false, pageText: 'woodcutting idle', skill: 'woodcutting' };
+  }
+
+  function miningCoalSnapshot(
+    overrides: Partial<GameSnapshot> = {},
+  ): GameSnapshot {
+    return minimalSnapshot({
+      pagePath: '/skills/view/woodcutting',
+      currentAction: {
+        busy: true,
+        skill: 'mining',
+        resource: 'Coal Ore',
+        label: 'Mining Coal Ore',
+        producedCount: 4,
+      },
+      flags: {
+        hasBait: true,
+        bankNearby: false,
+        gatherBusy: true,
+        inBattle: false,
+        sessionValid: true,
+      },
+      ...overrides,
+    });
+  }
+
+  it('interrupts hunt when Playwright is idle but the API is mining Coal Ore', () => {
+    const idle = playwrightIdle();
+    const enriched = enrichGatherStateFromSnapshot(idle, miningCoalSnapshot());
+    assert.equal(enriched.busy, false);
+    assert.deepEqual(enriched.busyElsewhere, {
+      skill: 'mining',
+      resource: 'Coal Ore',
+      producedCount: 4,
+    });
+    assert.equal(enriched.pageText, idle.pageText);
+    assert.equal(shouldInterruptGatherForPlaybook(huntBook(), idle), false);
+    assert.equal(shouldInterruptGatherForPlaybook(huntBook(), enriched), true);
+  });
+
+  it('stays false when Playwright and the API are both idle', () => {
+    const idle = playwrightIdle();
+    const enriched = enrichGatherStateFromSnapshot(idle, minimalSnapshot());
+    assert.equal(enriched.busyElsewhere, undefined);
+    assert.equal(enriched, idle);
+    assert.equal(shouldInterruptGatherForPlaybook(huntBook(), enriched), false);
+  });
+
+  it('keeps gather grace and fish-cod backoff from interrupting API-busy mining', () => {
+    const enriched = enrichGatherStateFromSnapshot(playwrightIdle(), miningCoalSnapshot());
+    assert.equal(
+      shouldInterruptGatherForPlaybook(huntBook({ gatherGraceActive: true }), enriched),
+      false,
+    );
+    assert.equal(
+      shouldInterruptGatherForPlaybook(huntBook({ fishCodBackoffActive: true }), enriched),
+      false,
+    );
+  });
+
+  it('keeps cook-before-hunt from interrupting an in-progress cook', () => {
+    const cooking = minimalSnapshot({
+      currentAction: {
+        busy: true,
+        skill: 'cooking',
+        resource: 'Cod',
+        label: 'Cooking Cod',
+      },
+      flags: {
+        hasBait: true,
+        bankNearby: false,
+        gatherBusy: true,
+        inBattle: false,
+        sessionValid: true,
+      },
+    });
+    const enriched = enrichGatherStateFromSnapshot(playwrightIdle(), cooking);
+    const cookBeforeHunt = huntBook({
+      preferredActions: ['cook_cod', 'hunt_battle_batch', 'hunt_battle'],
+      interruptActions: ['cook_cod', 'hunt_battle_batch', 'hunt_battle'],
+    });
+    assert.equal(enriched.busyElsewhere?.skill, 'cooking');
+    assert.equal(shouldInterruptGatherForPlaybook(cookBeforeHunt, enriched), false);
+    assert.equal(
+      shouldInterruptGatherForPlaybook(
+        cookBeforeHunt,
+        enrichGatherStateFromSnapshot(playwrightIdle(), miningCoalSnapshot()),
+      ),
+      true,
+    );
+  });
+
+  it('does not replace a Playwright gather that is already busy', () => {
+    const oak: GatherState = {
+      busy: true,
+      currentResource: 'Oak Log',
+      skill: 'woodcutting',
+      pageText: 'CURRENT ACTION Oak Log',
+    };
+    const elsewhere: GatherState = {
+      busy: false,
+      busyElsewhere: { skill: 'fishing', resource: 'Cod' },
+      pageText: '',
+    };
+    assert.equal(enrichGatherStateFromSnapshot(oak, miningCoalSnapshot()), oak);
+    assert.equal(enrichGatherStateFromSnapshot(elsewhere, miningCoalSnapshot()), elsewhere);
+  });
+
+  it('uses flags.gatherBusy and falls back when skill or resource is incomplete', () => {
+    const fromFlag = enrichGatherStateFromSnapshot(
+      playwrightIdle(),
+      minimalSnapshot({
+        currentAction: { busy: false, skill: 'fishing', resource: 'Cod' },
+        flags: {
+          hasBait: true,
+          bankNearby: false,
+          gatherBusy: true,
+          inBattle: false,
+          sessionValid: true,
+        },
+      }),
+    );
+    assert.deepEqual(fromFlag.busyElsewhere, { skill: 'fishing', resource: 'Cod' });
+
+    const fromLabel = enrichGatherStateFromSnapshot(
+      playwrightIdle(),
+      minimalSnapshot({
+        currentAction: { busy: true, label: 'Mining Coal Ore', producedCount: 2 },
+        flags: {
+          hasBait: true,
+          bankNearby: false,
+          gatherBusy: false,
+          inBattle: false,
+          sessionValid: true,
+        },
+      }),
+    );
+    assert.deepEqual(fromLabel.busyElsewhere, {
+      skill: 'mining',
+      resource: 'Mining Coal Ore',
+      producedCount: 2,
+    });
+
+    const unknownSkill = enrichGatherStateFromSnapshot(
+      playwrightIdle(),
+      minimalSnapshot({
+        currentAction: {
+          busy: true,
+          skill: 'combat' as 'mining',
+          resource: 'Coal Ore',
+        },
+        flags: {
+          hasBait: true,
+          bankNearby: false,
+          gatherBusy: true,
+          inBattle: false,
+          sessionValid: true,
+        },
+      }),
+    );
+    assert.equal(unknownSkill.busyElsewhere?.skill, 'mining');
+    assert.equal(unknownSkill.busyElsewhere?.resource, 'Coal Ore');
   });
 });
