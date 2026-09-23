@@ -1136,7 +1136,7 @@ export async function stopHunt(page: Page): Promise<CombatStepResult> {
 
 
 /** Preferred cooked-food labels for pre-battle FOOD Add dialog. */
-const BATTLE_FOOD_LABELS = [
+export const BATTLE_FOOD_LABELS = [
   'Cooked Cod',
   'Cooked Salmon',
   'Cooked Tuna',
@@ -1144,6 +1144,30 @@ const BATTLE_FOOD_LABELS = [
   'Cooked Fish',
   'Bread',
 ];
+
+/** True when inventory already has something to pack before Battle. */
+export function inventoryHasBattleFood(
+  inventory: Record<string, number> | null | undefined,
+): boolean {
+  if (!inventory) return false;
+  for (const [name, qty] of Object.entries(inventory)) {
+    if (!qty || qty <= 0) continue;
+    const label = name.toLowerCase();
+    if (BATTLE_FOOD_LABELS.some((food) => label.includes(food.toLowerCase()))) return true;
+    if (label.startsWith('cooked')) return true;
+  }
+  return false;
+}
+
+/** Raw cod plus coal is enough to cook a battle meal before hunting. */
+export function inventoryCanCookBattleFood(
+  inventory: Record<string, number> | null | undefined,
+): boolean {
+  if (!inventory) return false;
+  const cod = (inventory['Cod'] ?? 0) + (inventory['Raw Cod'] ?? 0);
+  const coal = (inventory['Coal Ore'] ?? 0) + (inventory['Coal'] ?? 0);
+  return cod >= 1 && coal >= 1;
+}
 
 async function buttonMatchesFoodLabel(btn: Locator, label: string): Promise<boolean> {
   const needle = label.toLowerCase();
@@ -1198,13 +1222,15 @@ async function findBattleFoodButton(page: Page): Promise<Locator | null> {
     }
   }
 
-  // Picker titled "Food" with a single icon (tooltip may be hover-only).
+  // Picker titled "Food" with an icon in that panel (tooltip may be hover-only).
+  // Stay inside the picker — don't climb to the battle modal's monster image.
   const foodHeads = page.getByText('Food', { exact: true });
   const headCount = await foodHeads.count();
   for (let i = 0; i < headCount; i++) {
     const head = foodHeads.nth(i);
     if (!(await head.isVisible().catch(() => false))) continue;
-    const panel = head.locator('xpath=ancestor::*[.//img][1]');
+    const panel = head.locator('xpath=ancestor::*[self::div or self::section][1]');
+    if ((await panel.count()) === 0) continue;
     const icon = panel.locator('button, [role="button"]').filter({ has: page.locator('img') });
     const iconCount = await icon.count();
     for (let j = 0; j < iconCount; j++) {
@@ -1232,7 +1258,7 @@ async function closeFoodPickerOnly(page: Page): Promise<void> {
  * Idle MMO heals via food packed BEFORE Battle (effective HP), not mid-fight clicks.
  * Flow: FOOD → Add → food picker (Nx badge or Cooked Cod icon) → quantity Max → Add.
  */
-export async function selectBattleFood(page: Page): Promise<'added' | 'none' | 'failed'> {
+export async function selectBattleFood(page: Page): Promise<'added' | 'none' | 'no_food' | 'failed'> {
   try {
     const foodHeading = page.getByText(/^FOOD$/i).first();
     if (!(await foodHeading.isVisible({ timeout: 2000 }).catch(() => false))) {
@@ -1256,7 +1282,7 @@ export async function selectBattleFood(page: Page): Promise<'added' | 'none' | '
     if (!foodItem) {
       console.log('[combat] FOOD Add opened but no cooked food — cook Cooked Cod first');
       await closeFoodPickerOnly(page);
-      return 'none';
+      return 'no_food';
     }
 
     await foodItem.click({ timeout: 5000 }).catch(() => undefined);
@@ -1361,7 +1387,8 @@ export async function configureAndBattle(
   }
 
   // Live order: food, then Max on the ENEMIES row, then Battle.
-  await selectBattleFood(page);
+  const packed = await selectBattleFood(page);
+  if (packed === 'no_food') return 'no_food';
   await setMaxEnemies(page, maxEnemies);
   await setStance(page, stance);
 
@@ -1416,7 +1443,8 @@ export async function huntMore(
     (await isEnemyDetailPanelOpen(page) || (await isShowBattleEntityModal(page))) &&
     !(await isFightInProgress(page))
   ) {
-    await selectBattleFood(page);
+    const packed = await selectBattleFood(page);
+    if (packed === 'no_food') return 'no_food';
     await setMaxEnemies(page, Number.MAX_SAFE_INTEGER);
     const battleBtn = await visibleBattleButton(page);
     if (battleBtn) {

@@ -124,12 +124,59 @@ const BATTLE_MODAL_BLOCKS_HUNT_MORE = `<!DOCTYPE html>
     <button type="button" id="enemax">Max</button>
     <button type="button" id="battle">Battle</button>
   </div>
+  <div id="food" hidden x-data="food-for-battle">
+    <div>Food</div>
+    <button type="button" id="cod">
+      <img src="/items/cooked-cod.png" style="width:40px;height:40px" />
+    </button>
+  </div>
   <script>
+    document.getElementById('food-add').addEventListener('click', () => {
+      document.getElementById('food').hidden = false;
+    });
+    document.getElementById('cod').addEventListener('click', () => {
+      document.getElementById('food').hidden = true;
+    });
     document.getElementById('battle').addEventListener('click', () => {
       document.body.dataset.battled = '1';
     });
     document.getElementById('enemax').addEventListener('click', () => {
       document.getElementById('max_enemies').value = '4';
+    });
+  </script>
+</body></html>`;
+
+const BATTLE_FLOW_NO_FOOD = `<!DOCTYPE html>
+<html><body>
+  <div id="nearby">
+    <div>ENEMIES NEARBY</div>
+    <div role="button" id="tile">
+      <img alt="Rabbit" src="/enemies/rabbit.png" style="width:72px;height:72px" />
+      <span>218</span>
+    </div>
+  </div>
+  <div id="modal" hidden x-data="show-battle-entity">
+    <h2>Rabbit</h2>
+    <div>3 Combat EXP</div>
+    <div>FOOD</div>
+    <button type="button" id="food-add">Add</button>
+    <div>STANCE</div>
+    <select name="location"><option value="balanced">Balanced (All Stats)</option></select>
+    <div>ENEMIES</div>
+    <input id="max_enemies" value="1" />
+    <button type="button" id="enemax">Max</button>
+    <button type="button" id="battle">Battle</button>
+  </div>
+  <div id="food" hidden x-data="food-for-battle"><div>Food</div></div>
+  <script>
+    document.getElementById('tile').addEventListener('click', () => {
+      document.getElementById('modal').hidden = false;
+    });
+    document.getElementById('food-add').addEventListener('click', () => {
+      document.getElementById('food').hidden = false;
+    });
+    document.getElementById('battle').addEventListener('click', () => {
+      document.body.dataset.battled = '1';
     });
   </script>
 </body></html>`;
@@ -178,6 +225,17 @@ describe('battle from monster image', () => {
       assert.equal(result, 'battle_started');
       assert.equal(await page.locator('#max_enemies').inputValue(), '218');
       assert.equal(await page.locator('body').getAttribute('data-order'), 'food,max,battle');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('does not click Battle when the food picker is empty', async () => {
+    const page = await load(BATTLE_FLOW_NO_FOOD);
+    try {
+      const result = await configureAndBattle(page, 0, 1, 'Balanced');
+      assert.equal(result, 'no_food');
+      assert.equal(await page.locator('body').getAttribute('data-battled'), null);
     } finally {
       await page.close();
     }

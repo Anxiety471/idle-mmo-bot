@@ -3,6 +3,8 @@ import { describe, it } from 'node:test';
 import {
   enemyNameFromDetailText,
   enemyNameFromImageSrc,
+  inventoryCanCookBattleFood,
+  inventoryHasBattleFood,
   hasHuntProgress,
   huntingMetricsSection,
   isIdleBattleText,
@@ -221,6 +223,22 @@ Start Hunt
 YOUR CHARACTER`;
     assert.equal(isIdleBattleText(idle), true);
     assert.equal(isIdleBattleText(LIVE_ACTIVE_HUNT_PANEL), false);
+  });
+});
+
+describe('inventory battle food', () => {
+  it('treats any cooked stack as battle food', () => {
+    assert.equal(inventoryHasBattleFood({ 'Cooked Cod': 2 }), true);
+    assert.equal(inventoryHasBattleFood({ 'Cooked Salmon': 1 }), true);
+    assert.equal(inventoryHasBattleFood({ Cod: 10, 'Coal Ore': 10 }), false);
+    assert.equal(inventoryHasBattleFood({}), false);
+  });
+
+  it('can cook when raw cod and coal are both in inventory', () => {
+    assert.equal(inventoryCanCookBattleFood({ Cod: 1, 'Coal Ore': 1 }), true);
+    assert.equal(inventoryCanCookBattleFood({ 'Raw Cod': 2, Coal: 3 }), true);
+    assert.equal(inventoryCanCookBattleFood({ Cod: 4 }), false);
+    assert.equal(inventoryCanCookBattleFood({ 'Cooked Cod': 5 }), false);
   });
 });
 

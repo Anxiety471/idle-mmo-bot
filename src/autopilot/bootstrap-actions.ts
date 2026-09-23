@@ -11,6 +11,8 @@ import {
   waitForEnemies,
   hasHuntProgress,
   hasPostHuntEnemySelectionReady,
+  inventoryCanCookBattleFood,
+  inventoryHasBattleFood,
   pickBattleEnemy,
   prepareEnemyBattleSelection,
   readHuntState,
@@ -130,6 +132,15 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
     return combatRoundOutcome('blocked:verify', config);
   }
 
+  if (
+    !inventoryHasBattleFood(ctx.snapshot.inventory) &&
+    inventoryCanCookBattleFood(ctx.snapshot.inventory)
+  ) {
+    console.log('[combat] no battle food — cooking Cooked Cod before hunt');
+    const cookResult = await tryCookCod(page, config, true);
+    return combatRoundOutcome(`cook_before_hunt:${cookResult}`, config);
+  }
+
   const huntResult = await ensureHuntActive(page, config, allowInterrupt, verifyBudget);
 
   if (huntResult === 'no_action') {
@@ -191,6 +202,11 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
   const maxEnemies = await jev.chooseMaxEnemies(enemy);
   const stance = await jev.chooseStance(enemy);
   const battleResult = await configureAndBattle(page, enemy.index, maxEnemies, stance);
+  if (battleResult === 'no_food') {
+    console.log('[combat] battle food picker empty — cooking before battle');
+    const cookResult = await tryCookCod(page, config, true);
+    return combatRoundOutcome(`cook_before_hunt:${cookResult}`, config);
+  }
 
   for (let i = 0; i < 60; i++) {
     const battleState = await readBattleState(page);
@@ -204,10 +220,14 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
     await sleep(pollMs);
   }
 
-  return combatRoundOutcome(
-    `battle:${battleResult}:huntMore:${await huntMore(page, allowInterrupt)}`,
-    config,
-  );
+  const more = await huntMore(page, allowInterrupt);
+  if (more === 'no_food') {
+    console.log('[combat] Hunt More blocked by empty food picker — cooking before battle');
+    const cookResult = await tryCookCod(page, config, true);
+    return combatRoundOutcome(`cook_before_hunt:${cookResult}`, config);
+  }
+
+  return combatRoundOutcome(`battle:${battleResult}:huntMore:${more}`, config);
 }
 
 function combatExecuteResult(
