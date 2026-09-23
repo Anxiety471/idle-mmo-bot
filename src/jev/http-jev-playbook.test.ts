@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import {
+  evaluatePlaybook,
   shouldInterruptGatherForPlaybook,
   type PlaybookProgress,
 } from '../autopilot/early-systems-playbook.js';
@@ -410,6 +411,105 @@ describe('HttpJev early playbook deterministic choice', () => {
       lines.some(
         (line) => line === '[playbook] deterministic chooseNextAction → mine_coal (skipped HttpJev)',
       ),
+    );
+  });
+
+  it('chooseNextAction returns hunt_battle_batch for a pending hard kill quest and skips TypeSafe', async () => {
+    const statePath = join(logDir, 'hitori-playbook.json');
+    const previousState = process.env.PLAYBOOK_STATE_PATH;
+    const previousPlaybook = process.env.EARLY_PLAYBOOK;
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'hunt_battle_batch',
+        counts: {
+          coal: 100,
+          rawCod: 100,
+          cookedCod: 111,
+          sells: 1,
+          huntBattles: 41,
+          mapPeeks: 0,
+          petManages: 1,
+          batchCycles: 1,
+          coalBusyCycles: 0,
+          codBusyCycles: 0,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+    try {
+      const base = snapshot(undefined, {
+        inventory: { 'Cheap Bait': 8, 'Coal Ore': 40, Cod: 20, 'Cooked Cod': 111 },
+        gold: 110,
+        combatLevel: 2,
+        combatPhase: 'none',
+        pendingQuests: [
+          { title: 'A Rabbits Fortune', progress: '1 / 40', canTurnIn: false, tab: 'pending' },
+        ],
+      });
+      const progress = evaluatePlaybook(base);
+      assert.equal(progress.preferredActions[0], 'hunt_battle_batch');
+      const calls: string[] = [];
+      const jev = new HttpJev(config, recordingClient(calls));
+      const action = await jev.chooseNextAction(
+        snapshot(progress, {
+          inventory: base.inventory,
+          gold: 110,
+          combatLevel: 2,
+          combatPhase: 'none',
+          pendingQuests: base.pendingQuests,
+        }),
+        ['quest_talk_accept', 'hunt_battle_batch', 'hunt_battle', 'idle'],
+        context,
+      );
+      assert.equal(action, 'hunt_battle_batch');
+      assert.deepEqual(calls, []);
+    } finally {
+      if (previousState === undefined) delete process.env.PLAYBOOK_STATE_PATH;
+      else process.env.PLAYBOOK_STATE_PATH = previousState;
+      if (previousPlaybook === undefined) delete process.env.EARLY_PLAYBOOK;
+      else process.env.EARLY_PLAYBOOK = previousPlaybook;
+    }
+  });
+
+  it('interrupts busy Coal Ore when preferred/interrupt wants hunt', () => {
+    const coal = gather({ busy: true, currentResource: 'Coal Ore', skill: 'mining' });
+    assert.equal(
+      shouldInterruptGatherForPlaybook(
+        playbook({
+          stage: 'hunt_battle_batch',
+          preferredActions: ['hunt_battle_batch', 'hunt_battle'],
+          interruptActions: ['mine_coal', 'hunt_battle_batch', 'hunt_battle'],
+        }),
+        coal,
+      ),
+      true,
+    );
+    assert.equal(
+      shouldInterruptGatherForPlaybook(
+        playbook({
+          stage: 'hunt_battle_batch',
+          preferredActions: ['hunt_battle_batch'],
+          interruptActions: ['mine_coal'],
+        }),
+        coal,
+      ),
+      true,
+    );
+    assert.equal(
+      shouldInterruptGatherForPlaybook(
+        playbook({
+          stage: 'hunt_battle_batch',
+          preferredActions: ['cook_cod', 'hunt_battle_batch'],
+          interruptActions: ['cook_cod', 'hunt_battle_batch'],
+          gatherGraceActive: true,
+        }),
+        coal,
+      ),
+      false,
     );
   });
 

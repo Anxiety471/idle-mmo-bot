@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import { getLogDir } from '../logging/jsonl-writer.js';
-import type { GameSnapshot } from '../types.js';
+import type { AutopilotContext, GameSnapshot, GatherState } from '../types.js';
 import {
   coalTargetMet,
   cookTargetMet,
@@ -15,15 +15,18 @@ import {
   huntTargetMet,
   normalizeEarlyStageId,
   notePlaybookOutcome,
+  QUEST_TALK_NO_ACTION_COOLDOWN,
   recentBaitPurchase,
   resolvePlaybookStatePath,
   shouldInjectAsyncPets,
   shouldInjectEquipPet,
+  shouldInterruptGatherForPlaybook,
   shouldPreferBaitRestock,
   STALE_COAL_BUSY_CYCLES,
   updateStaleCoalBusyTracking,
   type PlaybookProgress,
 } from './early-systems-playbook.js';
+import { ProgressiveStubJev } from '../jev/progressive-stub.js';
 
 const ENV_KEYS = ['AUTOPILOT_LOG_DIR', 'PLAYBOOK_STATE_PATH', 'EARLY_PLAYBOOK'] as const;
 
@@ -2168,5 +2171,277 @@ describe('stale coal gather', () => {
     assert.equal(saved.lastGatherSkill, 'mining');
     assert.equal(saved.lastGatherResource, 'Coal Ore');
     assert.equal(saved.staleCoalBusyCycles, 0);
+  });
+});
+
+describe('post-cook quest talk does not outrank hunt', () => {
+  const envSnapshot = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
+  let statePath: string;
+  const stub = new ProgressiveStubJev();
+  const choiceContext: AutopilotContext = { cycle: 4, gatherRotationIndex: 0 };
+
+  afterEach(() => {
+    restoreEnv(envSnapshot);
+    if (statePath) rmSync(statePath, { force: true });
+  });
+
+  function writeState(stage: string, counts: Record<string, number>, extra: Record<string, unknown> = {}): void {
+    statePath = join('/tmp', `playbook-hunt-stall-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({ version: 1, stage, counts, baitOwned: true, ...extra })}\n`,
+    );
+  }
+
+  function huntReadySnapshot(overrides: Partial<GameSnapshot> = {}): GameSnapshot {
+    return minimalSnapshot({
+      inventory: { 'Cheap Bait': 8, 'Coal Ore': 40, Cod: 20, 'Cooked Cod': 111 },
+      gold: 110,
+      combatLevel: 2,
+      combatPhase: 'none',
+      pendingQuests: [
+        { title: 'A Rabbits Fortune', progress: '1 / 40', canTurnIn: false, tab: 'pending' },
+      ],
+      ...overrides,
+    });
+  }
+
+  function huntCounts(overrides: Record<string, number> = {}) {
+    return {
+      ...coalMetCounts({ sells: 1 }),
+      rawCod: 100,
+      cookedCod: 111,
+      huntBattles: 41,
+      petManages: 1,
+      batchCycles: 1,
+      ...overrides,
+    };
+  }
+
+  it('hunt_battle_batch with a pending hard kill quest prefers hunt and chooseNextAction returns it', async () => {
+    writeState('hunt_battle_batch', huntCounts());
+    const snapshot = huntReadySnapshot();
+    const progress = evaluatePlaybook(snapshot, {
+      ...choiceContext,
+      lastAction: 'quest_talk_accept',
+    });
+
+    assert.equal(progress.stage, 'hunt_battle_batch');
+    assert.equal(progress.preferredActions[0], 'hunt_battle_batch');
+    assert.ok(
+      progress.preferredActions.indexOf('quest_talk_accept') >
+        progress.preferredActions.indexOf('hunt_battle_batch'),
+      `preferred=${JSON.stringify(progress.preferredActions)}`,
+    );
+
+    const filtered = filterAllowedByPlaybook(
+      ['quest_talk_accept', 'hunt_battle_batch', 'hunt_battle', 'idle'],
+      snapshot,
+      progress,
+    );
+    assert.equal(filtered[0], 'hunt_battle_batch', `filtered=${JSON.stringify(filtered)}`);
+
+    const action = await stub.chooseNextAction(
+      {
+        ...snapshot,
+        extensions: {
+          earlySystemsPlaybook: progress,
+          questCurriculum: progress.questCurriculum,
+        },
+      },
+      ['quest_talk_accept', 'hunt_battle_batch', 'hunt_battle', 'idle'],
+      choiceContext,
+    );
+    assert.equal(action, 'hunt_battle_batch');
+  });
+
+  it('keeps quest_turnin first when a hard kill is pending and a quest can turn in', () => {
+    writeState('hunt_battle_batch', huntCounts());
+    const snapshot = huntReadySnapshot({
+      acceptedQuests: [
+        { title: 'Wood for the Hearth', progress: '150 / 150', canTurnIn: true, tab: 'accepted' },
+      ],
+    });
+    const progress = evaluatePlaybook(snapshot);
+    assert.equal(progress.preferredActions[0], 'quest_turnin', `preferred=${JSON.stringify(progress.preferredActions)}`);
+    assert.ok(
+      progress.preferredActions.indexOf('hunt_battle_batch') <
+        progress.preferredActions.indexOf('quest_talk_accept'),
+      `preferred=${JSON.stringify(progress.preferredActions)}`,
+    );
+  });
+
+  it('still elevates quest_talk_accept for an easy pending hearth quest', () => {
+    writeState('hunt_battle_batch', huntCounts());
+    const snapshot = huntReadySnapshot({
+      pendingQuests: [
+        { title: 'Wood for the Hearth', progress: '12 / 150', canTurnIn: false, tab: 'pending' },
+      ],
+    });
+    const progress = evaluatePlaybook(snapshot);
+    assert.equal(
+      progress.preferredActions[0],
+      'quest_talk_accept',
+      `preferred=${JSON.stringify(progress.preferredActions)}`,
+    );
+    assert.equal(progress.questCurriculum?.hasEasyFinishableQuest, true);
+  });
+
+  it('keeps cook_cod ahead of quest_talk on the cook stage', () => {
+    writeState('cook_cod', {
+      ...coalMetCounts({ sells: 1 }),
+      rawCod: 100,
+      cookedCod: 20,
+      huntBattles: 0,
+      petManages: 1,
+      batchCycles: 1,
+    });
+    const snapshot = minimalSnapshot({
+      inventory: { 'Cheap Bait': 8, 'Coal Ore': 40, Cod: 40, 'Cooked Cod': 20 },
+      gold: 40,
+      combatLevel: 2,
+      pendingQuests: [
+        { title: 'A Rabbits Fortune', progress: '1 / 40', canTurnIn: false, tab: 'pending' },
+      ],
+    });
+    const progress = evaluatePlaybook(snapshot);
+    assert.equal(progress.stage, 'cook_cod');
+    assert.equal(progress.preferredActions[0], 'cook_cod', `preferred=${JSON.stringify(progress.preferredActions)}`);
+    assert.ok(
+      progress.preferredActions.indexOf('cook_cod') < progress.preferredActions.indexOf('quest_talk_accept'),
+    );
+  });
+
+  it('still prepends quest_talk_accept on mine_coal when any quest is pending', () => {
+    writeState('mine_coal', {
+      ...emptyPlaybookCounts(),
+      coal: 10,
+      petManages: 1,
+      batchCycles: 1,
+    });
+    const snapshot = minimalSnapshot({
+      inventory: { 'Coal Ore': 10 },
+      gold: 0,
+      flags: {
+        hasBait: false,
+        bankNearby: false,
+        gatherBusy: false,
+        inBattle: false,
+        sessionValid: true,
+      },
+      pendingQuests: [
+        { title: 'A Rabbits Fortune', progress: '0 / 40', canTurnIn: false, tab: 'pending' },
+      ],
+    });
+    const progress = evaluatePlaybook(snapshot);
+    assert.equal(progress.stage, 'mine_coal');
+    assert.equal(
+      progress.preferredActions[0],
+      'quest_talk_accept',
+      `preferred=${JSON.stringify(progress.preferredActions)}`,
+    );
+  });
+
+  it('demotes quest_talk for several cycles after talk:no_action', () => {
+    writeState('hunt_battle_batch', huntCounts());
+    const snapshot = huntReadySnapshot({
+      pendingQuests: [
+        { title: 'Wood for the Hearth', progress: '150 / 150', canTurnIn: false, tab: 'pending' },
+      ],
+    });
+    const before = evaluatePlaybook(snapshot);
+    assert.equal(before.preferredActions[0], 'quest_talk_accept');
+
+    notePlaybookOutcome('quest_talk_accept', 'talk:no_action');
+    const stalledContext: AutopilotContext = {
+      ...choiceContext,
+      lastAction: 'quest_talk_accept',
+    };
+    for (let i = 0; i < QUEST_TALK_NO_ACTION_COOLDOWN; i++) {
+      const progress = evaluatePlaybook(snapshot, stalledContext);
+      assert.equal(
+        progress.preferredActions[0],
+        'hunt_battle_batch',
+        `cycle ${i} preferred=${JSON.stringify(progress.preferredActions)}`,
+      );
+      assert.ok((progress.questTalkNoActionCycles ?? 0) > 0);
+    }
+    const resumed = evaluatePlaybook(snapshot, stalledContext);
+    assert.equal(resumed.preferredActions[0], 'quest_talk_accept');
+    assert.equal(resumed.questTalkNoActionCycles ?? 0, 0);
+  });
+
+  it('interrupts Coal Ore when the playbook wants hunt, and still honors grace and cook', () => {
+    const coal: GatherState = {
+      busy: true,
+      currentResource: 'Coal Ore',
+      skill: 'mining',
+      pageText: 'CURRENT ACTION Coal Ore',
+    };
+    const huntBook: PlaybookProgress = {
+      enabled: true,
+      stage: 'hunt_battle_batch',
+      stageIndex: 5,
+      stageGoal: 'hunt',
+      preferredActions: ['hunt_battle_batch', 'hunt_battle'],
+      deprioritizedActions: [],
+      interruptActions: ['mine_coal', 'hunt_battle_batch', 'hunt_battle'],
+      counts: emptyPlaybookCounts(),
+      baitOwned: true,
+      targets: { coalMin: 100, coalMax: 100, codMin: 100, codMax: 100, cookMin: 100, huntMin: 120 },
+      curriculumHint: 'hunt',
+      complete: false,
+      gatherGraceActive: false,
+      fishCodBackoffActive: false,
+      consecutiveFishCodFailures: 0,
+      staleCoalGather: false,
+      staleCoalBusyCycles: 0,
+    };
+
+    assert.equal(shouldInterruptGatherForPlaybook(huntBook, coal), true);
+    assert.equal(
+      shouldInterruptGatherForPlaybook(
+        { ...huntBook, preferredActions: ['hunt_battle_batch'], interruptActions: ['mine_coal'] },
+        coal,
+      ),
+      true,
+    );
+    assert.equal(
+      shouldInterruptGatherForPlaybook(
+        { ...huntBook, interruptActions: ['hunt_battle_batch', 'hunt_battle'] },
+        { busy: false, busyElsewhere: { skill: 'mining', resource: 'Coal Ore' }, pageText: '' },
+      ),
+      true,
+    );
+    assert.equal(
+      shouldInterruptGatherForPlaybook(huntBook, {
+        busy: true,
+        currentResource: 'Yew Log',
+        skill: 'woodcutting',
+        pageText: '',
+      }),
+      true,
+    );
+    assert.equal(
+      shouldInterruptGatherForPlaybook({ ...huntBook, gatherGraceActive: true }, coal),
+      false,
+    );
+    assert.equal(
+      shouldInterruptGatherForPlaybook({ ...huntBook, fishCodBackoffActive: true }, coal),
+      false,
+    );
+    assert.equal(
+      shouldInterruptGatherForPlaybook(
+        {
+          ...huntBook,
+          preferredActions: ['cook_cod', 'hunt_battle_batch'],
+          interruptActions: ['cook_cod', 'hunt_battle_batch'],
+        },
+        { busy: true, currentResource: 'Cooked Cod', skill: 'cooking', pageText: '' },
+      ),
+      false,
+    );
   });
 });
