@@ -1214,6 +1214,85 @@ describe('strict sequential real-count gates', () => {
     assert.ok(!readyFiltered.includes('cook_cod'));
   });
 
+
+  it('keeps hunt_rabbits when cook-before-hunt but an active hunt must finish', () => {
+    statePath = join('/tmp', `playbook-orphan-hunt-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'hunt_rabbits',
+        counts: {
+          ...coalMetCounts({ sells: 2 }),
+          rawCod: 100,
+          cookedCod: 100,
+          rabbitHunts: 4,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const snapshot = minimalSnapshot({
+      inventory: { 'Cheap Bait': 20, 'Coal Ore': 40, Cod: 12, 'Cooked Cod': 17 },
+      gold: 110,
+      combatPhase: 'hunt',
+      totalEnemiesFound: 239,
+      currentAction: { busy: true, label: 'combat:hunt' },
+      flags: {
+        hasBait: true,
+        bankNearby: true,
+        gatherBusy: false,
+        inBattle: false,
+        sessionValid: true,
+      },
+    });
+    const progress = evaluatePlaybook(snapshot);
+    const filtered = filterAllowedByPlaybook(
+      ['hunt_rabbits', 'hunt_battle', 'cook_cod', 'quest_talk_accept', 'idle'],
+      snapshot,
+      progress,
+    );
+    assert.ok(filtered.includes('hunt_rabbits'), `filtered=${JSON.stringify(filtered)}`);
+    assert.ok(!filtered.includes('cook_cod'), `cook should wait: ${JSON.stringify(filtered)}`);
+  });
+
+  it('keeps hunt_rabbits when found is over cap even if combatPhase is none', () => {
+    statePath = join('/tmp', `playbook-overcap-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'cook_cod',
+        counts: {
+          ...coalMetCounts({ sells: 2 }),
+          rawCod: 100,
+          cookedCod: 80,
+          rabbitHunts: 2,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const snapshot = minimalSnapshot({
+      inventory: { 'Cheap Bait': 20, 'Coal Ore': 40, Cod: 50, 'Cooked Cod': 17 },
+      gold: 110,
+      combatPhase: 'none',
+      totalEnemiesFound: 239,
+    });
+    const progress = evaluatePlaybook(snapshot);
+    const filtered = filterAllowedByPlaybook(
+      ['hunt_rabbits', 'hunt_battle', 'cook_cod', 'idle'],
+      snapshot,
+      progress,
+    );
+    assert.ok(filtered.includes('hunt_rabbits'), `filtered=${JSON.stringify(filtered)}`);
+    assert.ok(!filtered.includes('cook_cod'));
+  });
+
   it('snaps manage_pets back to hunt_rabbits when rabbitHunts below target', () => {
     statePath = join('/tmp', `playbook-hunt-snap-${Date.now()}.json`);
     process.env.PLAYBOOK_STATE_PATH = statePath;

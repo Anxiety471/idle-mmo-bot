@@ -19,6 +19,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getLogDir } from '../logging/jsonl-writer.js';
 import { needsCookBeforeHunt } from '../deterministic/combat.js';
+import { shouldHardStopHunt } from '../deterministic/hunt-cap.js';
 import { hasEasyCompletePendingQuest } from '../deterministic/quest-accept.js';
 import type { AutopilotAction, AutopilotContext, GameSnapshot } from '../types.js';
 import {
@@ -1188,6 +1189,20 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
   });
 }
 
+
+/**
+ * Active hunt / battle must finish even when cook-before-hunt would otherwise
+ * hide hunt_rabbits — otherwise Hunt More orphans a running hunt while we cook.
+ */
+export function mustFinishActiveHunt(snapshot: GameSnapshot): boolean {
+  if (snapshot.flags.inBattle) return true;
+  if (snapshot.combatPhase === 'hunt' || snapshot.combatPhase === 'enemy_select') return true;
+  if (shouldHardStopHunt(snapshot.totalEnemiesFound, snapshot.combatLevel, snapshot.totalLevel)) {
+    return true;
+  }
+  return false;
+}
+
 /**
  * Filter/prioritize allowed actions using playbook curriculum.
  * Does NOT replace Jev — only shapes the choice set and hints.
@@ -1215,7 +1230,14 @@ export function filterAllowedByPlaybook(
   const fishIncomplete = !fishTargetMet(playbook.counts);
   const cookIncomplete = !cookTargetMet(playbook.counts);
   const cookBeforeHunt = needsCookBeforeHunt(snapshot.inventory, playbook.targets.cookMin);
-  if (coalIncomplete || playbook.stage === 'mine_coal') {
+  const finishHunt = mustFinishActiveHunt(snapshot);
+  if (finishHunt) {
+    // Over-cap / active hunt wins over cook gates — stop+battle before cooking.
+    for (const id of ['hunt_rabbits', 'hunt_battle'] as const) {
+      if (allowed.includes(id) && !next.includes(id)) next.push(id);
+    }
+    next = next.filter((a) => a !== 'cook_cod');
+  } else if (coalIncomplete || playbook.stage === 'mine_coal') {
     next = next.filter(
       (a) => a !== 'fish_cod' && a !== 'cook_cod' && a !== 'hunt_rabbits' && a !== 'hunt_battle',
     );
@@ -1304,7 +1326,7 @@ export function filterAllowedByPlaybook(
         ...(playbook.questCurriculum?.interruptActions ?? []),
       ]);
       for (const id of inject) {
-        if (cookBeforeHunt && (id === 'hunt_rabbits' || id === 'hunt_battle')) continue;
+        if (!finishHunt && cookBeforeHunt && (id === 'hunt_rabbits' || id === 'hunt_battle')) continue;
         if (!next.includes(id)) next.push(id);
       }
     }
@@ -1337,7 +1359,10 @@ export function filterAllowedByPlaybook(
       if (playbook.deprioritizedActions.includes(id)) {
         continue;
       }
-      if (cookBeforeHunt && (id === 'hunt_rabbits' || id === 'hunt_battle')) {
+      if (!finishHunt && cookBeforeHunt && (id === 'hunt_rabbits' || id === 'hunt_battle')) {
+        continue;
+      }
+      if (finishHunt && id === 'cook_cod') {
         continue;
       }
       if (!next.includes(id) && ['mine_coal', 'fish_cod', 'cook_cod', 'market_sell_half', 'sell_junk_for_gold', 'explore_map', 'hunt_rabbits', 'manage_pets', 'equip_pet', 'buy_bait', 'sell_junk'].includes(id)) {
@@ -1370,6 +1395,16 @@ export function filterAllowedByPlaybook(
 
   // Ensure idle remains available.
   if (!next.includes('idle') && allowed.includes('idle')) next.push('idle');
+  if (finishHunt) {
+    next = next.filter((a) => a !== 'cook_cod');
+    for (const id of ['hunt_rabbits', 'hunt_battle'] as const) {
+      if (allowed.includes(id) && !next.includes(id)) next.push(id);
+    }
+    next = [
+      ...(['hunt_rabbits', 'hunt_battle'] as const).filter((id) => next.includes(id)),
+      ...next.filter((a) => a !== 'hunt_rabbits' && a !== 'hunt_battle'),
+    ];
+  }
   if (next.length === 0) return allowed.includes('idle') ? ['idle'] : allowed;
 
   if (needsBaitRestock && next.includes('buy_bait')) {

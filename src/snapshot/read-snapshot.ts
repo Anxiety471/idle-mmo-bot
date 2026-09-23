@@ -15,6 +15,7 @@ import {
   detectHasBait,
   scrapeInventoryFromDom,
 } from './inventory-scrape.js';
+import { parseHuntMetrics } from '../deterministic/combat.js';
 
 const SKILL_IDS: SkillId[] = [
   'woodcutting',
@@ -140,6 +141,7 @@ export async function readGameSnapshot(page: Page, config: AppConfig): Promise<G
   }
   combatPhase = detectCombatPhase(combatText, '/combat/battle');
   const inBattle = combatText.includes('Run Away');
+  const huntMetrics = parseHuntMetrics(combatText);
 
   await navigateTo(page, config, '/profile');
   text = await bodyText(page);
@@ -185,6 +187,8 @@ export async function readGameSnapshot(page: Page, config: AppConfig): Promise<G
     acceptedQuests,
     pendingQuests,
     combatPhase,
+    totalEnemiesFound: huntMetrics.totalEnemiesFound,
+    enemiesRemaining: huntMetrics.enemiesRemaining,
     features: {
       meditationLocked: /Meditation/i.test(text) && /Total Lv\.?\s*50|Lv\.?\s*50/i.test(text),
       slayerMentioned: /slayer/i.test(text),
