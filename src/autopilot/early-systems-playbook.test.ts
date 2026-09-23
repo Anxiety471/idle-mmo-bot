@@ -1215,6 +1215,43 @@ describe('strict sequential real-count gates', () => {
     assert.ok(!readyFiltered.includes('cook_cod'));
   });
 
+  it('hard-prefers cook_cod over quest_talk_accept when cook-before-hunt', () => {
+    statePath = join('/tmp', `playbook-cook-prefer-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'hunt_battle_batch',
+        counts: {
+          ...coalMetCounts({ sells: 2 }),
+          rawCod: 287,
+          cookedCod: 101,
+          huntBattles: 26,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    // HitoriIdle-like: cook target met in counts, but bag has no Cooked Cod.
+    const snapshot = minimalSnapshot({
+      inventory: { 'Cheap Bait': 8, 'Coal Ore': 4500, 'Raw Cod': 287 },
+      gold: 110,
+      combatPhase: 'none',
+      pendingQuests: [{ title: 'A Rabbits Fortune', progress: '1 / 40', canTurnIn: false, tab: 'pending' }],
+    });
+    const progress = evaluatePlaybook(snapshot);
+    assert.ok(progress.preferredActions[0] === 'cook_cod', `preferred=${JSON.stringify(progress.preferredActions)}`);
+    const filtered = filterAllowedByPlaybook(
+      ['quest_talk_accept', 'idle', 'fish_cod', 'cook_cod', 'craft_if_ready', 'explore_map', 'sell_junk', 'sell_junk_for_gold'],
+      snapshot,
+      progress,
+    );
+    assert.equal(filtered[0], 'cook_cod', `filtered=${JSON.stringify(filtered)}`);
+    assert.ok(filtered.includes('quest_talk_accept'));
+    assert.ok(!filtered.includes('hunt_battle_batch'));
+  });
 
   it('hides legacy hunt_rabbits alias when cook-before-hunt (no active hunt)', () => {
     statePath = join('/tmp', `playbook-alias-cook-${Date.now()}.json`);

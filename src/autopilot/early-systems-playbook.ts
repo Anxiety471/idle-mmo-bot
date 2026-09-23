@@ -996,6 +996,22 @@ export function evaluatePlaybook(
     deprioritizedActions = deprioritizedActions.filter((a) => a !== 'manage_pets');
   }
 
+  // When bag food is under cook target, hard-prefer cook over hunt/quest-talk noise.
+  if (
+    !mustFinishActiveHunt(snapshot) &&
+    needsCookBeforeHunt(snapshot.inventory, COOK_MIN) &&
+    (stage === 'hunt_battle_batch' ||
+      stage === 'hunt_rabbits' ||
+      stage === 'cook_cod' ||
+      cookTargetMet(counts))
+  ) {
+    preferredActions = [
+      'cook_cod',
+      ...preferredActions.filter((a) => a !== 'cook_cod'),
+    ];
+    if (!interruptActions.includes('cook_cod')) interruptActions.unshift('cook_cod');
+  }
+
   // Idle-only equip after a busy-time (or prior) maintain tick without Equip.
   const asyncEquip = shouldInjectEquipPet(counts, snapshot);
   if (asyncEquip) {
@@ -1483,6 +1499,16 @@ export function filterAllowedByPlaybook(
     }
     return 0;
   });
+
+  // Cook-before-hunt must beat mission-first quest_talk_accept spam. Keep turn-in first.
+  if (cookBeforeHunt && !finishHunt && next.includes('cook_cod')) {
+    const keepTurnin = next.includes('quest_turnin') ? (['quest_turnin'] as AutopilotAction[]) : [];
+    next = [
+      ...keepTurnin,
+      'cook_cod',
+      ...next.filter((a) => a !== 'cook_cod' && a !== 'quest_turnin'),
+    ];
+  }
 
   return next;
 }
