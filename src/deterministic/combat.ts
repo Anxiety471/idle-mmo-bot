@@ -467,13 +467,16 @@ export async function openEnemiesNearbyPanel(page: Page): Promise<CombatStepResu
   }
 }
 
-async function hasEnemySelectionReady(page: Page): Promise<boolean> {
+/**
+ * Post-Stop enemy selection is ready (detail panel, count badge, or creature cards).
+ * Does NOT match the ENEMIES NEARBY sidebar label alone — that label stays visible
+ * during active hunts (Stop button) and caused false positives + hunt_metrics_pending loops.
+ */
+export async function hasEnemySelectionReady(page: Page): Promise<boolean> {
   if (await isEnemyDetailPanelOpen(page)) return true;
   if (await findEnemiesNearbyCountButton(page)) return true;
   const cards = await collectEnemyCardButtons(page);
-  if (cards.length > 0) return true;
-  const text = await pageText(page);
-  return /ENEMIES NEARBY/i.test(text);
+  return cards.length > 0;
 }
 
 /**
@@ -524,12 +527,23 @@ export async function startHunt(
   return ensureHuntActive(page, config, allowInterrupt);
 }
 
-function parseHuntMetrics(text: string): {
+/** Whether hunt metrics or enemy cards indicate progress (pure helper for tests). */
+export function hasHuntProgress(state: HuntState): boolean {
+  return (
+    (state.totalEnemiesFound ?? 0) > 0 ||
+    state.enemies.length > 0 ||
+    state.defeatedCount > 0
+  );
+}
+
+export function parseHuntMetrics(text: string): {
   totalEnemiesFound?: number;
   enemiesRemaining?: number;
   bonusEnemies?: number;
 } {
-  const totalMatch = text.match(/Total Enemies Found[^\d]*(\d+)/i);
+  const totalMatch =
+    text.match(/Total Enemies Found[^\d]*(\d+)/i) ??
+    text.match(/Enemies Found[^\d]*(\d+)/i);
   const remainingMatch = text.match(/Enemies Remaining[^\d]*(\d+)/i);
   const bonusMatch = text.match(/Bonus Enemies[^\d]*(\d+)/i);
 
@@ -789,14 +803,13 @@ export async function waitForEnemies(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const state = await readHuntState(page);
-    if (
-      (state.totalEnemiesFound ?? 0) > 0 ||
-      state.enemies.length > 0 ||
-      state.defeatedCount > 0
-    ) {
+    if (hasHuntProgress(state)) {
       return state;
     }
-    if (await hasEnemySelectionReady(page)) {
+    // ENEMIES NEARBY label is visible during active hunts — only treat selection
+    // as ready once Stop is gone (post-hunt) or we already have metrics/cards.
+    const stopVisible = await isButtonVisible(page, 'Stop');
+    if (!stopVisible && (await hasEnemySelectionReady(page))) {
       return state;
     }
     await page.waitForTimeout(500);
