@@ -8,6 +8,8 @@ import {
   readSkillState,
   ensureHuntActive,
   waitForEnemies,
+  hasHuntProgress,
+  hasEnemySelectionReady,
   prepareEnemyBattleSelection,
   readHuntState,
   stopHunt,
@@ -109,12 +111,20 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<string> {
   if (huntResult === 'enemy_select_ready') {
     huntState = await readHuntState(page);
   } else {
-    const afterWait = await waitForEnemies(page);
-    if (
-      (afterWait.totalEnemiesFound ?? 0) === 0 &&
-      afterWait.enemies.length === 0 &&
-      afterWait.defeatedCount === 0
+    const metricsDeadline = Date.now() + Math.max(config.pollMs * 30, 60_000);
+    let afterWait = await waitForEnemies(page);
+    while (
+      !hasHuntProgress(afterWait) &&
+      !(await hasEnemySelectionReady(page)) &&
+      Date.now() < metricsDeadline
     ) {
+      await sleep(config.pollMs);
+      afterWait = await waitForEnemies(
+        page,
+        Math.min(metricsDeadline - Date.now(), 15_000),
+      );
+    }
+    if (!hasHuntProgress(afterWait) && !(await hasEnemySelectionReady(page))) {
       return 'hunt_metrics_pending';
     }
     huntState = await pollUntilHuntStop(page, config, jev, afterWait, {

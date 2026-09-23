@@ -414,6 +414,39 @@ describe('sticky baitOwned (no repurchase loop)', () => {
     const saved = JSON.parse(readFileSync(statePath, 'utf8')) as { counts?: { sells?: number } };
     assert.equal(saved.counts?.sells, 1);
   });
+
+  it('notePlaybookOutcome credits hunt_rabbits on battle outcome', () => {
+    statePath = join('/tmp', `playbook-hunt-credit-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({ version: 1, stage: 'hunt_rabbits', counts: emptyPlaybookCounts(), baitOwned: true })}\n`,
+    );
+
+    notePlaybookOutcome(
+      'hunt_rabbits',
+      'battle:battle_started:huntMore:hunt_more_clicked',
+    );
+
+    const saved = JSON.parse(readFileSync(statePath, 'utf8')) as { counts?: { rabbitHunts?: number } };
+    assert.equal(saved.counts?.rabbitHunts, 1);
+  });
+
+  it('notePlaybookOutcome does not credit hunt_rabbits on hunt_metrics_pending', () => {
+    statePath = join('/tmp', `playbook-hunt-pending-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({ version: 1, stage: 'hunt_rabbits', counts: emptyPlaybookCounts(), baitOwned: true })}\n`,
+    );
+
+    notePlaybookOutcome('hunt_rabbits', 'hunt_metrics_pending');
+
+    const saved = JSON.parse(readFileSync(statePath, 'utf8')) as { counts?: { rabbitHunts?: number } };
+    assert.equal(saved.counts?.rabbitHunts, 0);
+  });
 });
 
 describe('missions-first early gold', () => {

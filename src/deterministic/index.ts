@@ -32,6 +32,9 @@ export {
   waitForEnemyCards,
   openEnemiesNearbyPanel,
   prepareEnemyBattleSelection,
+  parseHuntMetrics,
+  hasHuntProgress,
+  hasEnemySelectionReady,
 } from './combat.js';
 
 export {
