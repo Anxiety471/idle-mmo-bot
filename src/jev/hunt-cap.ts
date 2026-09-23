@@ -2,26 +2,11 @@ import type { Page } from 'playwright';
 import type { AppConfig } from '../config.js';
 import type { HuntState } from '../types.js';
 import { readHuntState } from '../deterministic/combat.js';
+import { huntFoundCap } from '../deterministic/hunt-cap.js';
 import { effectivePollMs } from '../deterministic/poll-interval.js';
 import type { JevAdvisor } from './types.js';
 
-/** Effective combat level for cap scaling (fallback when combat is 0/missing). */
-export function effectiveCombatLevel(combatLevel?: number, totalLevel?: number): number {
-  if (combatLevel !== undefined && combatLevel > 0) return combatLevel;
-  if (totalLevel !== undefined && totalLevel > 0) {
-    return Math.max(1, Math.ceil(totalLevel / 10));
-  }
-  return 1;
-}
-
-/**
- * Hard max Total Enemies Found before stop — scales with stats, absolute max 10.
- * combat 1 → cap 1; combat 20 → cap 10.
- */
-export function huntFoundCap(combatLevel?: number, totalLevel?: number): number {
-  const combat = effectiveCombatLevel(combatLevel, totalLevel);
-  return Math.min(10, Math.max(1, Math.ceil(combat / 2)));
-}
+export { huntFoundCap } from '../deterministic/hunt-cap.js';
 
 export function withHuntLevels(
   state: HuntState,
@@ -31,7 +16,10 @@ export function withHuntLevels(
   return { ...state, combatLevel, totalLevel };
 }
 
-/** Hard stop: Jev cannot override when found >= cap. */
+/**
+ * Hard stop from the hunt panel's Total Enemies Found counter.
+ * Default cap is 100. A large Enemies Remaining value does not delay battle.
+ */
 export function isHuntHardStop(state: HuntState): boolean {
   const cap = huntFoundCap(state.combatLevel, state.totalLevel);
   return (state.totalEnemiesFound ?? 0) >= cap;
@@ -47,13 +35,14 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Poll hunt metrics until hard cap or Jev says stop.
- * Hard cap is checked before every Jev call and cannot be overridden.
+ * Poll the hunt panel until Total Enemies Found reaches the cap (default 100), then battle.
+ * Jev cannot stop early and cannot keep hunting past the cap. Enemies Remaining is ignored.
+ * `jev` stays on the signature so callers do not change; the found counter is the trigger.
  */
 export async function pollUntilHuntStop(
   page: Page,
   config: AppConfig,
-  jev: JevAdvisor,
+  _jev: JevAdvisor,
   initialState: HuntState,
   levels: HuntLevelContext = {},
 ): Promise<HuntState> {
@@ -66,19 +55,20 @@ export async function pollUntilHuntStop(
   while (true) {
     const found = huntState.totalEnemiesFound ?? 0;
     if (found >= cap) {
-      console.log(`[combat] hard stop: found=${found} >= cap=${cap} (combat=${levels.combatLevel ?? '?'})`);
-      break;
-    }
-    if (await jev.decideHuntStop(huntState)) {
+      console.log(
+        `[combat] battle now: Total Enemies Found=${found} >= cap=${cap}` +
+          ` (remaining=${huntState.enemiesRemaining ?? '?'})`,
+      );
       break;
     }
     zeroFoundPolls = found === 0 ? zeroFoundPolls + 1 : 0;
     if (zeroFoundPolls >= maxZeroFoundPolls) {
       console.log(
-        `[combat] hunt metrics still 0 after ${zeroFoundPolls} polls — stopping poll loop (scrape or hunt may be stuck)`,
+        `[combat] Total Enemies Found still 0 after ${zeroFoundPolls} polls — stopping poll loop (scrape or hunt may be stuck)`,
       );
       break;
     }
+    console.log(`[combat] hunting: Total Enemies Found=${found}/${cap} — keep hunting`);
     await sleep(pollMs);
     huntState = withHuntLevels(await readHuntState(page), levels.combatLevel, levels.totalLevel);
   }

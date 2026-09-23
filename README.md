@@ -38,7 +38,8 @@ Set `STORAGE_STATE=./storage-state.json` in `.env`. This file is gitignored — 
 | `FORCE_INTERRUPT` | `false` | Click Start anyway on replace dialog for combat |
 | `JEV_API_TOKEN` | _(unset)_ | TypeSafe API key for **HttpJev** (alias: `TYPESAFE_API_KEY`) |
 | `JEV_MODEL` | `jev-latest` | Jev model sent to TypeSafe System One API |
-| `JEV_NOUL_THRESHOLD` | `0.6` | Noul yes threshold for interrupt / stop hunt / flee |
+| `JEV_NOUL_THRESHOLD` | `0.6` | Noul yes threshold for interrupt / flee |
+| `HUNT_FOUND_CAP` | `100` | Stop hunting and battle when **Total Enemies Found** reaches this count |
 
 ## Commands
 
@@ -159,7 +160,7 @@ npm run combat -- --rounds 5 --interrupt
 # or FORCE_INTERRUPT=true in .env
 ```
 
-Combat uses `ensureHuntActive`: **Start Hunt** if idle, **Hunt More** if post-hunt (replace dialog respects `--interrupt`), **Stop** if already hunting, or proceeds when enemy cards / `ENEMIES NEARBY` are already visible. While hunting, the UI shows **Total Enemies Found** metrics (not cards). A **hard stop** fires when found ≥ `huntFoundCap(combatLevel, totalLevel)` = `min(10, max(1, ceil(combat/2)))` (combat 1 → stop at 1 found; scales to max 10). This cap cannot be overridden by Jev — a huge **Enemies Remaining** count is not a reason to keep hunting. Jev may stop earlier via `decideHuntStop`. Then **Stop** → **ENEMIES NEARBY** count → Battle.
+Combat uses `ensureHuntActive`: **Start Hunt** if idle, **Hunt More** if post-hunt (replace dialog respects `--interrupt`), **Stop** if already hunting, or proceeds when enemy cards / `ENEMIES NEARBY` are already visible. While hunting, the UI shows **Total Enemies Found** (enemy sprites may also be visible). That counter is the hunted total. A **hard stop** fires when Total Enemies Found ≥ `HUNT_FOUND_CAP` (default **100**). Example: found **121** with Enemies Remaining **831** battles immediately — remaining enemies do not extend the hunt, and a smaller found count does not battle early. Jev cannot override the cap. Then **Stop** → enemy select → Battle.
 
 If a gather action is running, **Start Hunt** shows the replace dialog. With default Jev (no interrupt), the bot closes the dialog, logs clearly, and backs off 30s+ instead of spinning forever. Use `--interrupt` to click **Start anyway**.
 
@@ -176,7 +177,7 @@ When `JEV_API_TOKEN` or `TYPESAFE_API_KEY` is set, the CLI uses **HttpJev** — 
 | Advisor method | TypeSafe question | Decision rule |
 |----------------|-------------------|---------------|
 | `shouldInterruptGather` | noul | `true` when noul ≥ `JEV_NOUL_THRESHOLD` |
-| `decideHuntStop` | noul | hard stop at found ≥ cap; else `true` when noul ≥ threshold |
+| `decideHuntStop` | noul | `true` only when Total Enemies Found ≥ cap (default 100) |
 | `chooseStance` | choice | Balanced / Offensive / Defensive / Agile / Dexterous |
 | `chooseMaxEnemies` | score | 1–5 enemies from ordered rubric |
 | `shouldFlee` | noul | `true` when noul ≥ threshold |

@@ -89,6 +89,12 @@ async function clickHuntStopButton(page: Page): Promise<boolean> {
     await btn.first().click();
     return true;
   }
+
+  const stopLabel = page.getByText(/^Stop$/, { exact: true }).first();
+  if ((await stopLabel.count()) > 0 && (await stopLabel.isVisible().catch(() => false))) {
+    await stopLabel.click();
+    return true;
+  }
   return false;
 }
 
@@ -842,10 +848,20 @@ export async function isIdleBattleScreen(page: Page): Promise<boolean> {
   return isIdleBattleText(await pageText(page));
 }
 
+/**
+ * Active hunt panel from the live Battle screen: Total Enemies Found plus Stop / Power Hunt.
+ * Enemy sprites can sit above the counters while the hunt is still running.
+ */
+export function isActiveHuntPanelText(text: string): boolean {
+  if (!text.includes('Total Enemies Found')) return false;
+  return /\bStop\b/.test(text) || text.includes('Power Hunt') || text.includes('Cancel Hunt');
+}
+
 /** Active hunt: Stop visible plus Hunting header or hunt metrics on screen. */
 export async function isHuntActivelyRunning(page: Page): Promise<boolean> {
-  if (!(await isHuntStopVisible(page))) return false;
   const text = await pageText(page);
+  if (isActiveHuntPanelText(text)) return true;
+  if (!(await isHuntStopVisible(page))) return false;
   return text.includes('Hunting') || text.includes('Total Enemies Found');
 }
 
@@ -1010,6 +1026,62 @@ function parseMetricNearLabel(text: string, labels: string[]): number | undefine
   return undefined;
 }
 
+const HUNT_METRIC_LABEL_LINE =
+  /^(total enemies found|enemies found|enemies hunted|enemies remaining|remaining enemies|bonus enemies|exp per second|loot found|power hunt|hunting|stats|battle)$/i;
+
+/**
+ * Labels stacked, then values stacked (or a help "?" between Bonus Enemies and its count).
+ * Used when label/value pairs are not adjacent in innerText.
+ */
+function parseStackedMetricGrid(text: string): {
+  totalEnemiesFound?: number;
+  enemiesRemaining?: number;
+  bonusEnemies?: number;
+} {
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const specs = [
+    { key: 'totalEnemiesFound' as const, names: ['total enemies found', 'enemies found', 'enemies hunted'] },
+    { key: 'enemiesRemaining' as const, names: ['enemies remaining', 'remaining enemies'] },
+    { key: 'bonusEnemies' as const, names: ['bonus enemies'] },
+  ];
+  const found = specs
+    .map((spec) => ({
+      ...spec,
+      idx: lines.findIndex((line) =>
+        spec.names.some((name) => line.toLowerCase() === name || line.toLowerCase().startsWith(`${name} `)),
+      ),
+    }))
+    .filter((spec) => spec.idx >= 0)
+    .sort((a, b) => a.idx - b.idx);
+  if (found.length === 0) return {};
+
+  const first = found[0].idx;
+  const last = found[found.length - 1].idx;
+  const between = lines.slice(first, last + 1);
+  if (between.some((line) => /^\d/.test(line))) return {};
+
+  const numbers: number[] = [];
+  for (let i = last + 1; i < lines.length && numbers.length < found.length; i++) {
+    if (lines[i] === '?' || HUNT_METRIC_LABEL_LINE.test(lines[i])) continue;
+    const match = lines[i].match(/^(\d+(?:\.\d+)?)$/);
+    if (!match?.[1]) {
+      if (numbers.length > 0) break;
+      continue;
+    }
+    numbers.push(Number.parseInt(match[1], 10));
+  }
+
+  const metrics: {
+    totalEnemiesFound?: number;
+    enemiesRemaining?: number;
+    bonusEnemies?: number;
+  } = {};
+  found.forEach((spec, index) => {
+    if (numbers[index] !== undefined) metrics[spec.key] = numbers[index];
+  });
+  return metrics;
+}
+
 export function parseHuntMetrics(text: string): {
   totalEnemiesFound?: number;
   enemiesRemaining?: number;
@@ -1023,18 +1095,23 @@ export function parseHuntMetrics(text: string): {
   let bonusEnemies: number | undefined;
 
   for (const source of sources) {
+    const stacked = parseStackedMetricGrid(source);
+    if (stacked.totalEnemiesFound !== undefined) {
+      totalEnemiesFound ??= stacked.totalEnemiesFound;
+      enemiesRemaining ??= stacked.enemiesRemaining;
+      bonusEnemies ??= stacked.bonusEnemies;
+      continue;
+    }
     totalEnemiesFound ??= parseMetricNearLabel(source, [
       'Total Enemies Found',
       'Enemies Found',
       'Enemies Hunted',
-      'Hunted',
     ]);
     enemiesRemaining ??= parseMetricNearLabel(source, [
       'Enemies Remaining',
       'Remaining Enemies',
-      'Remaining',
     ]);
-    bonusEnemies ??= parseMetricNearLabel(source, ['Bonus Enemies', 'Bonus']);
+    bonusEnemies ??= parseMetricNearLabel(source, ['Bonus Enemies']);
   }
 
   return { totalEnemiesFound, enemiesRemaining, bonusEnemies };
@@ -1054,15 +1131,25 @@ async function scrapeHuntMetricsFromDom(page: Page): Promise<{
       if (await labelEl.count() === 0) continue;
 
       const line = await safeInnerText(labelEl);
-      const inline = line.match(/:\s*(\d+(?:\.\d+)?)\s*$/);
-      if (inline?.[1]) return Number.parseInt(inline[1], 10);
+      const inline = line.match(/(?::\s*)?(\d+(?:\.\d+)?)\s*$/);
+      if (inline?.[1] && line.toLowerCase() !== label.toLowerCase()) {
+        return Number.parseInt(inline[1], 10);
+      }
 
-      // Live UI: label box left, value box right (sibling).
+      // Live UI: label box left, value box right (sibling). "?" help icons are skipped.
       const sibling = labelEl.locator('xpath=following-sibling::*[1]');
       if (await sibling.count() > 0) {
         const siblingText = await safeInnerText(sibling);
         const siblingNum = siblingText.match(/^(\d+(?:\.\d+)?)$/);
         if (siblingNum?.[1]) return Number.parseInt(siblingNum[1], 10);
+        if (siblingText === '?') {
+          const afterHelp = labelEl.locator('xpath=following-sibling::*[2]');
+          if (await afterHelp.count() > 0) {
+            const helpText = await safeInnerText(afterHelp);
+            const helpNum = helpText.match(/^(\d+(?:\.\d+)?)$/);
+            if (helpNum?.[1]) return Number.parseInt(helpNum[1], 10);
+          }
+        }
       }
 
       const parent = labelEl.locator('xpath=parent::*');
@@ -1091,14 +1178,12 @@ async function scrapeHuntMetricsFromDom(page: Page): Promise<{
     'Total Enemies Found',
     'Enemies Found',
     'Enemies Hunted',
-    'Hunted',
   ]);
   const enemiesRemaining = await readNear([
     'Enemies Remaining',
     'Remaining Enemies',
-    'Remaining',
   ]);
-  const bonusEnemies = await readNear(['Bonus Enemies', 'Bonus']);
+  const bonusEnemies = await readNear(['Bonus Enemies']);
 
   return { totalEnemiesFound, enemiesRemaining, bonusEnemies };
 }
