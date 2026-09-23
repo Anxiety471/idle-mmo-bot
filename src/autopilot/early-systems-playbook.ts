@@ -2,9 +2,9 @@
  * Early-systems playbook — curriculum / stage targets + allowed-action filters.
  *
  * HttpJev remains the decision brain. This module only:
- *  - tracks batch loop progress (coal → sell → bait → fish → cook → sell → hunt → repeat)
+ *  - tracks batch loop progress (coal → sell → bait → fish → cook → hunt → repeat)
  *  - hard sequential gates by real counts only (not busy-cycle estimates):
- *      coal → fish → cook → hunt; snap back to first unmet stage if stuck ahead
+ *      coal → fish → cook → hunt (no sell after cook); snap back to first unmet stage if stuck ahead
  *  - pets are async/opportunistic (soft prefer / interrupt), NOT a sequential batch stage
  *  - default batch targets: ~100 coal, ~100 fish, ~100 cook, ~120 hunt/battle (env-overridable)
  *  - exposes preferred / deprioritized actions into the snapshot for Jev
@@ -131,7 +131,6 @@ const STAGE_ORDER: EarlyStageId[] = [
   'buy_bait',
   'fish_cod',
   'cook_cod',
-  'sell_extras',
   'hunt_rabbits',
   'explore_map',
   'complete',
@@ -597,10 +596,7 @@ function deriveStage(
   if (fishTargetMet(counts) && !cookTargetMet(counts)) {
     if (idx >= STAGE_ORDER.indexOf('fish_cod') || hasBait) return 'cook_cod';
   }
-  if (cookTargetMet(counts) && counts.sells < 2 && idx >= STAGE_ORDER.indexOf('cook_cod')) {
-    if (persisted === 'cook_cod' || persisted === 'sell_extras') return 'sell_extras';
-  }
-  if (cookTargetMet(counts) && !huntTargetMet(counts) && idx >= STAGE_ORDER.indexOf('sell_extras')) {
+  if (cookTargetMet(counts) && !huntTargetMet(counts) && idx >= STAGE_ORDER.indexOf('cook_cod')) {
     return 'hunt_rabbits';
   }
   // Pets are async — never a sequential stage after hunt.
@@ -615,8 +611,8 @@ function deriveStage(
   }
 
   // Fall through: keep persisted stage if still sensible.
-  // Legacy manage_pets (removed from STAGE_ORDER) → treat as post-hunt for loop logic.
-  if (persisted === 'manage_pets') {
+  // Legacy stages (removed from STAGE_ORDER) → treat as hunt for loop logic.
+  if (persisted === 'manage_pets' || persisted === 'sell_extras') {
     return 'hunt_rabbits';
   }
   return persisted === 'mine_coal' && coalTargetMet(counts) ? 'sell_half' : persisted;
@@ -781,9 +777,12 @@ export function evaluatePlaybook(
     baitOwned = true;
   }
 
-  // Legacy manage_pets was sequential; normalize out of STAGE_ORDER before gates.
+  // Legacy stages removed from STAGE_ORDER; normalize before gates.
   let persistedStage = persisted.stage;
   if (persistedStage === 'manage_pets') {
+    persistedStage = 'hunt_rabbits';
+  }
+  if (persistedStage === 'sell_extras' && cookTargetMet(counts)) {
     persistedStage = 'hunt_rabbits';
   }
 
@@ -792,11 +791,13 @@ export function evaluatePlaybook(
   const fishMet = fishTargetMet(counts);
   const cookMet = cookTargetMet(counts);
   const huntMet = huntTargetMet(counts);
-  // Treat legacy manage_pets as post-hunt for snap-back comparisons.
+  // Treat legacy stages (removed from STAGE_ORDER) for snap-back comparisons.
   const persistedIdx =
     persisted.stage === 'manage_pets'
       ? STAGE_ORDER.indexOf('explore_map')
-      : STAGE_ORDER.indexOf(persistedStage);
+      : persisted.stage === 'sell_extras' && cookMet
+        ? STAGE_ORDER.indexOf('hunt_rabbits')
+        : STAGE_ORDER.indexOf(persistedStage);
 
   // Snap back to the first unmet hard-gate stage (real counts only).
   // Busy-cycle estimates must never keep a bot ahead of unfinished prior stages.
@@ -854,8 +855,11 @@ export function evaluatePlaybook(
   if (stage === 'fish_cod' && fishMet) {
     stage = 'cook_cod';
   }
-  if (stage === 'cook_cod' && cookMet) stage = 'sell_extras';
-  if (stage === 'sell_extras' && counts.sells >= 2) stage = 'hunt_rabbits';
+  if (stage === 'cook_cod' && cookMet) stage = 'hunt_rabbits';
+  // Legacy: persisted sell_extras (removed from STAGE_ORDER) → hunt when cook met.
+  if (stage === 'sell_extras' && cookMet && !huntMet) {
+    stage = 'hunt_rabbits';
+  }
   // Hunt target met → loop batch (pets are async; never block on manage_pets).
   if (stage === 'hunt_rabbits' && huntMet) {
     if (counts.mapPeeks < 1 && counts.batchCycles === 0) {
