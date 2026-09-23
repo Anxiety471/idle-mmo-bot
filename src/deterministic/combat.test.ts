@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  enemyNameFromDetailText,
   enemyNameFromImageSrc,
+  inventoryCanCookBattleFood,
+  inventoryHasBattleFood,
   hasHuntProgress,
   huntingMetricsSection,
   isIdleBattleText,
@@ -220,6 +223,41 @@ Start Hunt
 YOUR CHARACTER`;
     assert.equal(isIdleBattleText(idle), true);
     assert.equal(isIdleBattleText(LIVE_ACTIVE_HUNT_PANEL), false);
+  });
+});
+
+describe('inventory battle food', () => {
+  it('treats any cooked stack as battle food', () => {
+    assert.equal(inventoryHasBattleFood({ 'Cooked Cod': 2 }), true);
+    assert.equal(inventoryHasBattleFood({ 'Cooked Salmon': 1 }), true);
+    assert.equal(inventoryHasBattleFood({ Cod: 10, 'Coal Ore': 10 }), false);
+    assert.equal(inventoryHasBattleFood({}), false);
+  });
+
+  it('can cook when raw cod and coal are both in inventory', () => {
+    assert.equal(inventoryCanCookBattleFood({ Cod: 1, 'Coal Ore': 1 }), true);
+    assert.equal(inventoryCanCookBattleFood({ 'Raw Cod': 2, Coal: 3 }), true);
+    assert.equal(inventoryCanCookBattleFood({ Cod: 4 }), false);
+    assert.equal(inventoryCanCookBattleFood({ 'Cooked Cod': 5 }), false);
+  });
+});
+
+describe('enemyNameFromDetailText', () => {
+  it('reads the name above Combat EXP in the battle-entity modal', () => {
+    const text = `Rabbit
+3 Combat EXP
+Level 1
+20% Chance of Loot
+FOOD
+Add
+STANCE
+Balanced (All Stats)
+ENEMIES`;
+    assert.equal(enemyNameFromDetailText(text), 'Rabbit');
+  });
+
+  it('reads an inline name and Combat EXP', () => {
+    assert.equal(enemyNameFromDetailText('Goblin 4 Combat EXP'), 'Goblin');
   });
 });
 

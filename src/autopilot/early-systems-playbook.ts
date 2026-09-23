@@ -18,6 +18,10 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getLogDir } from '../logging/jsonl-writer.js';
+import {
+  inventoryCanCookBattleFood,
+  inventoryHasBattleFood,
+} from '../deterministic/combat.js';
 import { hasEasyCompletePendingQuest } from '../deterministic/quest-accept.js';
 import type { AutopilotAction, AutopilotContext, GameSnapshot } from '../types.js';
 import {
@@ -1213,6 +1217,9 @@ export function filterAllowedByPlaybook(
   const coalIncomplete = !coalTargetMet(playbook.counts);
   const fishIncomplete = !fishTargetMet(playbook.counts);
   const cookIncomplete = !cookTargetMet(playbook.counts);
+  const cookBeforeHunt =
+    !inventoryHasBattleFood(snapshot.inventory) &&
+    inventoryCanCookBattleFood(snapshot.inventory);
   if (coalIncomplete || playbook.stage === 'mine_coal') {
     next = next.filter(
       (a) => a !== 'fish_cod' && a !== 'cook_cod' && a !== 'hunt_rabbits' && a !== 'hunt_battle',
@@ -1224,6 +1231,11 @@ export function filterAllowedByPlaybook(
     next = next.filter((a) => a !== 'cook_cod' && a !== 'hunt_rabbits' && a !== 'hunt_battle');
   } else if (cookIncomplete || playbook.stage === 'cook_cod') {
     next = next.filter((a) => a !== 'hunt_rabbits' && a !== 'hunt_battle');
+  } else if (cookBeforeHunt) {
+    // Cook target may already be met while the character ate the stack. Cook again
+    // before the next hunt/battle.
+    next = next.filter((a) => a !== 'hunt_rabbits' && a !== 'hunt_battle');
+    if (allowed.includes('cook_cod') && !next.includes('cook_cod')) next.push('cook_cod');
   }
 
   if (fishBackoff) {
@@ -1297,6 +1309,7 @@ export function filterAllowedByPlaybook(
         ...(playbook.questCurriculum?.interruptActions ?? []),
       ]);
       for (const id of inject) {
+        if (cookBeforeHunt && (id === 'hunt_rabbits' || id === 'hunt_battle')) continue;
         if (!next.includes(id)) next.push(id);
       }
     }
@@ -1327,6 +1340,9 @@ export function filterAllowedByPlaybook(
         continue;
       }
       if (playbook.deprioritizedActions.includes(id)) {
+        continue;
+      }
+      if (cookBeforeHunt && (id === 'hunt_rabbits' || id === 'hunt_battle')) {
         continue;
       }
       if (!next.includes(id) && ['mine_coal', 'fish_cod', 'cook_cod', 'market_sell_half', 'sell_junk_for_gold', 'explore_map', 'hunt_rabbits', 'manage_pets', 'equip_pet', 'buy_bait', 'sell_junk'].includes(id)) {

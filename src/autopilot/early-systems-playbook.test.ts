@@ -1133,6 +1133,41 @@ describe('strict sequential real-count gates', () => {
     assert.ok(progress.curriculumHint.includes('cook gate'), progress.curriculumHint);
   });
 
+  it('cooks before hunt when the cook target is met but inventory has no food', () => {
+    statePath = join('/tmp', `playbook-no-food-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'hunt_rabbits',
+        counts: {
+          ...coalMetCounts({ sells: 2 }),
+          rawCod: 100,
+          cookedCod: 100,
+          rabbitHunts: 4,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const snapshot = minimalSnapshot({
+      inventory: { 'Cheap Bait': 20, 'Coal Ore': 40, Cod: 12, 'Cooked Cod': 0 },
+      gold: 50,
+    });
+    const progress = evaluatePlaybook(snapshot);
+    assert.equal(progress.stage, 'hunt_rabbits');
+    const filtered = filterAllowedByPlaybook(
+      ['hunt_rabbits', 'hunt_battle', 'cook_cod', 'idle'],
+      snapshot,
+      progress,
+    );
+    assert.ok(!filtered.includes('hunt_rabbits'));
+    assert.ok(!filtered.includes('hunt_battle'));
+    assert.ok(filtered.includes('cook_cod'));
+  });
+
   it('snaps manage_pets back to hunt_rabbits when rabbitHunts below target', () => {
     statePath = join('/tmp', `playbook-hunt-snap-${Date.now()}.json`);
     process.env.PLAYBOOK_STATE_PATH = statePath;

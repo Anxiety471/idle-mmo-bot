@@ -5,6 +5,22 @@ import { navigateTo } from '../browser.js';
 import { getSkillConfig } from './skills.js';
 
 /**
+ * While something else is running, only start a cook when the caller allows
+ * interrupting it. An in-progress cook is left alone.
+ */
+export function cookInterruptDecision(
+  pageText: string,
+  allowInterrupt: boolean,
+): 'proceed' | 'already_busy' {
+  const idx = pageText.indexOf('CURRENT ACTION');
+  if (idx < 0) return 'proceed';
+  const slice = pageText.slice(idx, idx + 500);
+  if (/cook/i.test(slice)) return 'already_busy';
+  if (!allowInterrupt) return 'already_busy';
+  return 'proceed';
+}
+
+/**
  * Cook Cod into Cooked Cod for pre-battle food (effective HP heal).
  * Recipe on /skills/view/cooking: button label like
  * "Cooked Cod Lv. 1 2 EXP 8 s 1 x Cod 1 x Coal Ore".
@@ -19,7 +35,7 @@ export async function tryCookCod(
   await page.waitForTimeout(800);
 
   const pageText = await page.locator('body').innerText();
-  if (pageText.includes('CURRENT ACTION')) {
+  if (cookInterruptDecision(pageText, allowInterrupt) === 'already_busy') {
     return 'already_busy';
   }
 
