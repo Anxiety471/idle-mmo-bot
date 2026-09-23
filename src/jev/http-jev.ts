@@ -11,6 +11,10 @@ import type {
 } from '../types.js';
 import type { JevConfig } from './jev-config.js';
 import { actionCriteria } from './action-descriptions.js';
+import {
+  getPlaybookFromSnapshot,
+  shouldInterruptGatherForPlaybook,
+} from '../autopilot/early-systems-playbook.js';
 import { ProgressiveStubJev } from './progressive-stub.js';
 import type { SupervisorAdvisor } from './supervisor-advisor.js';
 import type { Answer, Question, SystemOneResponse } from './typesafe-client.js';
@@ -19,6 +23,11 @@ import { huntFoundCap } from './hunt-cap.js';
 import { logJevCall, type JevMethodName } from '../logging/jev-log.js';
 
 const STANCES: Stance[] = ['Balanced', 'Offensive', 'Defensive', 'Agile', 'Dexterous'];
+
+/** Minimal TypeSafe surface so tests can inject a client that must not be called. */
+export interface SystemOneClient {
+  systemOne(state: unknown, questions: Record<string, Question>): Promise<SystemOneResponse>;
+}
 
 const STANCE_CRITERIA: Record<string, string> = {
   Balanced: 'Even offense and defense for general hunting',
@@ -118,11 +127,16 @@ function snapshotPayload(snapshot: GameSnapshot, context: AutopilotContext): Rec
  * Appends structured lines to logs/jev.jsonl for every call.
  */
 export class HttpJev implements SupervisorAdvisor {
-  private readonly client: TypeSafeClient;
+  private readonly client: SystemOneClient;
   private readonly fallback = new ProgressiveStubJev();
+  /** Last autopilot snapshot, so gather interrupt can see the active playbook. */
+  private lastSnapshot?: GameSnapshot;
 
-  constructor(private readonly config: JevConfig) {
-    this.client = new TypeSafeClient(config);
+  constructor(
+    private readonly config: JevConfig,
+    client?: SystemOneClient,
+  ) {
+    this.client = client ?? new TypeSafeClient(config);
   }
 
   private logError(method: string, error: unknown): void {
@@ -184,6 +198,7 @@ export class HttpJev implements SupervisorAdvisor {
     allowed: AutopilotAction[],
     context: AutopilotContext,
   ): Promise<AutopilotAction> {
+    this.lastSnapshot = snapshot;
     if (allowed.length === 0) {
       await this.logLocal('chooseNextAction', 'idle');
       return 'idle';
@@ -193,9 +208,14 @@ export class HttpJev implements SupervisorAdvisor {
       return allowed[0];
     }
 
-    const playbook = snapshot.extensions?.earlySystemsPlaybook as
-      | { curriculumHint?: string; stage?: string; preferredActions?: string[]; complete?: boolean }
-      | undefined;
+    const playbook = getPlaybookFromSnapshot(snapshot);
+    if (playbook?.enabled && !playbook.complete) {
+      const action = await this.fallback.chooseNextAction(snapshot, allowed, context);
+      console.log(`[playbook] deterministic chooseNextAction → ${action} (skipped HttpJev)`);
+      await this.logLocal('chooseNextAction', action);
+      return action;
+    }
+
     const playbookHint =
       playbook && !playbook.complete
         ? ` ${playbook.curriculumHint ?? ''} Prefer among: ${(playbook.preferredActions ?? []).join(', ') || 'n/a'}. ` +
@@ -229,6 +249,16 @@ export class HttpJev implements SupervisorAdvisor {
   }
 
   async shouldInterruptGather(state: GatherState): Promise<boolean> {
+    const playbook = this.lastSnapshot ? getPlaybookFromSnapshot(this.lastSnapshot) : undefined;
+    if (playbook?.enabled && !playbook.complete) {
+      const interrupt = shouldInterruptGatherForPlaybook(playbook, state);
+      console.log(
+        `[playbook] deterministic shouldInterruptGather → ${interrupt} (skipped HttpJev)`,
+      );
+      await this.logLocal('shouldInterruptGather', interrupt);
+      return interrupt;
+    }
+
     return this.withApiLog(
       'shouldInterruptGather',
       gatherPayload(state),

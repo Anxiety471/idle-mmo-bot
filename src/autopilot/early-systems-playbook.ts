@@ -1,7 +1,10 @@
 /**
  * Early-systems playbook — curriculum / stage targets + allowed-action filters.
  *
- * HttpJev remains the decision brain. This module only:
+ * While this playbook is enabled and incomplete, HttpJev chooses the next autopilot
+ * action and gather interrupts deterministically (same order as ProgressiveStubJev).
+ * Combat micro-decisions (stance, flee, battle food) stay on HttpJev.
+ * This module:
  *  - tracks batch loop progress (coal → sell → bait → fish → cook → hunt → repeat)
  *  - hard sequential gates by real counts only (not busy-cycle estimates):
  *      coal → fish → cook → hunt (no sell after cook); snap back to first unmet stage if stuck ahead
@@ -21,7 +24,7 @@ import { getLogDir } from '../logging/jsonl-writer.js';
 import { cookedCodCount, needsCookBeforeHunt } from '../deterministic/combat.js';
 import { shouldHardStopHunt } from '../deterministic/hunt-cap.js';
 import { hasEasyCompletePendingQuest } from '../deterministic/quest-accept.js';
-import type { AutopilotAction, AutopilotContext, GameSnapshot } from '../types.js';
+import type { AutopilotAction, AutopilotContext, GameSnapshot, GatherState } from '../types.js';
 import {
   evaluateQuestCurriculum,
   getQuestCurriculumFromSnapshot,
@@ -1299,7 +1302,8 @@ export function mustFinishActiveHunt(snapshot: GameSnapshot): boolean {
 
 /**
  * Filter/prioritize allowed actions using playbook curriculum.
- * Does NOT replace Jev — only shapes the choice set and hints.
+ * Shapes the choice set. Action pick and gather interrupt are deterministic in
+ * HttpJev while the playbook is enabled and incomplete.
  */
 export function filterAllowedByPlaybook(
   allowed: AutopilotAction[],
@@ -1592,6 +1596,69 @@ export function getPlaybookFromSnapshot(snapshot: GameSnapshot): PlaybookProgres
   const raw = snapshot.extensions?.earlySystemsPlaybook;
   if (!raw || typeof raw !== 'object') return undefined;
   return raw as PlaybookProgress;
+}
+
+function activeGather(state: GatherState): { resource: string; skill?: GatherState['skill'] } {
+  if (state.busy) {
+    return { resource: state.currentResource ?? '', skill: state.skill };
+  }
+  if (state.busyElsewhere) {
+    return {
+      resource: state.busyElsewhere.resource ?? state.currentResource ?? '',
+      skill: state.busyElsewhere.skill,
+    };
+  }
+  return { resource: state.currentResource ?? '', skill: state.skill };
+}
+
+function matchesGatherAction(
+  action: string,
+  view: { resource: string; skill?: GatherState['skill'] },
+): boolean {
+  if (action === 'cook_cod' && (view.skill === 'cooking' || /cook/i.test(view.resource))) {
+    return true;
+  }
+  const pattern = GATHER_RESOURCE[action];
+  return pattern ? pattern.test(view.resource) : false;
+}
+
+/**
+ * Deterministic gather interrupt while the early playbook is enabled and incomplete.
+ * Interrupt when `interruptActions` wants a stage/gather switch and the running
+ * resource is not already that coal/cod/cook (or quest gather) target.
+ * Gather grace and fish-cod backoff never interrupt.
+ */
+export function shouldInterruptGatherForPlaybook(
+  playbook: PlaybookProgress,
+  state: GatherState,
+): boolean {
+  if (!playbook.enabled || playbook.complete) return false;
+  if (playbook.gatherGraceActive) return false;
+  if (playbook.fishCodBackoffActive) return false;
+
+  const busy = state.busy || Boolean(state.busyElsewhere);
+  if (!busy) return false;
+
+  // Flat coal while the UI still says Coal — replace it (Stop + Start).
+  if (playbook.staleCoalGather && playbook.interruptActions.includes('mine_coal')) {
+    return true;
+  }
+
+  const view = activeGather(state);
+  const gatherTargets = playbook.interruptActions.filter((id) => GATHER_RESOURCE[id]);
+  if (gatherTargets.length > 0) {
+    return !gatherTargets.some((id) => matchesGatherAction(id, view));
+  }
+
+  const stageWantsSwitch = playbook.interruptActions.some(
+    (id) => id !== 'continue_current' && id !== 'idle',
+  );
+  if (!stageWantsSwitch) return false;
+
+  if (GATHER_RESOURCE[playbook.stage] && matchesGatherAction(playbook.stage, view)) {
+    return false;
+  }
+  return true;
 }
 
 export function formatPlaybookLogLine(playbook: PlaybookProgress): string {
