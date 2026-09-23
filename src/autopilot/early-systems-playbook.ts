@@ -38,6 +38,8 @@ export type EarlyStageId =
   | 'fish_cod'
   | 'cook_cod'
   | 'sell_extras'
+  | 'hunt_battle_batch'
+  /** @deprecated persisted alias — normalized to hunt_battle_batch on load */
   | 'hunt_rabbits'
   | 'manage_pets'
   | 'explore_map'
@@ -48,7 +50,9 @@ export interface PlaybookCounts {
   rawCod: number;
   cookedCod: number;
   sells: number;
-  rabbitHunts: number;
+  huntBattles: number;
+  /** @deprecated migrated to huntBattles */
+  rabbitHunts?: number;
   mapPeeks: number;
   /** Successful manage_pets ticks this batch (async; does not gate the batch loop). */
   petManages: number;
@@ -133,7 +137,7 @@ const STAGE_ORDER: EarlyStageId[] = [
   'buy_bait',
   'fish_cod',
   'cook_cod',
-  'hunt_rabbits',
+  'hunt_battle_batch',
   'explore_map',
   'complete',
 ];
@@ -207,13 +211,26 @@ const GATHER_RESOURCE: Record<string, RegExp> = {
   gather_yew: /yew/i,
 };
 
+
+/** Normalize legacy stage / counter names from persisted JSON. */
+export function normalizeEarlyStageId(stage: string): EarlyStageId {
+  if (stage === 'hunt_rabbits') return 'hunt_battle_batch';
+  return stage as EarlyStageId;
+}
+
+function normalizePlaybookCounts(raw: Partial<PlaybookCounts> | undefined): PlaybookCounts {
+  const base = { ...emptyCounts(), ...(raw ?? {}) };
+  const migrated = Math.max(base.huntBattles ?? 0, base.rabbitHunts ?? 0);
+  return { ...base, huntBattles: migrated, rabbitHunts: undefined };
+}
+
 function emptyCounts(): PlaybookCounts {
   return {
     coal: 0,
     rawCod: 0,
     cookedCod: 0,
     sells: 0,
-    rabbitHunts: 0,
+    huntBattles: 0,
     mapPeeks: 0,
     petManages: 0,
     batchCycles: 0,
@@ -230,7 +247,7 @@ function resetBatchResourceCounts(counts: PlaybookCounts): PlaybookCounts {
     rawCod: 0,
     cookedCod: 0,
     sells: 0,
-    rabbitHunts: 0,
+    huntBattles: 0,
     petManages: 0,
     coalBusyCycles: 0,
     codBusyCycles: 0,
@@ -256,8 +273,8 @@ function loadPersisted(): PersistedPlaybook {
     }
     return {
       version: 1,
-      stage: parsed.stage,
-      counts: { ...emptyCounts(), ...parsed.counts },
+      stage: normalizeEarlyStageId(String(parsed.stage)),
+      counts: normalizePlaybookCounts(parsed.counts),
       baitOwned: Boolean(parsed.baitOwned),
       lastBaitPurchaseAt: parsed.lastBaitPurchaseAt,
       completedAt: parsed.completedAt,
@@ -488,9 +505,13 @@ export function cookTargetMet(counts: PlaybookCounts): boolean {
   return counts.cookedCod >= COOK_MIN;
 }
 
-/** Hard hunt gate: rabbitHunts outcome counter only. */
+function huntBattleCount(counts: PlaybookCounts): number {
+  return counts.huntBattles ?? counts.rabbitHunts ?? 0;
+}
+
+/** Hard hunt gate: successful hunt/battle outcome counter only. */
 export function huntTargetMet(counts: PlaybookCounts): boolean {
-  return counts.rabbitHunts >= HUNT_MIN;
+  return huntBattleCount(counts) >= HUNT_MIN;
 }
 
 /**
@@ -599,7 +620,7 @@ function deriveStage(
     if (idx >= STAGE_ORDER.indexOf('fish_cod') || hasBait) return 'cook_cod';
   }
   if (cookTargetMet(counts) && !huntTargetMet(counts) && idx >= STAGE_ORDER.indexOf('cook_cod')) {
-    return 'hunt_rabbits';
+    return 'hunt_battle_batch';
   }
   // Pets are async — never a sequential stage after hunt.
   // First-cycle map peek after hunt target; batch reset happens in evaluatePlaybook.
@@ -607,7 +628,7 @@ function deriveStage(
     huntTargetMet(counts) &&
     counts.mapPeeks < 1 &&
     counts.batchCycles === 0 &&
-    idx >= STAGE_ORDER.indexOf('hunt_rabbits')
+    idx >= STAGE_ORDER.indexOf('hunt_battle_batch')
   ) {
     return 'explore_map';
   }
@@ -615,7 +636,7 @@ function deriveStage(
   // Fall through: keep persisted stage if still sensible.
   // Legacy stages (removed from STAGE_ORDER) → treat as hunt for loop logic.
   if (persisted === 'manage_pets' || persisted === 'sell_extras') {
-    return 'hunt_rabbits';
+    return 'hunt_battle_batch';
   }
   return persisted === 'mine_coal' && coalTargetMet(counts) ? 'sell_half' : persisted;
 }
@@ -694,14 +715,14 @@ function stageMeta(stage: EarlyStageId, baitOwned = false): {
         hint:
           'EARLY PLAYBOOK stage sell_extras: missions-first — quest_turnin / quest_talk_accept before market sell when quests are available. Sell junk/extras only as fallback. Never sell all Cooked Cod / Cod needed for fights.',
       };
-    case 'hunt_rabbits':
+    case 'hunt_battle_batch':
       return {
         goal: `Hunt/battle ~${HUNT_MIN} times using Cooked Cod (pre-battle FOOD Add)`,
-        preferred: ['hunt_rabbits', 'hunt_battle'],
+        preferred: ['hunt_battle_batch', 'hunt_battle'],
         deprioritized: ['gather_oak', 'gather_yew', 'mine_coal'],
-        interrupt: ['hunt_rabbits', 'hunt_battle'],
+        interrupt: ['hunt_battle_batch', 'hunt_battle'],
         hint:
-          `EARLY PLAYBOOK stage hunt_rabbits: hunt and battle any ready enemy until ~${HUNT_MIN} successes (rabbitHunts counter — prefer Rabbit when present). Ensure Cooked Cod via FOOD Add. Respect huntFoundCap.`,
+          `EARLY PLAYBOOK stage hunt_battle_batch: hunt and battle any ready enemy until ~${HUNT_MIN} successes (huntBattles counter — prefer Rabbit when present, battle any ready enemy). Ensure Cooked Cod via FOOD Add. Respect huntFoundCap.`,
       };
     case 'manage_pets':
       // Legacy stage id kept for logging only — not in STAGE_ORDER; pets inject async instead.
@@ -780,12 +801,12 @@ export function evaluatePlaybook(
   }
 
   // Legacy stages removed from STAGE_ORDER; normalize before gates.
-  let persistedStage = persisted.stage;
+  let persistedStage = normalizeEarlyStageId(persisted.stage);
   if (persistedStage === 'manage_pets') {
-    persistedStage = 'hunt_rabbits';
+    persistedStage = 'hunt_battle_batch';
   }
   if (persistedStage === 'sell_extras' && cookTargetMet(counts)) {
-    persistedStage = 'hunt_rabbits';
+    persistedStage = 'hunt_battle_batch';
   }
 
   let stage = deriveStage(counts, snapshot, persistedStage, baitOwned);
@@ -798,7 +819,7 @@ export function evaluatePlaybook(
     persisted.stage === 'manage_pets'
       ? STAGE_ORDER.indexOf('explore_map')
       : persisted.stage === 'sell_extras' && cookMet
-        ? STAGE_ORDER.indexOf('hunt_rabbits')
+        ? STAGE_ORDER.indexOf('hunt_battle_batch')
         : STAGE_ORDER.indexOf(persistedStage);
 
   // Snap back to the first unmet hard-gate stage (real counts only).
@@ -829,15 +850,15 @@ export function evaluatePlaybook(
       `cook gate: snapped back from ${persisted.stage} to cook_cod ` +
       `(cookedCod=${counts.cookedCod}/${COOK_MIN})`;
     stage = 'cook_cod';
-  } else if (!huntMet && persistedIdx > STAGE_ORDER.indexOf('hunt_rabbits')) {
+  } else if (!huntMet && persistedIdx > STAGE_ORDER.indexOf('hunt_battle_batch')) {
     snapBackReason =
-      `hunt gate: snapped back from ${persisted.stage} to hunt_rabbits ` +
-      `(rabbitHunts=${counts.rabbitHunts}/${HUNT_MIN})`;
-    stage = 'hunt_rabbits';
+      `hunt gate: snapped back from ${persisted.stage} to hunt_battle_batch ` +
+      `(huntBattles=${huntBattleCount(counts)}/${HUNT_MIN})`;
+    stage = 'hunt_battle_batch';
   } else {
     // Monotonic advance: never go backwards once prior hard gates are met.
     const nextIdx = STAGE_ORDER.indexOf(stage);
-    if (nextIdx < persistedIdx) stage = persisted.stage;
+    if (nextIdx < persistedIdx) stage = persistedStage;
   }
 
   // Auto-advance within sequence when real targets are met (no busy-cycle shortcuts).
@@ -857,13 +878,13 @@ export function evaluatePlaybook(
   if (stage === 'fish_cod' && fishMet) {
     stage = 'cook_cod';
   }
-  if (stage === 'cook_cod' && cookMet) stage = 'hunt_rabbits';
+  if (stage === 'cook_cod' && cookMet) stage = 'hunt_battle_batch';
   // Legacy: persisted sell_extras (removed from STAGE_ORDER) → hunt when cook met.
   if (stage === 'sell_extras' && cookMet && !huntMet) {
-    stage = 'hunt_rabbits';
+    stage = 'hunt_battle_batch';
   }
   // Hunt target met → loop batch (pets are async; never block on manage_pets).
-  if (stage === 'hunt_rabbits' && huntMet) {
+  if (stage === 'hunt_battle_batch' && huntMet) {
     if (counts.mapPeeks < 1 && counts.batchCycles === 0) {
       stage = 'explore_map';
     } else {
@@ -874,7 +895,7 @@ export function evaluatePlaybook(
   // Legacy: if somehow still on manage_pets, same loop behavior (no petManages gate).
   if (stage === 'manage_pets') {
     if (!huntMet) {
-      stage = 'hunt_rabbits';
+      stage = 'hunt_battle_batch';
     } else if (counts.mapPeeks < 1 && counts.batchCycles === 0) {
       stage = 'explore_map';
     } else {
@@ -1088,9 +1109,9 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
       counts.sells += 1;
     }
   }
-  if (action === 'hunt_rabbits' || action === 'hunt_battle') {
+  if (action === 'hunt_battle_batch' || action === 'hunt_rabbits' || action === 'hunt_battle') {
     if (/battle:|hunt_started|enemy_selected/i.test(outcome)) {
-      counts.rabbitHunts += 1;
+      counts.huntBattles += 1;
     }
   }
   if (action === 'explore_map') {
@@ -1192,7 +1213,7 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
 
 /**
  * Active hunt / battle must finish even when cook-before-hunt would otherwise
- * hide hunt_rabbits — otherwise Hunt More orphans a running hunt while we cook.
+ * hide hunt_battle_batch — otherwise Hunt More orphans a running hunt while we cook.
  */
 export function mustFinishActiveHunt(snapshot: GameSnapshot): boolean {
   if (snapshot.flags.inBattle) return true;
@@ -1233,25 +1254,25 @@ export function filterAllowedByPlaybook(
   const finishHunt = mustFinishActiveHunt(snapshot);
   if (finishHunt) {
     // Over-cap / active hunt wins over cook gates — stop+battle before cooking.
-    for (const id of ['hunt_rabbits', 'hunt_battle'] as const) {
+    for (const id of ['hunt_battle_batch', 'hunt_battle'] as const) {
       if (allowed.includes(id) && !next.includes(id)) next.push(id);
     }
     next = next.filter((a) => a !== 'cook_cod');
   } else if (coalIncomplete || playbook.stage === 'mine_coal') {
     next = next.filter(
-      (a) => a !== 'fish_cod' && a !== 'cook_cod' && a !== 'hunt_rabbits' && a !== 'hunt_battle',
+      (a) => a !== 'fish_cod' && a !== 'cook_cod' && a !== 'hunt_battle_batch' && a !== 'hunt_battle',
     );
     if (allowed.includes('mine_coal') && !next.includes('mine_coal')) {
       next.push('mine_coal');
     }
   } else if (fishIncomplete || playbook.stage === 'fish_cod') {
-    next = next.filter((a) => a !== 'cook_cod' && a !== 'hunt_rabbits' && a !== 'hunt_battle');
+    next = next.filter((a) => a !== 'cook_cod' && a !== 'hunt_battle_batch' && a !== 'hunt_battle');
   } else if (cookIncomplete || playbook.stage === 'cook_cod') {
-    next = next.filter((a) => a !== 'hunt_rabbits' && a !== 'hunt_battle');
+    next = next.filter((a) => a !== 'hunt_battle_batch' && a !== 'hunt_battle');
   } else if (cookBeforeHunt) {
     // Cook target may already be met while the character ate the stack. Cook again
     // before the next hunt/battle.
-    next = next.filter((a) => a !== 'hunt_rabbits' && a !== 'hunt_battle');
+    next = next.filter((a) => a !== 'hunt_battle_batch' && a !== 'hunt_battle');
     if (allowed.includes('cook_cod') && !next.includes('cook_cod')) next.push('cook_cod');
   }
 
@@ -1326,7 +1347,7 @@ export function filterAllowedByPlaybook(
         ...(playbook.questCurriculum?.interruptActions ?? []),
       ]);
       for (const id of inject) {
-        if (!finishHunt && cookBeforeHunt && (id === 'hunt_rabbits' || id === 'hunt_battle')) continue;
+        if (!finishHunt && cookBeforeHunt && (id === 'hunt_battle_batch' || id === 'hunt_battle')) continue;
         if (!next.includes(id)) next.push(id);
       }
     }
@@ -1359,13 +1380,13 @@ export function filterAllowedByPlaybook(
       if (playbook.deprioritizedActions.includes(id)) {
         continue;
       }
-      if (!finishHunt && cookBeforeHunt && (id === 'hunt_rabbits' || id === 'hunt_battle')) {
+      if (!finishHunt && cookBeforeHunt && (id === 'hunt_battle_batch' || id === 'hunt_battle')) {
         continue;
       }
       if (finishHunt && id === 'cook_cod') {
         continue;
       }
-      if (!next.includes(id) && ['mine_coal', 'fish_cod', 'cook_cod', 'market_sell_half', 'sell_junk_for_gold', 'explore_map', 'hunt_rabbits', 'manage_pets', 'equip_pet', 'buy_bait', 'sell_junk'].includes(id)) {
+      if (!next.includes(id) && ['mine_coal', 'fish_cod', 'cook_cod', 'market_sell_half', 'sell_junk_for_gold', 'explore_map', 'hunt_battle_batch', 'manage_pets', 'equip_pet', 'buy_bait', 'sell_junk'].includes(id)) {
         next.push(id);
       }
     }
@@ -1397,12 +1418,12 @@ export function filterAllowedByPlaybook(
   if (!next.includes('idle') && allowed.includes('idle')) next.push('idle');
   if (finishHunt) {
     next = next.filter((a) => a !== 'cook_cod');
-    for (const id of ['hunt_rabbits', 'hunt_battle'] as const) {
+    for (const id of ['hunt_battle_batch', 'hunt_battle'] as const) {
       if (allowed.includes(id) && !next.includes(id)) next.push(id);
     }
     next = [
-      ...(['hunt_rabbits', 'hunt_battle'] as const).filter((id) => next.includes(id)),
-      ...next.filter((a) => a !== 'hunt_rabbits' && a !== 'hunt_battle'),
+      ...(['hunt_battle_batch', 'hunt_battle'] as const).filter((id) => next.includes(id)),
+      ...next.filter((a) => a !== 'hunt_battle_batch' && a !== 'hunt_battle'),
     ];
   }
   if (next.length === 0) return allowed.includes('idle') ? ['idle'] : allowed;
@@ -1499,7 +1520,7 @@ export function formatPlaybookLogLine(playbook: PlaybookProgress): string {
     ` coal=${c.coal}/${playbook.targets.coalMin} (busy=${c.coalBusyCycles}, soft~${softCoal})` +
     ` cod=${c.rawCod}/${playbook.targets.codMin} (busy=${c.codBusyCycles}, soft~${softCod})` +
     ` cooked=${c.cookedCod}/${playbook.targets.cookMin}` +
-    ` sells=${c.sells} rabbits=${c.rabbitHunts}/${playbook.targets.huntMin}` +
+    ` sells=${c.sells} hunts=${huntBattleCount(c)}/${playbook.targets.huntMin}` +
     ` pets=${c.petManages} cycles=${c.batchCycles} map=${c.mapPeeks}` +
     ` baitOwned=${playbook.baitOwned}` +
     ` preferred=[${playbook.preferredActions.join(',')}]`

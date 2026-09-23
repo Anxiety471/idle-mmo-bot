@@ -13,6 +13,7 @@ import {
   FISH_COD_BACKOFF_MS,
   FISH_COD_FAILURE_THRESHOLD,
   huntTargetMet,
+  normalizeEarlyStageId,
   notePlaybookOutcome,
   recentBaitPurchase,
   resolvePlaybookStatePath,
@@ -42,7 +43,7 @@ function emptyPlaybookCounts() {
     rawCod: 0,
     cookedCod: 0,
     sells: 0,
-    rabbitHunts: 0,
+    huntBattles: 0,
     mapPeeks: 0,
     petManages: 0,
     batchCycles: 0,
@@ -415,22 +416,22 @@ describe('sticky baitOwned (no repurchase loop)', () => {
     assert.equal(saved.counts?.sells, 1);
   });
 
-  it('notePlaybookOutcome credits hunt_rabbits on battle outcome', () => {
+  it('notePlaybookOutcome credits hunt_battle_batch on battle outcome', () => {
     statePath = join('/tmp', `playbook-hunt-credit-${Date.now()}.json`);
     process.env.PLAYBOOK_STATE_PATH = statePath;
     process.env.EARLY_PLAYBOOK = 'true';
     writeFileSync(
       statePath,
-      `${JSON.stringify({ version: 1, stage: 'hunt_rabbits', counts: emptyPlaybookCounts(), baitOwned: true })}\n`,
+      `${JSON.stringify({ version: 1, stage: 'hunt_battle_batch', counts: emptyPlaybookCounts(), baitOwned: true })}\n`,
     );
 
     notePlaybookOutcome(
-      'hunt_rabbits',
+      'hunt_battle_batch',
       'battle:battle_started:huntMore:hunt_more_clicked',
     );
 
-    const saved = JSON.parse(readFileSync(statePath, 'utf8')) as { counts?: { rabbitHunts?: number } };
-    assert.equal(saved.counts?.rabbitHunts, 1);
+    const saved = JSON.parse(readFileSync(statePath, 'utf8')) as { counts?: { huntBattles?: number } };
+    assert.equal(saved.counts?.huntBattles, 1);
   });
 
   it('notePlaybookOutcome does not credit hunt_rabbits on hunt_metrics_pending', () => {
@@ -439,13 +440,13 @@ describe('sticky baitOwned (no repurchase loop)', () => {
     process.env.EARLY_PLAYBOOK = 'true';
     writeFileSync(
       statePath,
-      `${JSON.stringify({ version: 1, stage: 'hunt_rabbits', counts: emptyPlaybookCounts(), baitOwned: true })}\n`,
+      `${JSON.stringify({ version: 1, stage: 'hunt_battle_batch', counts: emptyPlaybookCounts(), baitOwned: true })}\n`,
     );
 
-    notePlaybookOutcome('hunt_rabbits', 'hunt_metrics_pending');
+    notePlaybookOutcome('hunt_battle_batch', 'hunt_metrics_pending');
 
-    const saved = JSON.parse(readFileSync(statePath, 'utf8')) as { counts?: { rabbitHunts?: number } };
-    assert.equal(saved.counts?.rabbitHunts, 0);
+    const saved = JSON.parse(readFileSync(statePath, 'utf8')) as { counts?: { huntBattles?: number } };
+    assert.equal(saved.counts?.huntBattles, 0);
   });
 });
 
@@ -593,13 +594,13 @@ describe('batch leveling playbook targets', () => {
       process.env.PLAYBOOK_STATE_PATH,
       JSON.stringify({
         version: 1,
-        stage: 'hunt_rabbits',
+        stage: 'hunt_battle_batch',
         counts: {
           coal: 100,
           rawCod: 100,
           cookedCod: 100,
           sells: 2,
-          rabbitHunts: 120,
+          huntBattles: 120,
           mapPeeks: 1,
           petManages: 0,
           batchCycles: 1,
@@ -1111,12 +1112,12 @@ describe('strict sequential real-count gates', () => {
       statePath,
       `${JSON.stringify({
         version: 1,
-        stage: 'hunt_rabbits',
+        stage: 'hunt_battle_batch',
         counts: {
           ...coalMetCounts({ sells: 2 }),
           rawCod: 100,
           cookedCod: 8,
-          rabbitHunts: 3,
+          huntBattles: 3,
         },
         baitOwned: true,
       })}\n`,
@@ -1141,12 +1142,12 @@ describe('strict sequential real-count gates', () => {
       statePath,
       `${JSON.stringify({
         version: 1,
-        stage: 'hunt_rabbits',
+        stage: 'hunt_battle_batch',
         counts: {
           ...coalMetCounts({ sells: 2 }),
           rawCod: 100,
           cookedCod: 100,
-          rabbitHunts: 4,
+          huntBattles: 4,
         },
         baitOwned: true,
       })}\n`,
@@ -1157,13 +1158,13 @@ describe('strict sequential real-count gates', () => {
       gold: 50,
     });
     const progress = evaluatePlaybook(snapshot);
-    assert.equal(progress.stage, 'hunt_rabbits');
+    assert.equal(progress.stage, 'hunt_battle_batch');
     const filtered = filterAllowedByPlaybook(
-      ['hunt_rabbits', 'hunt_battle', 'cook_cod', 'idle'],
+      ['hunt_battle_batch', 'hunt_battle', 'cook_cod', 'idle'],
       snapshot,
       progress,
     );
-    assert.ok(!filtered.includes('hunt_rabbits'));
+    assert.ok(!filtered.includes('hunt_battle_batch'));
     assert.ok(!filtered.includes('hunt_battle'));
     assert.ok(filtered.includes('cook_cod'));
   });
@@ -1176,12 +1177,12 @@ describe('strict sequential real-count gates', () => {
       statePath,
       `${JSON.stringify({
         version: 1,
-        stage: 'hunt_rabbits',
+        stage: 'hunt_battle_batch',
         counts: {
           ...coalMetCounts({ sells: 2 }),
           rawCod: 100,
           cookedCod: 100,
-          rabbitHunts: 4,
+          huntBattles: 4,
         },
         baitOwned: true,
       })}\n`,
@@ -1193,11 +1194,11 @@ describe('strict sequential real-count gates', () => {
     });
     const shortProgress = evaluatePlaybook(short);
     const shortFiltered = filterAllowedByPlaybook(
-      ['hunt_rabbits', 'hunt_battle', 'cook_cod', 'idle'],
+      ['hunt_battle_batch', 'hunt_battle', 'cook_cod', 'idle'],
       short,
       shortProgress,
     );
-    assert.ok(!shortFiltered.includes('hunt_rabbits'));
+    assert.ok(!shortFiltered.includes('hunt_battle_batch'));
     assert.ok(shortFiltered.includes('cook_cod'));
 
     const ready = minimalSnapshot({
@@ -1206,11 +1207,11 @@ describe('strict sequential real-count gates', () => {
     });
     const readyProgress = evaluatePlaybook(ready);
     const readyFiltered = filterAllowedByPlaybook(
-      ['hunt_rabbits', 'hunt_battle', 'idle'],
+      ['hunt_battle_batch', 'hunt_battle', 'idle'],
       ready,
       readyProgress,
     );
-    assert.ok(readyFiltered.includes('hunt_rabbits'));
+    assert.ok(readyFiltered.includes('hunt_battle_batch'));
     assert.ok(!readyFiltered.includes('cook_cod'));
   });
 
@@ -1223,12 +1224,12 @@ describe('strict sequential real-count gates', () => {
       statePath,
       `${JSON.stringify({
         version: 1,
-        stage: 'hunt_rabbits',
+        stage: 'hunt_battle_batch',
         counts: {
           ...coalMetCounts({ sells: 2 }),
           rawCod: 100,
           cookedCod: 100,
-          rabbitHunts: 4,
+          huntBattles: 4,
         },
         baitOwned: true,
       })}\n`,
@@ -1250,11 +1251,11 @@ describe('strict sequential real-count gates', () => {
     });
     const progress = evaluatePlaybook(snapshot);
     const filtered = filterAllowedByPlaybook(
-      ['hunt_rabbits', 'hunt_battle', 'cook_cod', 'quest_talk_accept', 'idle'],
+      ['hunt_battle_batch', 'hunt_battle', 'cook_cod', 'quest_talk_accept', 'idle'],
       snapshot,
       progress,
     );
-    assert.ok(filtered.includes('hunt_rabbits'), `filtered=${JSON.stringify(filtered)}`);
+    assert.ok(filtered.includes('hunt_battle_batch'), `filtered=${JSON.stringify(filtered)}`);
     assert.ok(!filtered.includes('cook_cod'), `cook should wait: ${JSON.stringify(filtered)}`);
   });
 
@@ -1271,7 +1272,7 @@ describe('strict sequential real-count gates', () => {
           ...coalMetCounts({ sells: 2 }),
           rawCod: 100,
           cookedCod: 80,
-          rabbitHunts: 2,
+          huntBattles: 2,
         },
         baitOwned: true,
       })}\n`,
@@ -1285,12 +1286,117 @@ describe('strict sequential real-count gates', () => {
     });
     const progress = evaluatePlaybook(snapshot);
     const filtered = filterAllowedByPlaybook(
-      ['hunt_rabbits', 'hunt_battle', 'cook_cod', 'idle'],
+      ['hunt_battle_batch', 'hunt_battle', 'cook_cod', 'idle'],
       snapshot,
       progress,
     );
-    assert.ok(filtered.includes('hunt_rabbits'), `filtered=${JSON.stringify(filtered)}`);
+    assert.ok(filtered.includes('hunt_battle_batch'), `filtered=${JSON.stringify(filtered)}`);
     assert.ok(!filtered.includes('cook_cod'));
+  });
+
+  it('migrates persisted hunt_rabbits + rabbitHunts on load', () => {
+    statePath = join('/tmp', `playbook-migrate-hunt-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'hunt_rabbits',
+        counts: {
+          coal: 100,
+          rawCod: 100,
+          cookedCod: 100,
+          sells: 2,
+          rabbitHunts: 17,
+          mapPeeks: 0,
+          petManages: 0,
+          batchCycles: 0,
+          coalBusyCycles: 0,
+          codBusyCycles: 0,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const progress = evaluatePlaybook(
+      minimalSnapshot({
+        inventory: { 'Cheap Bait': 20, 'Coal Ore': 100, Cod: 100, 'Cooked Cod': 100 },
+        gold: 50,
+      }),
+    );
+    assert.equal(normalizeEarlyStageId('hunt_rabbits'), 'hunt_battle_batch');
+    assert.equal(progress.stage, 'hunt_battle_batch');
+    assert.equal(progress.counts.huntBattles, 17);
+    const saved = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      stage?: string;
+      counts?: { huntBattles?: number; rabbitHunts?: number };
+    };
+    assert.equal(saved.stage, 'hunt_battle_batch');
+    assert.equal(saved.counts?.huntBattles, 17);
+  });
+
+  it('simulates battle-now when Total Enemies Found >= 100 (live 239 case)', async () => {
+    // Offline recreation of today's live path: found climbed past cap while cook was short.
+    // Cap must hard-stop, and playbook must keep combat allowed so bootstrap can battle now.
+    const prevCap = process.env.HUNT_FOUND_CAP;
+    process.env.HUNT_FOUND_CAP = '100';
+    statePath = join('/tmp', `playbook-battle-now-sim-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'hunt_battle_batch',
+        counts: {
+          ...coalMetCounts({ sells: 2 }),
+          rawCod: 100,
+          cookedCod: 17,
+          huntBattles: 4,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const { shouldHardStopHunt } = await import('../deterministic/hunt-cap.js');
+    const { isHuntHardStop } = await import('../jev/hunt-cap.js');
+    assert.equal(shouldHardStopHunt(239, 12, 80), true);
+    assert.equal(
+      isHuntHardStop({
+        totalEnemiesFound: 239,
+        enemies: [],
+        defeatedCount: 0,
+        pageText: '',
+        combatLevel: 12,
+        totalLevel: 80,
+      }),
+      true,
+    );
+
+    const snapshot = minimalSnapshot({
+      inventory: { 'Cheap Bait': 20, 'Coal Ore': 100, Cod: 50, 'Cooked Cod': 17 },
+      gold: 110,
+      combatPhase: 'hunt',
+      totalEnemiesFound: 239,
+      enemiesRemaining: 713,
+      combatLevel: 12,
+      totalLevel: 80,
+    });
+    const progress = evaluatePlaybook(snapshot);
+    const filtered = filterAllowedByPlaybook(
+      ['hunt_battle_batch', 'hunt_battle', 'cook_cod', 'quest_talk_accept', 'idle'],
+      snapshot,
+      progress,
+    );
+    assert.ok(
+      filtered.includes('hunt_battle_batch'),
+      `battle-now sim must keep hunt_battle_batch; filtered=${JSON.stringify(filtered)} stage=${progress.stage}`,
+    );
+    assert.ok(!filtered.includes('cook_cod'), `cook must wait while over-cap hunt finishes: ${JSON.stringify(filtered)}`);
+
+    if (prevCap === undefined) delete process.env.HUNT_FOUND_CAP;
+    else process.env.HUNT_FOUND_CAP = prevCap;
   });
 
   it('snaps manage_pets back to hunt_rabbits when rabbitHunts below target', () => {
@@ -1306,7 +1412,7 @@ describe('strict sequential real-count gates', () => {
           ...coalMetCounts({ sells: 2 }),
           rawCod: 100,
           cookedCod: 100,
-          rabbitHunts: 40,
+          huntBattles: 40,
           petManages: 0,
         },
         baitOwned: true,
@@ -1320,7 +1426,7 @@ describe('strict sequential real-count gates', () => {
       }),
     );
     assert.equal(huntTargetMet(progress.counts), false);
-    assert.equal(progress.stage, 'hunt_rabbits');
+    assert.equal(progress.stage, 'hunt_battle_batch');
     assert.equal(progress.targets.huntMin, 120);
     assert.ok(progress.curriculumHint.includes('hunt gate'), progress.curriculumHint);
   });
@@ -1338,7 +1444,7 @@ describe('strict sequential real-count gates', () => {
           ...coalMetCounts({ sells: 2 }),
           rawCod: 100,
           cookedCod: 100,
-          rabbitHunts: 120,
+          huntBattles: 120,
         },
         baitOwned: true,
         lastBaitPurchaseAt: new Date().toISOString(),
@@ -1378,12 +1484,12 @@ describe('async opportunistic pets', () => {
       statePath,
       `${JSON.stringify({
         version: 1,
-        stage: 'hunt_rabbits',
+        stage: 'hunt_battle_batch',
         counts: {
           ...coalMetCounts({ sells: 2 }),
           rawCod: 100,
           cookedCod: 100,
-          rabbitHunts: 120,
+          huntBattles: 120,
           mapPeeks: 1,
           petManages: 0,
           batchCycles: 2,
@@ -1553,7 +1659,7 @@ describe('async opportunistic pets', () => {
           ...coalMetCounts({ sells: 2 }),
           rawCod: 100,
           cookedCod: 100,
-          rabbitHunts: 120,
+          huntBattles: 120,
           mapPeeks: 1,
           petManages: 0,
           batchCycles: 1,
@@ -1595,7 +1701,7 @@ describe('skip sell_extras after cook', () => {
           ...coalMetCounts({ sells: 1 }),
           rawCod: 100,
           cookedCod: 100,
-          rabbitHunts: 0,
+          huntBattles: 0,
         },
         baitOwned: true,
       })}\n`,
@@ -1610,11 +1716,11 @@ describe('skip sell_extras after cook', () => {
 
     assert.equal(cookTargetMet(progress.counts), true);
     assert.equal(huntTargetMet(progress.counts), false);
-    assert.equal(progress.stage, 'hunt_rabbits');
+    assert.equal(progress.stage, 'hunt_battle_batch');
     assert.notEqual(progress.stage, 'sell_extras');
 
     const saved = JSON.parse(readFileSync(statePath, 'utf8')) as { stage?: string };
-    assert.equal(saved.stage, 'hunt_rabbits');
+    assert.equal(saved.stage, 'hunt_battle_batch');
   });
 
   it('normalizes persisted sell_extras to hunt_rabbits when cook met without sells >= 2', () => {
@@ -1630,7 +1736,7 @@ describe('skip sell_extras after cook', () => {
           ...coalMetCounts({ sells: 1 }),
           rawCod: 100,
           cookedCod: 100,
-          rabbitHunts: 5,
+          huntBattles: 5,
         },
         baitOwned: true,
       })}\n`,
@@ -1646,10 +1752,10 @@ describe('skip sell_extras after cook', () => {
     assert.equal(cookTargetMet(progress.counts), true);
     assert.equal(huntTargetMet(progress.counts), false);
     assert.equal(progress.counts.sells, 1);
-    assert.equal(progress.stage, 'hunt_rabbits');
+    assert.equal(progress.stage, 'hunt_battle_batch');
 
     const saved = JSON.parse(readFileSync(statePath, 'utf8')) as { stage?: string };
-    assert.equal(saved.stage, 'hunt_rabbits');
+    assert.equal(saved.stage, 'hunt_battle_batch');
   });
 });
 

@@ -210,7 +210,7 @@ Idle MMO heals via food packed **before Battle**, not mid-fight clicks. Implemen
 FOOD → Add → food-for-battle modal → select item → quantity Max → Add
 ```
 
-`configureAndBattle()` calls `selectBattleFood()` before clicking Battle. Preferred labels include **Cooked Cod** (`BATTLE_FOOD_LABELS`). The early playbook `hunt_rabbits` stage expects Cooked Cod packed this way. Do not add mid-fight FOOD clicking unless explicitly reviewed.
+`configureAndBattle()` calls `selectBattleFood()` before clicking Battle. Preferred labels include **Cooked Cod** (`BATTLE_FOOD_LABELS`). The early playbook `hunt_battle_batch` stage expects Cooked Cod packed this way. Do not add mid-fight FOOD clicking unless explicitly reviewed.
 
 ### 4.3 No membership / real-money spend
 
@@ -345,13 +345,13 @@ Rapid sub-second polling on `/combat/battle` (hunt metrics scrape, `decideHuntSt
 | **Blank Quick check** | When emoji choice buttons render empty, **do not** fallback-click — wait for next slow cycle |
 | **DOM scrape** | `readHuntState` skips parallel DOM metric scrape when text metrics already parsed; `scrapeHuntMetricsFromDom` reads labels sequentially |
 
-**Overseer tuning when CF is hot:** set `POLL_MS` to **20000–30000** (20–30 s) for hunt_rabbits / hunt_battle cycles until Quick-check emojis render reliably again. Watch for `blocked:verify` or `failed:hunt_not_started` with long `backoffMs` in `decisions.jsonl` — that is expected backoff, not a stuck loop.
+**Overseer tuning when CF is hot:** set `POLL_MS` to **20000–30000** (20–30 s) for hunt_battle_batch / hunt_battle cycles until Quick-check emojis render reliably again. Watch for `blocked:verify` or `failed:hunt_not_started` with long `backoffMs` in `decisions.jsonl` — that is expected backoff, not a stuck loop.
 
 ---
 
 ## 5. Early-systems playbook stages
 
-When `EARLY_PLAYBOOK` is enabled (default), `evaluatePlaybook()` runs a **repeating batch leveling loop** (`src/autopilot/early-systems-playbook.ts`). Default targets (env-overridable): **100 Coal Ore**, **100 Raw Cod**, **100 Cooked Cod**, **~120 hunt/battle**, then loop back to mining. **Pets are async/opportunistic** (soft prefer / interrupt every N cycles when idle) — they are **not** a sequential stage and do **not** gate batch completion. Hard stage gates use **real counts only** (inventory/playbook counters) — busy-cycle estimates never advance past mine_coal / fish_cod / cook_cod / hunt_rabbits. Override with `PLAYBOOK_COAL_TARGET`, `PLAYBOOK_FISH_TARGET`, `PLAYBOOK_COOK_TARGET`, `PLAYBOOK_HUNT_TARGET`, `PLAYBOOK_PETS_EVERY_N_CYCLES`.
+When `EARLY_PLAYBOOK` is enabled (default), `evaluatePlaybook()` runs a **repeating batch leveling loop** (`src/autopilot/early-systems-playbook.ts`). Default targets (env-overridable): **100 Coal Ore**, **100 Raw Cod**, **100 Cooked Cod**, **~120 hunt/battle**, then loop back to mining. **Pets are async/opportunistic** (soft prefer / interrupt every N cycles when idle) — they are **not** a sequential stage and do **not** gate batch completion. Hard stage gates use **real counts only** (inventory/playbook counters) — busy-cycle estimates never advance past mine_coal / fish_cod / cook_cod / hunt_battle_batch. Override with `PLAYBOOK_COAL_TARGET`, `PLAYBOOK_FISH_TARGET`, `PLAYBOOK_COOK_TARGET`, `PLAYBOOK_HUNT_TARGET`, `PLAYBOOK_PETS_EVERY_N_CYCLES`.
 
 | Stage ID | Goal | Primary actions |
 |----------|------|-----------------|
@@ -361,7 +361,7 @@ When `EARLY_PLAYBOOK` is enabled (default), `evaluatePlaybook()` runs a **repeat
 | `fish_cod` | Fish ~100 Raw Cod | `fish_cod`, `buy_bait` if missing |
 | `cook_cod` | Cook ~100 Cod → Cooked Cod with Coal | `cook_cod` (`src/deterministic/cook.ts`) |
 | `sell_extras` | Missions-first gold; sell extras as fallback | `quest_turnin`, `quest_talk_accept`, then `market_sell_half`, `sell_junk` |
-| `hunt_rabbits` | Hunt/battle ~120 times with pre-battle FOOD Add | `hunt_rabbits` (calls `selectBattleFood` + combat round); respects `huntFoundCap` |
+| `hunt_battle_batch` | Hunt/battle ~120 times with pre-battle FOOD Add | `hunt_battle_batch` (calls `selectBattleFood` + combat round); respects `huntFoundCap` |
 | `explore_map` | One map peek on the first cycle | `explore_map` |
 | *(loop)* | After hunt target met → reset batch counters → `mine_coal` | Does **not** retire to `complete`; pets are **not** required |
 | *(async)* `manage_pets` | Claim / feed / battle / sleep pets | Soft prefer / interrupt when idle every N cycles (`PLAYBOOK_PETS_EVERY_N_CYCLES`, default 1); `src/deterministic/pets.ts` — does **not** block the batch |
@@ -394,7 +394,7 @@ Each autopilot cycle runs `discoverFeatures()` (`src/autopilot/discovery.ts`):
 4. Optionally push snapshot fields via `SNAPSHOT_ENRICHERS` (`src/autopilot/snapshot-enrichers.ts`)
 5. Typecheck, run autopilot briefly, verify `decisions.jsonl`
 
-Registered bootstrap action IDs (starting set): `continue_current`, `gather_oak`, `gather_yew`, `mine_coal`, `fish_cod`, `buy_bait`, `cook_cod`, `craft_if_ready`, `market_sell_half`, `sell_junk_for_gold`, `hunt_battle`, `hunt_rabbits`, `quest_talk_accept`, `quest_turnin`, `sell_junk`, `idle`, plus `explore_map`.
+Registered bootstrap action IDs (starting set): `continue_current`, `gather_oak`, `gather_yew`, `mine_coal`, `fish_cod`, `buy_bait`, `cook_cod`, `craft_if_ready`, `market_sell_half`, `sell_junk_for_gold`, `hunt_battle`, `hunt_battle_batch`, `quest_talk_accept`, `quest_turnin`, `sell_junk`, `idle`, plus `explore_map`.
 
 HttpJev and ProgressiveStubJev read action descriptions from the registry automatically.
 

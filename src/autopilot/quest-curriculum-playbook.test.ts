@@ -24,7 +24,7 @@ function emptyPlaybookCounts() {
     rawCod: 0,
     cookedCod: 0,
     sells: 0,
-    rabbitHunts: 0,
+    huntBattles: 0,
     mapPeeks: 0,
     petManages: 0,
     batchCycles: 0,
