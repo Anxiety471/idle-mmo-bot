@@ -196,6 +196,28 @@ function isExcludedEnemyButton(text: string): boolean {
   return false;
 }
 
+const DETAIL_NAME_BLOCK =
+  /^(STANCE|LOOT|FOOD|ENEMIES|LEVEL|VIEW|ADD|BATTLE|HUNT MORE|WHAT'S THIS\?)$/i;
+
+/**
+ * Enemy name from the battle-entity modal.
+ * Live copy is a heading line ("Rabbit") followed by "3 Combat EXP".
+ */
+export function enemyNameFromDetailText(text: string): string | null {
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const expIdx = lines.findIndex((l) => /\d+\s+Combat EXP/i.test(l));
+  if (expIdx > 0) {
+    for (let i = expIdx - 1; i >= Math.max(0, expIdx - 4); i--) {
+      const line = lines[i].replace(/\s+/g, ' ').trim();
+      if (!line || DETAIL_NAME_BLOCK.test(line)) continue;
+      if (/^[A-Za-z][A-Za-z' -]{1,40}$/.test(line)) return line;
+    }
+  }
+  const inline = text.match(/([A-Za-z][A-Za-z' -]{1,40})\s+(\d+)\s+Combat EXP/i);
+  if (inline?.[1] && !DETAIL_NAME_BLOCK.test(inline[1].trim())) return inline[1].trim();
+  return null;
+}
+
 /** Extract creature name from a card; null when chrome/profile/count badge. */
 function extractEnemyName(text: string): string | null {
   if (isExcludedEnemyButton(text)) return null;
@@ -214,41 +236,101 @@ function extractEnemyName(text: string): string | null {
   return null;
 }
 
-/** Dedicated locator for the ENEMIES NEARBY sidebar widget (not main content). */
-async function getEnemiesNearbyWidget(page: Page): Promise<Locator | null> {
-  const heading = page.getByText(ENEMIES_NEARBY_LABEL_PATTERN).first();
-  if (await heading.count() === 0 || !(await heading.isVisible().catch(() => false))) {
-    return null;
+const MONSTER_IMG_MIN_PX = 16;
+
+/** Smallest visible element whose own text is the ENEMIES NEARBY label. */
+async function getEnemiesNearbyHeading(page: Page): Promise<Locator | null> {
+  const headings = page.getByText(/ENEMIES\s+NEARBY/i);
+  const count = await headings.count();
+  let best: Locator | null = null;
+  let bestArea = Infinity;
+  for (let i = 0; i < count; i++) {
+    const heading = headings.nth(i);
+    if (!(await heading.isVisible().catch(() => false))) continue;
+    const box = await heading.boundingBox();
+    if (!box || box.width < 4 || box.height < 4) continue;
+    const area = box.width * box.height;
+    if (area < bestArea) {
+      bestArea = area;
+      best = heading;
+    }
   }
+  return best;
+}
 
-  const containers = page.locator('section, div, article').filter({
-    has: page.getByText(ENEMIES_NEARBY_LABEL_PATTERN),
-  });
+function hostHasQuantityBadge(text: string): boolean {
+  if (!text.trim()) return false;
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const hasStack = lines.some((line) => /^\d+$/.test(line) || /^\d+\s*x$/i.test(line));
+  if (!hasStack) return false;
+  // Stat rows ("Combat" / "Lv. 1") are not hunted-monster stacks.
+  if (/\bLv\.?\s*\d+/i.test(text) && lines.every((line) => !/^\d+$/.test(line))) return false;
+  return true;
+}
 
-  const count = await containers.count();
+/**
+ * Post-stop hunted monsters are an image plus a count badge (e.g. Rabbit + 218)
+ * under the ENEMIES NEARBY label. The badge is often not its own button.
+ */
+async function resolveMonsterTile(img: Locator): Promise<Locator | null> {
+  if (!(await img.isVisible().catch(() => false))) return null;
+  const box = await img.boundingBox();
+  if (!box || box.width < MONSTER_IMG_MIN_PX || box.height < MONSTER_IMG_MIN_PX) return null;
+
+  const clickable = img.locator('xpath=ancestor-or-self::*[self::button or @role="button"][1]');
+  const parent = img.locator('xpath=parent::*');
+  const hosts: Locator[] = [];
+  if ((await clickable.count()) > 0) hosts.push(clickable.first());
+  if ((await parent.count()) > 0) hosts.push(parent.first());
+
+  for (const host of hosts) {
+    if (!hostHasQuantityBadge(await safeInnerText(host))) continue;
+    return (await clickable.count()) > 0 ? clickable.first() : img;
+  }
+  return null;
+}
+
+function tileNearHeading(
+  tile: { x: number; y: number; width: number; height: number },
+  heading: { x: number; y: number; width: number; height: number },
+): boolean {
+  const tileMidX = tile.x + tile.width / 2;
+  const tileMidY = tile.y + tile.height / 2;
+  const headMidX = heading.x + heading.width / 2;
+  if (tileMidY < heading.y - 40) return false;
+  const dx = Math.abs(tileMidX - headMidX);
+  const dy = Math.abs(tileMidY - (heading.y + heading.height));
+  return dx < 900 && dy < 520;
+}
+
+/** Panel that holds the ENEMIES NEARBY label and at least one monster image. */
+async function getEnemiesNearbyRoot(page: Page): Promise<Locator | null> {
+  const heading = await getEnemiesNearbyHeading(page);
+  if (!heading) return null;
+
+  const ancestors = heading.locator(
+    'xpath=ancestor::*[self::div or self::section or self::article or self::aside][position()<=8]',
+  );
+  const count = await ancestors.count();
   let best: Locator | null = null;
   let bestArea = Infinity;
 
   for (let i = 0; i < count; i++) {
-    const container = containers.nth(i);
-    if (!(await container.isVisible().catch(() => false))) continue;
-
+    const container = ancestors.nth(i);
     const tagName = await container.evaluate((el) => el.tagName.toLowerCase()).catch(() => '');
     if (tagName === 'main' || tagName === 'body') continue;
+    if (!(await container.isVisible().catch(() => false))) continue;
 
-    const buttons = container.getByRole('button');
-    const btnCount = await buttons.count();
-    let hasNumericBadge = false;
-    for (let j = 0; j < btnCount; j++) {
-      const btn = buttons.nth(j);
-      if (!(await btn.isVisible().catch(() => false))) continue;
-      const text = await safeInnerText(btn);
-      if (PURE_NUMERIC_PATTERN.test(text)) {
-        hasNumericBadge = true;
+    const imgs = container.locator('img');
+    const imgCount = await imgs.count();
+    let hasTile = false;
+    for (let j = 0; j < imgCount; j++) {
+      if (await resolveMonsterTile(imgs.nth(j))) {
+        hasTile = true;
         break;
       }
     }
-    if (!hasNumericBadge) continue;
+    if (!hasTile) continue;
 
     const box = await container.boundingBox();
     if (!box) continue;
@@ -259,15 +341,12 @@ async function getEnemiesNearbyWidget(page: Page): Promise<Locator | null> {
     }
   }
 
-  if (best) return best;
+  return best;
+}
 
-  const fallback = heading.locator('xpath=./parent::div | ./parent::section');
-  if (await fallback.count() > 0) {
-    const tag = await fallback.first().evaluate((el) => el.tagName.toLowerCase()).catch(() => 'main');
-    if (tag !== 'main' && tag !== 'body') return fallback.first();
-  }
-
-  return null;
+/** Dedicated locator for the ENEMIES NEARBY panel (not main content). */
+async function getEnemiesNearbyWidget(page: Page): Promise<Locator | null> {
+  return getEnemiesNearbyRoot(page);
 }
 
 /** Prefer the ENEMIES NEARBY panel; fall back to main content. */
@@ -354,24 +433,32 @@ async function collectEnemyCardButtons(page: Page): Promise<Locator[]> {
 
 /** Post-Stop ENEMIES NEARBY icon tiles (image + quantity badge, no text names). */
 async function collectEnemyIconTiles(page: Page): Promise<Locator[]> {
-  const widget = await getEnemiesNearbyWidget(page);
-  if (!widget) return [];
+  const heading = await getEnemiesNearbyHeading(page);
+  const root = await getEnemiesNearbyRoot(page);
+  if (!heading || !root) return [];
 
-  const buttons = widget.getByRole('button');
-  const count = await buttons.count();
+  const headingBox = await heading.boundingBox();
+  const imgs = root.locator('img');
+  const count = await imgs.count();
   const tiles: Locator[] = [];
+  const seen = new Set<string>();
 
   for (let i = 0; i < count; i++) {
-    const btn = buttons.nth(i);
-    if (!(await btn.isVisible().catch(() => false))) continue;
-    if ((await btn.locator('img').count()) === 0) continue;
+    const img = imgs.nth(i);
+    const target = await resolveMonsterTile(img);
+    if (!target) continue;
 
-    const text = await safeInnerText(btn);
+    const text = await safeInnerText(target);
     const firstLine = text.split('\n')[0]?.trim() ?? '';
     if (ENEMY_TILE_SKIP_PATTERN.test(firstLine)) continue;
     if (ACTION_BUTTON_PATTERN.test(firstLine)) continue;
 
-    tiles.push(btn);
+    const box = await target.boundingBox();
+    if (headingBox && box && !tileNearHeading(box, headingBox)) continue;
+    const key = box ? `${Math.round(box.x)}:${Math.round(box.y)}` : String(i);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    tiles.push(target);
   }
 
   return tiles;
@@ -391,7 +478,8 @@ export function enemyNameFromImageSrc(src: string): string | undefined {
 }
 
 async function enemyNameFromTile(btn: Locator): Promise<string> {
-  const img = btn.locator('img').first();
+  const tag = await btn.evaluate((el) => el.tagName.toLowerCase()).catch(() => '');
+  const img = tag === 'img' ? btn : btn.locator('img').first();
   if (await img.count() > 0) {
     const alt = (await img.getAttribute('alt'))?.trim();
     if (alt && !PURE_NUMERIC_PATTERN.test(alt)) return alt;
@@ -445,18 +533,46 @@ export function pickBattleEnemy(enemies: EnemyInfo[]): EnemyInfo | undefined {
   return rabbit ?? enemies[0];
 }
 
+/** Battle-entity modal opened by clicking a hunted monster image. */
+async function isShowBattleEntityModal(page: Page): Promise<boolean> {
+  const modal = page.locator('[x-data*="show-battle-entity"]');
+  if ((await modal.count()) === 0) return false;
+  return modal.first().isVisible().catch(() => false);
+}
+
+async function visibleBattleButton(page: Page): Promise<Locator | null> {
+  const scopes: Locator[] = [];
+  const modal = page.locator('[x-data*="show-battle-entity"]');
+  if ((await modal.count()) > 0) {
+    scopes.push(modal.getByRole('button', { name: 'Battle', exact: true }));
+  }
+  scopes.push(page.getByRole('button', { name: 'Battle', exact: true }));
+
+  for (const scope of scopes) {
+    const count = await scope.count();
+    for (let i = 0; i < count; i++) {
+      const btn = scope.nth(i);
+      if (await btn.isVisible().catch(() => false)) return btn;
+    }
+  }
+  return null;
+}
+
 async function isEnemyDetailPanelOpen(page: Page): Promise<boolean> {
+  const battleBtn = await visibleBattleButton(page);
+  if (!battleBtn) return false;
+  if (await isShowBattleEntityModal(page)) return true;
   const hasStance = await page
     .getByText(/^STANCE$/i)
     .first()
     .isVisible()
     .catch(() => false);
-  const hasBattle = await page
-    .getByRole('button', { name: 'Battle', exact: true })
+  const hasExp = await page
+    .getByText(/\d+\s+Combat EXP/i)
     .first()
     .isVisible()
     .catch(() => false);
-  return hasStance && hasBattle;
+  return hasStance || hasExp;
 }
 
 /** Numeric count button in ENEMIES NEARBY (e.g. "40") — opens enemy detail panel. */
@@ -476,6 +592,9 @@ async function findEnemiesNearbyCountButton(page: Page): Promise<Locator | null>
 }
 
 async function dismissBlockingOverlays(page: Page): Promise<void> {
+  // Leave the battle-entity modal alone — Escape/Close would drop the monster we just opened.
+  if ((await isEnemyDetailPanelOpen(page)) || (await isShowBattleEntityModal(page))) return;
+
   await page.keyboard.press('Escape').catch(() => undefined);
 
   const overlays = page.locator('div.absolute.inset-0.bg-immo');
@@ -496,18 +615,16 @@ async function dismissBlockingOverlays(page: Page): Promise<void> {
 
 /** Read enemy name from open detail panel (e.g. Rabbit). */
 async function readEnemyNameFromDetailPanel(page: Page): Promise<string | null> {
-  const dialog = page.locator('[role="dialog"]');
+  const dialog = page.locator('[role="dialog"], [x-data*="show-battle-entity"]');
   if (await dialog.count() > 0) {
     const heading = dialog.locator('h1, h2, h3').first();
     if (await heading.count() > 0) {
       const name = await safeInnerText(heading);
-      if (name && !/^(STANCE|LOOT|FOOD|ENEMIES)$/i.test(name)) return name;
+      if (name && !DETAIL_NAME_BLOCK.test(name)) return name;
     }
   }
 
-  const text = await pageText(page);
-  const match = text.match(/\n([A-Za-z][A-Za-z' -]+)\s*\n\s*\d+\s+Combat EXP/i);
-  return match?.[1]?.trim() ?? null;
+  return enemyNameFromDetailText(await pageText(page));
 }
 
 /** Match stance option labels like "Balanced (All Stats)" from short name "Balanced". */
@@ -597,13 +714,25 @@ async function setStance(page: Page, stance: Stance): Promise<void> {
 }
 
 async function setMaxEnemies(page: Page, maxEnemies: number): Promise<void> {
+  // Live battle modal: ENEMIES row is prefilled with the stack (e.g. 218) and a Max button.
+  // Never overwrite that stack with a smaller advisor value.
+  const maxBtn = page.locator(
+    'xpath=//*[normalize-space()="ENEMIES"]/following::button[normalize-space()="Max"][1]',
+  );
+  if ((await maxBtn.count()) > 0 && (await maxBtn.first().isVisible().catch(() => false))) {
+    await maxBtn.first().click({ timeout: 3000 }).catch(() => undefined);
+    return;
+  }
+
   let maxInput = page.locator('input#max_enemies');
   if (await maxInput.count() === 0) {
     maxInput = page.locator('input[type="number"]');
   }
-  if (await maxInput.count() > 0) {
-    await maxInput.first().fill(String(maxEnemies));
-  }
+  if (await maxInput.count() === 0) return;
+
+  const current = Number(await maxInput.first().inputValue().catch(() => ''));
+  if (Number.isFinite(current) && current >= maxEnemies && current > 0) return;
+  await maxInput.first().fill(String(maxEnemies));
 }
 
 /**
@@ -624,9 +753,14 @@ export async function openEnemiesNearbyPanel(page: Page): Promise<CombatStepResu
     }
 
     await dismissBlockingOverlays(page);
-    await targetBtn.click({ force: true, timeout: 5000 }).catch(() => undefined);
+    await targetBtn.scrollIntoViewIfNeeded().catch(() => undefined);
+    await targetBtn.click({ timeout: 5000 }).catch(async () => {
+      await targetBtn.click({ force: true, timeout: 5000 }).catch(() => undefined);
+    });
     await page
       .getByText(/^STANCE$/i)
+      .or(page.getByText(/\d+\s+Combat EXP/i))
+      .or(page.locator('[x-data*="show-battle-entity"]'))
       .first()
       .waitFor({ state: 'visible', timeout: COMBAT_UI_SETTLE_MS })
       .catch(() => undefined);
@@ -990,6 +1124,13 @@ export async function stopHunt(page: Page): Promise<CombatStepResult> {
     }
   }
 
+  await page
+    .getByText(/ENEMIES\s+NEARBY/i)
+    .or(page.getByRole('button', { name: 'Hunt More', exact: true }))
+    .first()
+    .waitFor({ state: 'visible', timeout: 8_000 })
+    .catch(() => undefined);
+
   return 'hunt_stopped';
 }
 
@@ -1004,9 +1145,92 @@ const BATTLE_FOOD_LABELS = [
   'Bread',
 ];
 
+async function buttonMatchesFoodLabel(btn: Locator, label: string): Promise<boolean> {
+  const needle = label.toLowerCase();
+  const bits = [
+    await safeInnerText(btn),
+    (await btn.getAttribute('title')) ?? '',
+    (await btn.getAttribute('aria-label')) ?? '',
+  ];
+  const img = btn.locator('img').first();
+  if ((await img.count()) > 0) {
+    bits.push(
+      (await img.getAttribute('alt')) ?? '',
+      (await img.getAttribute('title')) ?? '',
+      (await img.getAttribute('src')) ?? '',
+    );
+  }
+  return bits.some((bit) => bit.toLowerCase().includes(needle));
+}
+
+/** Food picker icon: "25x" stack, or tooltip/alt "Cooked Cod (Untradable)". */
+async function findBattleFoodButton(page: Page): Promise<Locator | null> {
+  const nxModal = page.locator('[x-data*="food-for-battle"]').locator('button').filter({
+    hasText: /\d+\s*x/i,
+  });
+  if ((await nxModal.count()) > 0 && (await nxModal.first().isVisible().catch(() => false))) {
+    return nxModal.first();
+  }
+  const nxFallback = page.getByRole('button').filter({ hasText: /^\d+\s*x$/im });
+  if ((await nxFallback.count()) > 0 && (await nxFallback.first().isVisible().catch(() => false))) {
+    return nxFallback.first();
+  }
+
+  const foodLayer = page.locator('[x-data*="food-for-battle"]');
+  const scoped =
+    (await foodLayer.count()) > 0 && (await foodLayer.first().isVisible().catch(() => false))
+      ? foodLayer.locator('button, [role="button"]')
+      : page.locator('button, [role="button"]');
+  const count = await scoped.count();
+  const buttons: Locator[] = [];
+  for (let i = 0; i < count; i++) {
+    const btn = scoped.nth(i);
+    if (!(await btn.isVisible().catch(() => false))) continue;
+    const text = await safeInnerText(btn);
+    if (/^(Add|Max|Close|Battle|View)$/i.test(text.trim())) continue;
+    if ((await btn.locator('img').count()) === 0 && !/\d+\s*x/i.test(text)) continue;
+    buttons.push(btn);
+  }
+
+  for (const label of BATTLE_FOOD_LABELS) {
+    for (const btn of buttons) {
+      if (await buttonMatchesFoodLabel(btn, label)) return btn;
+    }
+  }
+
+  // Picker titled "Food" with a single icon (tooltip may be hover-only).
+  const foodHeads = page.getByText('Food', { exact: true });
+  const headCount = await foodHeads.count();
+  for (let i = 0; i < headCount; i++) {
+    const head = foodHeads.nth(i);
+    if (!(await head.isVisible().catch(() => false))) continue;
+    const panel = head.locator('xpath=ancestor::*[.//img][1]');
+    const icon = panel.locator('button, [role="button"]').filter({ has: page.locator('img') });
+    const iconCount = await icon.count();
+    for (let j = 0; j < iconCount; j++) {
+      const btn = icon.nth(j);
+      if (await btn.isVisible().catch(() => false)) return btn;
+    }
+  }
+  return null;
+}
+
+async function closeFoodPickerOnly(page: Page): Promise<void> {
+  const foodModal = page.locator('[x-data*="food-for-battle"]');
+  if ((await foodModal.count()) === 0 || !(await foodModal.first().isVisible().catch(() => false))) {
+    return;
+  }
+  const close = foodModal.getByRole('button', { name: /close/i });
+  if ((await close.count()) > 0 && (await close.first().isVisible().catch(() => false))) {
+    await close.first().click().catch(() => undefined);
+    return;
+  }
+  await page.keyboard.press('Escape').catch(() => undefined);
+}
+
 /**
  * Idle MMO heals via food packed BEFORE Battle (effective HP), not mid-fight clicks.
- * Flow: FOOD → Add → food-for-battle modal → click Nx item → quantity modal → Max → Add.
+ * Flow: FOOD → Add → food picker (Nx badge or Cooked Cod icon) → quantity Max → Add.
  */
 export async function selectBattleFood(page: Page): Promise<'added' | 'none' | 'failed'> {
   try {
@@ -1015,13 +1239,11 @@ export async function selectBattleFood(page: Page): Promise<'added' | 'none' | '
       return 'none';
     }
 
-    const addNearFood = page
-      .locator(
-        'xpath=//*[normalize-space()="FOOD" or normalize-space()="Food"]/following::button[normalize-space()="Add"][1]',
-      )
-      .or(page.getByRole('button', { name: 'Add', exact: true }));
+    const addNearFood = page.locator(
+      'xpath=//*[normalize-space()="FOOD"]/following::button[normalize-space()="Add"][1]',
+    );
 
-    if ((await addNearFood.count()) === 0) {
+    if ((await addNearFood.count()) === 0 || !(await addNearFood.first().isVisible().catch(() => false))) {
       console.log('[combat] FOOD Add not visible — no food UI');
       return 'none';
     }
@@ -1029,23 +1251,15 @@ export async function selectBattleFood(page: Page): Promise<'added' | 'none' | '
     await addNearFood.first().click({ timeout: 5000 });
     await page.waitForTimeout(800);
 
-    // food-for-battle modal: icon buttons show quantity as "25\\nx".
-    const foodModal = page.locator('[x-data*="food-for-battle"]');
-    const itemInModal = foodModal.locator('button').filter({ hasText: /\d+\s*x/i });
-    const itemFallback = page.getByRole('button').filter({ hasText: /^\d+\s*x$/im });
-    const foodItem = (await itemInModal.count()) > 0 ? itemInModal : itemFallback;
+    const foodItem = await findBattleFoodButton(page);
 
-    if ((await foodItem.count()) === 0 || !(await foodItem.first().isVisible().catch(() => false))) {
-      console.log('[combat] FOOD Add opened but no cooked food in inventory');
-      await page.keyboard.press('Escape').catch(() => undefined);
-      const closeFood = foodModal.locator('button').first();
-      if ((await closeFood.count()) > 0) {
-        await closeFood.click().catch(() => undefined);
-      }
+    if (!foodItem) {
+      console.log('[combat] FOOD Add opened but no cooked food — cook Cooked Cod first');
+      await closeFoodPickerOnly(page);
       return 'none';
     }
 
-    await foodItem.first().click({ timeout: 5000 }).catch(() => undefined);
+    await foodItem.click({ timeout: 5000 }).catch(() => undefined);
     await page.waitForTimeout(700);
 
     const body = await pageText(page);
@@ -1063,9 +1277,12 @@ export async function selectBattleFood(page: Page): Promise<'added' | 'none' | '
     }
 
     // Quantity modal (select-battle-food-quantity): input#quantity + Max + Add.
+    // Only that modal's Add confirms — the FOOD row Add is already behind us.
     const qtyModal = page.locator('[x-data*="select-battle-food-quantity"]');
     const qtyInput = page.locator('input#quantity, input[name="quantity"]');
-    if ((await qtyInput.count()) > 0 && (await qtyInput.first().isVisible().catch(() => false))) {
+    const qtyOpen =
+      (await qtyInput.count()) > 0 && (await qtyInput.first().isVisible().catch(() => false));
+    if (qtyOpen) {
       const maxNearQty = qtyModal
         .getByRole('button', { name: 'Max', exact: true })
         .or(
@@ -1077,32 +1294,29 @@ export async function selectBattleFood(page: Page): Promise<'added' | 'none' | '
         await maxNearQty.first().click().catch(() => undefined);
       }
       await page.waitForTimeout(300);
+
+      const modalAdd = qtyModal.getByRole('button', { name: 'Add', exact: true });
+      const confirmAdd =
+        (await modalAdd.count()) > 0
+          ? modalAdd
+          : page.locator(
+              'xpath=//*[@id="quantity" or @name="quantity"]/following::button[normalize-space()="Add"][1]',
+            );
+      if ((await confirmAdd.count()) > 0 && (await confirmAdd.first().isVisible().catch(() => false))) {
+        await confirmAdd.first().click({ timeout: 5000 });
+        console.log(`[combat] Packed battle food: ${foodName}`);
+        await page.waitForTimeout(500);
+        return 'added';
+      }
+
+      console.log('[combat] FOOD quantity dialog missing Add confirm');
+      await closeFoodPickerOnly(page);
+      return 'failed';
     }
 
-    const confirmAdd = qtyModal
-      .getByRole('button', { name: 'Add', exact: true })
-      .or(page.getByRole('button', { name: 'Add', exact: true }));
-
-    // Prefer Add inside quantity modal; fall back to last visible Add.
-    let confirmed = false;
-    const modalAdd = qtyModal.getByRole('button', { name: 'Add', exact: true });
-    if ((await modalAdd.count()) > 0 && (await modalAdd.first().isVisible().catch(() => false))) {
-      await modalAdd.first().click({ timeout: 5000 });
-      confirmed = true;
-    } else if ((await confirmAdd.count()) > 0) {
-      await confirmAdd.last().click({ timeout: 5000 }).catch(() => undefined);
-      confirmed = true;
-    }
-
-    if (confirmed) {
-      console.log(`[combat] Packed battle food: ${foodName}`);
-      await page.waitForTimeout(500);
-      return 'added';
-    }
-
-    console.log('[combat] FOOD quantity dialog missing Add confirm');
-    await page.keyboard.press('Escape').catch(() => undefined);
-    return 'failed';
+    // Icon tooltip picker (Cooked Cod) packs on click — no second Add step.
+    console.log(`[combat] Packed battle food: ${foodName}`);
+    return 'added';
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.log(`[combat] selectBattleFood failed: ${message}`);
@@ -1111,8 +1325,7 @@ export async function selectBattleFood(page: Page): Promise<'added' | 'none' | '
 }
 
 /**
- * Open enemy detail (if needed), set stance/max, click Battle.
- * Post-Stop: count button → detail panel. Legacy: click creature card first.
+ * Open enemy detail by clicking the monster image, pack food, Max the stack, click Battle.
  */
 export async function configureAndBattle(
   page: Page,
@@ -1129,19 +1342,33 @@ export async function configureAndBattle(
       if (buttons.length <= targetIndex) {
         return 'failed';
       }
-      await buttons[targetIndex].click();
+      const tile = buttons[targetIndex];
+      await tile.scrollIntoViewIfNeeded().catch(() => undefined);
+      await tile.click({ timeout: 5000 }).catch(async () => {
+        await tile.click({ force: true, timeout: 5000 }).catch(() => undefined);
+      });
+      await page
+        .getByText(/^STANCE$/i)
+        .or(page.locator('[x-data*="show-battle-entity"]'))
+        .first()
+        .waitFor({ state: 'visible', timeout: COMBAT_UI_SETTLE_MS })
+        .catch(() => undefined);
     }
   }
 
-  await setStance(page, stance);
-  await setMaxEnemies(page, maxEnemies);
-  await selectBattleFood(page);
-
-  const battleBtn = page.getByRole('button', { name: 'Battle', exact: true });
-  if (await battleBtn.count() === 0) {
+  if (!(await isEnemyDetailPanelOpen(page))) {
     return 'failed';
   }
-  await battleBtn.first().click();
+
+  // Live order: food, then Max on the ENEMIES row, then Battle.
+  await selectBattleFood(page);
+  await setMaxEnemies(page, maxEnemies);
+  await setStance(page, stance);
+
+  const battleBtn = await visibleBattleButton(page);
+  if (!battleBtn) return 'failed';
+  await battleBtn.scrollIntoViewIfNeeded().catch(() => undefined);
+  await battleBtn.click({ timeout: 5000 });
 
   return 'battle_started';
 }
@@ -1172,13 +1399,36 @@ export async function runAway(page: Page): Promise<CombatStepResult> {
   return 'fled';
 }
 
-/** Click Hunt More to repeat after a battle completes. */
+async function isFightInProgress(page: Page): Promise<boolean> {
+  return isButtonVisible(page, 'Run Away');
+}
+
+/**
+ * Click Hunt More to repeat after a battle completes.
+ * If the show-battle-entity modal is still up, Battle is the action — clicking
+ * through it avoids huntMore:no_action while the modal covers Hunt More.
+ */
 export async function huntMore(
   page: Page,
   allowInterrupt = false,
 ): Promise<CombatStepResult> {
+  if (
+    (await isEnemyDetailPanelOpen(page) || (await isShowBattleEntityModal(page))) &&
+    !(await isFightInProgress(page))
+  ) {
+    await selectBattleFood(page);
+    await setMaxEnemies(page, Number.MAX_SAFE_INTEGER);
+    const battleBtn = await visibleBattleButton(page);
+    if (battleBtn) {
+      await battleBtn.scrollIntoViewIfNeeded().catch(() => undefined);
+      await battleBtn.click({ timeout: 5000 }).catch(() => undefined);
+      return 'battle_started';
+    }
+    await dismissBlockingOverlays(page);
+  }
+
   const huntMoreBtn = page.getByRole('button', { name: 'Hunt More', exact: true });
-  if (await huntMoreBtn.count() === 0) {
+  if ((await huntMoreBtn.count()) === 0 || !(await huntMoreBtn.first().isVisible().catch(() => false))) {
     return 'no_action';
   }
   await huntMoreBtn.first().click();
@@ -1243,15 +1493,14 @@ export async function prepareEnemyBattleSelection(
   while (Date.now() < deadline) {
     const state = await readHuntState(page);
     if (state.enemies.length > 0) {
+      console.log(`[combat] enemy select: ${state.enemies.map((e) => e.name).join(', ')}`);
       return state;
     }
 
     if (await isEnemyDetailPanelOpen(page)) {
-      const name = await readEnemyNameFromDetailPanel(page);
-      if (name) {
-        return { ...state, enemies: [{ name, index: 0 }] };
-      }
-      return state;
+      const name = (await readEnemyNameFromDetailPanel(page)) ?? 'Enemy';
+      console.log(`[combat] enemy select from battle modal: ${name}`);
+      return { ...state, enemies: [{ name, index: 0 }] };
     }
 
     const countBtn = await findEnemiesNearbyCountButton(page);
@@ -1262,18 +1511,23 @@ export async function prepareEnemyBattleSelection(
         if (refreshed.enemies.length > 0) {
           return refreshed;
         }
-        const name = await readEnemyNameFromDetailPanel(page);
-        if (name) {
-          return { ...refreshed, enemies: [{ name, index: 0 }] };
-        }
-        return refreshed;
+        const name = (await readEnemyNameFromDetailPanel(page)) ?? 'Enemy';
+        return { ...refreshed, enemies: [{ name, index: 0 }] };
       }
     }
 
     await page.waitForTimeout(sleepMs);
   }
 
-  return readHuntState(page);
+  const finalState = await readHuntState(page);
+  if (finalState.enemies.length === 0 && (await isEnemyDetailPanelOpen(page))) {
+    const name = (await readEnemyNameFromDetailPanel(page)) ?? 'Enemy';
+    return { ...finalState, enemies: [{ name, index: 0 }] };
+  }
+  if (finalState.enemies.length === 0) {
+    console.log('[combat] enemy select empty after stop — no ENEMIES NEARBY icon tile');
+  }
+  return finalState;
 }
 
 /** @deprecated Use prepareEnemyBattleSelection */

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  enemyNameFromDetailText,
   enemyNameFromImageSrc,
   hasHuntProgress,
   huntingMetricsSection,
@@ -220,6 +221,25 @@ Start Hunt
 YOUR CHARACTER`;
     assert.equal(isIdleBattleText(idle), true);
     assert.equal(isIdleBattleText(LIVE_ACTIVE_HUNT_PANEL), false);
+  });
+});
+
+describe('enemyNameFromDetailText', () => {
+  it('reads the name above Combat EXP in the battle-entity modal', () => {
+    const text = `Rabbit
+3 Combat EXP
+Level 1
+20% Chance of Loot
+FOOD
+Add
+STANCE
+Balanced (All Stats)
+ENEMIES`;
+    assert.equal(enemyNameFromDetailText(text), 'Rabbit');
+  });
+
+  it('reads an inline name and Combat EXP', () => {
+    assert.equal(enemyNameFromDetailText('Goblin 4 Combat EXP'), 'Goblin');
   });
 });
 
