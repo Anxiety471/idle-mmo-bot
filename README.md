@@ -40,6 +40,9 @@ Set `STORAGE_STATE=./storage-state.json` in `.env`. This file is gitignored — 
 | `JEV_MODEL` | `jev-latest` | Jev model sent to TypeSafe System One API |
 | `JEV_NOUL_THRESHOLD` | `0.6` | Noul yes threshold for interrupt / flee |
 | `HUNT_FOUND_CAP` | `100` | Stop hunting and battle when **Total Enemies Found** reaches this count |
+| `IDLE_MMO_API_KEY` | _(unset)_ | Optional Public API key. Enables read-only `/v1` snapshot data. Never commit it. |
+| `IDLE_MMO_API_BASE` | _(unset)_ | Public API origin (`https://host`, no path). Required when the key is set. Copy it from the in-game API settings page — do not guess. |
+| `IDLE_MMO_GUILD_ID` | _(unset)_ | Optional guild id for documented `/v1/guild/{id}/…` reads. Not character inventory. |
 
 ## Commands
 
@@ -109,7 +112,7 @@ npm run farm-hearth
 
 `npm run autopilot` runs a **supervisor loop** until SIGINT:
 
-1. Build structured **GameSnapshot** (location, levels, gold, inventory, quests, combat phase)
+1. Build structured **GameSnapshot** (location, levels, gold, inventory, quests, combat phase). When `IDLE_MMO_API_KEY` and `IDLE_MMO_API_BASE` are set, documented Public API reads override overlapping fields; the Playwright scrape stays as the fallback. See [docs/IDLE_MMO_PUBLIC_API.md](docs/IDLE_MMO_PUBLIC_API.md).
 2. Derive **allowed actions** (gather, hunt, quest, craft, sell junk, …)
 3. **Jev** chooses one action (`HttpJev` when `JEV_API_TOKEN` set, else **ProgressiveStubJev**)
 4. Execute **one** deterministic action, sleep, repeat

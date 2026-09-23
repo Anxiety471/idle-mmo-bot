@@ -58,6 +58,7 @@ Bootstrap actions register at startup via `registerBootstrapActions()` in `src/a
 | Secret | Purpose | How to set |
 |--------|---------|------------|
 | `JEV_API_TOKEN` | TypeSafe HttpJev (`TYPESAFE_API_KEY` alias also works) | Owner secure secret form / env on the runner |
+| `IDLE_MMO_API_KEY` | IdleMMO Public API read access (optional) | Owner secure secret form / env. Never commit, never print. |
 | Game session | Logged-in cookies for Playwright | Capture once → `storage-state.json` (gitignored) |
 
 **Never** print tokens, passwords, API keys, or `storage-state.json` contents in chat or logs you share.
@@ -96,8 +97,11 @@ Key `.env` variables (see `.env.example` for full list):
 | `AUTOPILOT_LOG_DIR` | `./logs` | Structured JSONL output directory |
 | `EARLY_PLAYBOOK` | on (enabled) | Early-systems curriculum filters; set `false` to disable |
 | `PLAYBOOK_STATE_PATH` | `logs/playbook-state.json` | Playbook stage persistence |
+| `IDLE_MMO_API_KEY` | _(unset)_ | Optional. Public API reads overlay the snapshot. Unset keeps Playwright only. |
+| `IDLE_MMO_API_BASE` | _(unset)_ | Required with the key. HTTPS origin copied from the in-game API settings page. No default host. |
+| `IDLE_MMO_GUILD_ID` | _(unset)_ | Optional guild id for documented guild routes. Does not replace character inventory. |
 
-See [docs/CHARACTER_MANAGEMENT.md](./CHARACTER_MANAGEMENT.md) for multi-account + multi-character path layout and bootstrap env knobs (`SKIP_CHARACTER_ENSURE`, `CREATE_CHARACTER_IF_MISSING`, etc.).
+See [docs/IDLE_MMO_PUBLIC_API.md](./IDLE_MMO_PUBLIC_API.md) for the `/v1` allowlist, scopes, and snapshot field map. See [docs/CHARACTER_MANAGEMENT.md](./CHARACTER_MANAGEMENT.md) for multi-account + multi-character path layout and bootstrap env knobs (`SKIP_CHARACTER_ENSURE`, `CREATE_CHARACTER_IF_MISSING`, etc.).
 
 ### 3.4 Typecheck
 
@@ -330,6 +334,8 @@ The live `/inventory` UI is mostly **icon + quantity badge** with item names in 
 `sanitizeInventoryCounts` drops page-chrome false positives (e.g. `Code of Conduct` → `Cod`). **`baitOwned` sticky trust (§4.7) remains** as a safety net when scrape still misses Cheap Bait.
 
 **What overseers should watch:** `decisions.jsonl` with empty `inventory: {}` while `market_sell_half` / `cook_cod` should fire — check `/inventory` DOM changes before weakening sell floors. Unit tests: `src/snapshot/inventory-scrape.test.ts`.
+
+When `IDLE_MMO_API_KEY` is set, documented Public API quantities override overlapping scrape keys (including Cooked Cod). That is the intended fix for an undercount. **Do not lower** `cookMin`, cook-before-hunt, or the battle-food floor because the API is quieter or still unpublished — those gates stay numeric. Guild hall stockpiles are not character food. Details: [IDLE_MMO_PUBLIC_API.md](./IDLE_MMO_PUBLIC_API.md).
 
 ### 4.12 Hunt / verify rate-limit hygiene (`src/deterministic/poll-interval.ts`, `human-check.ts`, `combat.ts`)
 
