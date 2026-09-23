@@ -98,8 +98,9 @@ Key `.env` variables (see `.env.example` for full list):
 | `EARLY_PLAYBOOK` | on (enabled) | Early-systems curriculum filters; set `false` to disable |
 | `PLAYBOOK_STATE_PATH` | `logs/playbook-state.json` | Playbook stage persistence |
 | `IDLE_MMO_API_KEY` | _(unset)_ | Optional. Public API reads overlay the snapshot. Unset keeps Playwright only. |
-| `IDLE_MMO_API_BASE` | _(unset)_ | Required with the key. HTTPS origin copied from the in-game API settings page. No default host. |
-| `IDLE_MMO_GUILD_ID` | _(unset)_ | Optional guild id for documented guild routes. Does not replace character inventory. |
+| `IDLE_MMO_API_BASE` | `https://api.idle-mmo.com` | HTTPS origin. Default is the in-game Public API host. Set only to override. |
+| `IDLE_MMO_CHARACTER_HASHED_ID` | _(unset)_ | Character hash for `/v1/character/{hashed_character_id}/…`. Otherwise resolved with `CHARACTER_NAME` via auth/check. |
+| `IDLE_MMO_GUILD_ID` | _(unset)_ | Optional guild id for allowlisted guild paths. Not polled every cycle. Does not replace character inventory. |
 
 See [docs/IDLE_MMO_PUBLIC_API.md](./IDLE_MMO_PUBLIC_API.md) for the `/v1` allowlist, scopes, and snapshot field map. See [docs/CHARACTER_MANAGEMENT.md](./CHARACTER_MANAGEMENT.md) for multi-account + multi-character path layout and bootstrap env knobs (`SKIP_CHARACTER_ENSURE`, `CREATE_CHARACTER_IF_MISSING`, etc.).
 
@@ -335,7 +336,7 @@ The live `/inventory` UI is mostly **icon + quantity badge** with item names in 
 
 **What overseers should watch:** `decisions.jsonl` with empty `inventory: {}` while `market_sell_half` / `cook_cod` should fire — check `/inventory` DOM changes before weakening sell floors. Unit tests: `src/snapshot/inventory-scrape.test.ts`.
 
-When `IDLE_MMO_API_KEY` is set, documented Public API quantities override overlapping scrape keys (including Cooked Cod). That is the intended fix for an undercount. **Do not lower** `cookMin`, cook-before-hunt, or the battle-food floor because the API is quieter or still unpublished — those gates stay numeric. Guild hall stockpiles are not character food. Details: [IDLE_MMO_PUBLIC_API.md](./IDLE_MMO_PUBLIC_API.md).
+When `IDLE_MMO_API_KEY` is set, character information and current action can overlay gold, total level, skill levels, location, and gather busy. **Bag quantities, including Cooked Cod and bait, stay on this scrape** — the official Public API page has no inventory endpoint. **Do not lower** `cookMin`, cook-before-hunt, or the battle-food floor because the API does not return food stacks. Guild hall stockpiles are not character food. Details: [IDLE_MMO_PUBLIC_API.md](./IDLE_MMO_PUBLIC_API.md).
 
 ### 4.12 Hunt / verify rate-limit hygiene (`src/deterministic/poll-interval.ts`, `human-check.ts`, `combat.ts`)
 

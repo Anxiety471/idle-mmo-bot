@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { IdleMmoPublicApi, PUBLIC_API_USER_AGENT, type FetchLike } from '../api/idle-mmo-api.js';
 import type { PublicApiRead } from '../api/public-api-types.js';
 import { needsCookBeforeHunt } from '../deterministic/combat.js';
 import type { GameSnapshot } from '../types.js';
@@ -164,5 +165,106 @@ describe('applyPublicApiToSnapshot', () => {
     const dom = snapshot();
     const merged = await applyPublicApiToSnapshot(dom, {});
     assert.equal(merged, dom);
+  });
+});
+
+describe('mocked character route merge', () => {
+  it('overlays information and current action without touching bag counts or combat phase', async () => {
+    const calls: string[] = [];
+    const fetchImpl: FetchLike = async (url) => {
+      calls.push(url);
+      if (url.endsWith('/information')) {
+        return new Response(
+          JSON.stringify({
+            character: {
+              hashed_id: 'heroHash',
+              name: 'Hero',
+              gold: 1500,
+              tokens: 3,
+              total_level: 22,
+              skills: { mining: { experience: 120, level: 8 }, cooking: { level: 1 } },
+              location: { id: 4, name: 'Bluebell Hollow' },
+              equipped_pet: { id: 9, name: 'Rock Pup', custom_name: 'Pebble', quality: 'common', evolution: 1 },
+              current_status: 'idle',
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (url.endsWith('/current-action')) {
+        return new Response(
+          JSON.stringify({
+            type: 'MINING',
+            item: 'Iron Ore',
+            image_url: 'https://cdn.example/ore.png',
+            title: 'Mining Iron Ore',
+            started_at: '2026-09-23T00:00:00Z',
+            expires_at: '2026-09-23T00:01:00Z',
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response(JSON.stringify({ pets: [{ name: 'Rock Pup', level: 4, equipped: true }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+
+    const api = new IdleMmoPublicApi(
+      {
+        apiKey: 'test-key',
+        baseUrl: 'https://api.example.test',
+        userAgent: PUBLIC_API_USER_AGENT,
+        characterHashedId: 'heroHash',
+        characterName: 'Hero',
+        minIntervalMs: 60_000,
+        maxPerMinute: 20,
+      },
+      { fetchImpl, now: () => 5_000 },
+    );
+    const readResult = await api.read();
+    const merged = mergePublicApiIntoSnapshot(
+      snapshot({
+        gold: 12,
+        totalLevel: 3,
+        combatPhase: 'none',
+        inventory: { 'Cooked Cod': 40, Cod: 4, 'Coal Ore': 6 },
+      }),
+      readResult,
+    );
+
+    assert.deepEqual(calls, [
+      'https://api.example.test/v1/character/heroHash/information',
+      'https://api.example.test/v1/character/heroHash/current-action',
+      'https://api.example.test/v1/character/heroHash/pets',
+    ]);
+    assert.equal(merged.gold, 1500);
+    assert.equal(merged.tokens, 3);
+    assert.equal(merged.totalLevel, 22);
+    assert.equal(merged.skillLevels.mining, 8);
+    assert.equal(merged.skillLevels.cooking, 1);
+    assert.equal(merged.location, 'Bluebell Hollow');
+    assert.equal(merged.currentAction?.busy, true);
+    assert.equal(merged.currentAction?.skill, 'mining');
+    assert.equal(merged.currentAction?.resource, 'Iron Ore');
+    assert.equal(merged.currentAction?.label, 'Mining Iron Ore');
+    assert.equal(merged.flags.gatherBusy, true);
+    assert.equal(merged.flags.inBattle, false);
+    assert.equal(merged.combatPhase, 'none');
+    assert.equal(merged.inventory['Cooked Cod'], 40);
+    assert.equal(merged.inventory.Cod, 4);
+    assert.equal(needsCookBeforeHunt(merged.inventory, 100), true);
+    assert.equal(merged.flags.sessionValid, true);
+    const extensions = merged.extensions?.publicApi as {
+      pets?: { name?: string }[];
+      equippedPet?: { name?: string; custom_name?: string };
+      identity?: { currentStatus?: string; hashedId?: string };
+    };
+    assert.equal(extensions.pets?.[0]?.name, 'Rock Pup');
+    assert.equal(extensions.equippedPet?.custom_name, 'Pebble');
+    assert.equal(extensions.identity?.currentStatus, 'idle');
+    assert.equal(extensions.identity?.hashedId, 'heroHash');
+    assert.equal(JSON.stringify(merged).includes('test-key'), false);
+    assert.equal(JSON.stringify(merged.currentAction).includes('image_url'), false);
   });
 });

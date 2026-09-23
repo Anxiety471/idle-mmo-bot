@@ -71,6 +71,7 @@ export function mergePublicApiIntoSnapshot(
           snapshotFields: resource.snapshotFields,
         })),
         ...(patch.pets ? { pets: patch.pets } : {}),
+        ...(patch.equippedPet ? { equippedPet: patch.equippedPet } : {}),
         ...(patch.identity ? { identity: patch.identity } : {}),
         ...read.meta,
       },

@@ -1,87 +1,141 @@
 # IdleMMO Public API
 
-The autopilot can read [IdleMMO’s Public API](https://wiki.idle-mmo.com/more/api) when an API key is configured. Playwright remains the fallback for every snapshot field the API does not return.
+The autopilot reads the official Public API when `IDLE_MMO_API_KEY` is set. Playwright still builds the snapshot first. The API overlays only fields it actually returned.
 
-This client calls **only** `/v1/` routes whose paths are published on the wiki or in [IdleMMO patch notes](https://web.idle-mmo.com/patch-notes). It does not guess hosts, inventory URLs, or internal web-app routes.
+Source of truth for paths, scopes, and example fields: the in-game page **Account settings → Public API** (`https://web.idle-mmo.com/settings/api`), extracted 2026-09-23. This client calls only those `/v1` routes. It does not call internal web-app routes.
+
+## Origin and auth
+
+| Item | Value |
+|------|--------|
+| Default origin | `https://api.idle-mmo.com` |
+| Paths | Under `/v1` (the settings page shows base `https://api.idle-mmo.com/v1`) |
+| Auth | `Authorization: Bearer <IDLE_MMO_API_KEY>` |
+| Accept | `application/json` |
+| User-Agent | `idle-mmo-bot/<version> (Contact: local-overseer)` |
+| Rate limit | 20 requests per minute per account |
+| Timestamps | UTC ISO 8601 |
+
+`IDLE_MMO_API_BASE` overrides the origin only (`https://host`, no path, query, hash, or credentials). Unset uses `https://api.idle-mmo.com`.
+
+The API is read-only here. This bot does not call write or action endpoints.
 
 ## Environment
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
 | `IDLE_MMO_API_KEY` | no | Account API key from **Account settings → Public API**. Unset disables the client. Never commit or log it. |
-| `IDLE_MMO_API_BASE` | when the key is set | API **origin only** (`https://host`). The wiki does not publish the host. Copy it from the in-game API settings documentation. There is no built-in default. |
-| `IDLE_MMO_GUILD_ID` | no | Guild id used only in the documented `/v1/guild/{id}/…` paths. One path segment (`A–Z`, `a–z`, `0–9`, `_`, `-`). |
-| `CHARACTER_NAME` | no | Compared with a `name` that appears on the same object as a documented `hashed_id`. A mismatch is logged. Character switching stays on the Playwright flow. |
+| `IDLE_MMO_API_BASE` | no | HTTPS origin override. Default `https://api.idle-mmo.com`. |
+| `IDLE_MMO_CHARACTER_HASHED_ID` | no | `hashed_character_id` path segment for `/v1/character/{hashed_character_id}/…`. One segment (`A–Z`, `a–z`, `0–9`, `_`, `-`). |
+| `CHARACTER_NAME` | no | When the hashed id is unset, auth/check (and, if needed, alt characters) must include this name next to a `hashed_id`. A later name mismatch on character information is logged. Character switching stays on the Playwright flow. |
+| `IDLE_MMO_GUILD_ID` | no | Guild id for allowlisted `/v1/guild/{id}/…` paths. Those routes are not called on the autopilot refresh wave. |
 
-User-Agent on every request: `idle-mmo-bot/<version> (Contact: local-overseer)`.
+### How `hashed_character_id` is chosen
 
-Auth header: `Authorization: Bearer <IDLE_MMO_API_KEY>`.
+1. `IDLE_MMO_CHARACTER_HASHED_ID` when it is a single safe path segment.
+2. Otherwise `GET /v1/auth/check`. A `hashed_id` is used only when its sibling `name` matches `CHARACTER_NAME`, or when `CHARACTER_NAME` is unset and the payload has exactly one named character.
+3. If `CHARACTER_NAME` is set and auth/check did not match, `GET /v1/character/{seed}/characters` is called with a hashed id from auth/check. The named alt is then used for information, current action, and pets.
 
-The API is read-only here. This bot does not call write or action endpoints, and it does not spend membership.
+Several named characters and no `CHARACTER_NAME` or hashed id is ambiguous. The client does not guess, and it does not call the character routes.
 
 ## Rate limit
 
-Official limit: **20 requests per minute per account** (not per key). Patch notes also document the `X-RateLimit-Reset` header.
+Official limit: **20 requests per minute per account**.
 
 The client:
 
-- Sends one refresh of the callable catalog, then caches it.
-- Spaces refreshes so the callable set stays at or under 18 requests per minute (two requests of headroom).
-- Serves that cache on later autopilot cycles instead of fetching per click.
+- Refreshes a small wave, then caches it.
+- Spaces refreshes so that wave stays at or under 18 requests per minute (two requests of headroom).
+- With a configured character hash the wave is 3 calls (information, current action, pets). Without one it can be 5 (auth check, alt characters, then those three).
+- Serves the cache on later autopilot cycles.
 - On HTTP 429, waits until `X-RateLimit-Reset` (or 60s) and does not retry inside that window.
+- Calls pets on the same wave only when the local budget still has a slot. Item catalog and combat list routes are never part of the wave.
 
 ## Snapshot merge
 
-`readGameSnapshot()` builds the Playwright snapshot first, then overlays a Public API read.
+`readGameSnapshot()` builds the Playwright snapshot first, then overlays this read.
 
 - A field is replaced only when that read produced it.
-- Inventory keys present in an API inventory payload replace the DOM quantity, **including zero**. Keys the API did not list keep the scraped count.
-- Guild hall stockpile quantities are stored under `extensions.publicApi.guild` and are **not** copied onto character inventory.
 - `flags.sessionValid` stays the browser session flag.
-- Cook-before-hunt / `cookMin` / battle-food floors are unchanged. A higher Cooked Cod count from the API is what satisfies the existing threshold.
+- Cook-before-hunt / `cookMin` / battle-food floors are unchanged.
 
-Console (no secrets):
+Character information maps documented example fields only:
 
-- `[snapshot] Public API inventory applied (N items)` when an inventory payload was mapped.
-- Otherwise one line per refresh naming the routes that were called, plus a note that inventory, action, quests, and combat paths are unpublished.
+| API field | Snapshot |
+|-----------|----------|
+| `gold` | `gold` |
+| `tokens` | `tokens` |
+| `total_level` | `totalLevel` |
+| `skills.*.level` | `skillLevels` for woodcutting, mining, fishing, alchemy, smelting, cooking, forge, construction |
+| `location.name` (or a string location) | `location` |
+| `equipped_pet` `id`, `name`, `custom_name`, `quality`, `evolution` | `extensions.publicApi.equippedPet` |
+| `current_status` | `extensions.publicApi.identity.currentStatus` (not combat phase, not `inBattle`) |
+| `name`, `hashed_id` | `extensions.publicApi.identity` |
 
-If the key is set and the base URL is missing or invalid, the client logs that once and keeps the scrape.
+Current action maps `type`, `item`, `title`, `started_at`, `expires_at` onto `currentAction` (`type`, `resource`, `label`, `startedAt`, `expiresAt`). A known type such as `MINING` also sets `currentAction.skill`. An active `type` sets `flags.gatherBusy`. An empty action clears it. `image_url` is ignored. The example has no battle fields, so this route does not set `combatPhase`, `flags.inBattle`, enemy counts, or health.
 
-## Callable routes
+Pets from `GET /v1/character/{hashed_character_id}/pets` are stored on `extensions.publicApi.pets` using the example fields `id`, `name`, `custom_name`, `pet_id`, `level`, `experience`, `total_experience`, `quality`, `stats`, `health`, `happiness`, and `equipped`.
 
-Paths below are quoted from public patch notes or the wiki. Scopes are included only where the notes name them.
+Console (no secrets), once per distinct line:
 
-| Id | Method and path | Scopes named in public notes | GameSnapshot fields |
-|----|-----------------|------------------------------|---------------------|
-| `auth-check` | `GET /v1/auth/check` | (not named) | `extensions.publicApi.authOk`. `hashed_id`, `online_status`, and a sibling `name` when those keys are present. |
-| `world-locations` | `GET /v1/world/locations/list` | (not named) | `zones`, `location` when an entry has `current: true`, `features.weather`. Unknown JSON does not overwrite location. |
-| `guild-activity` | `GET /v1/guild/{id}/activity` | guild endpoint scope **and** `v1.character.characters` | `extensions.publicApi.guild` only. Requires `IDLE_MMO_GUILD_ID`. |
-| `guild-energizing-pool` | `GET /v1/guild/{id}/energizing-pool/information` | guild endpoint scope **and** `v1.character.characters` | `extensions.publicApi.guild` only. |
-| `guild-hall` | `GET /v1/guild/{id}/hall` | guild endpoint scope **and** `v1.character.characters` | `extensions.publicApi.guild` (stockpile). Not `inventory`. |
+- `[snapshot] Public API read <route ids>; inventory remains Playwright scrape`
+- On total failure: `[snapshot] Public API failed (<code>); Playwright scrape kept`
 
-`{id}` is the guild id from the environment, not a character id.
+## Inventory stays on the scrape
 
-## Named resources with no published path
+The official settings page has **no character inventory endpoint**. There is no `/v1/.../inventory` (or bag) route in the 24 available endpoints.
 
-These are described in patch notes. The client lists them on `extensions.publicApi.unavailable` with reason `path-unpublished` and does **not** request them. Adding a path is allowed only after it appears in the in-game API settings docs or another official public note — then put that exact path on the matching entry in `src/api/documented-endpoints.ts`.
+Cooked Cod, Raw Cod, Coal, bait, and every other bag stack stay on the Playwright inventory scrape. The client never writes `patch.inventory`. Guild hall stock is not character food. Museum quantities and `battle.food_used` metrics are not bag stacks and are not polled.
 
-| Id | What official notes say | Snapshot fields waiting on a path |
-|----|-------------------------|-----------------------------------|
-| `character-information` | Equipped pet base name, custom name, pet id, quality, evolution progress. Location details were added to the character endpoint. `last_activity` was removed. | `location`, pet extension, identity. Levels, gold, and skills are **not** confirmed field names — they are not invented. |
-| `character-inspection` | `online_status`. `last_activity` deprecated, then removed. | `extensions.publicApi.identity` |
-| `inventory` | No inventory route is named. `quantity` / `chance` casting was fixed across endpoints. | `inventory`, `flags.hasBait` (Cooked Cod, Raw Cod, Coal, bait, other stacks) |
-| `current-action` | “Characters current action” endpoint, including the world-boss lobby. Health and potion-effect fixes were reported against the API without a schema. | `currentAction`, `flags.gatherBusy`, `flags.inBattle`, `combatPhase` |
-| `pets` | Base name vs custom name, `total_experience`, evolution, stat breakdown. Happiness and hunger were removed. Closed pet inventories return **403**. | `extensions.publicApi.pets` (`total_experience` only, once a path exists) |
-| `character-pet` | Equipped pet stats. | `extensions.publicApi.pets` |
-| `item-inspection` | `upgrade_requirements` hashed item id, alchemy-chest dungeons, effects. | Not an inventory list. |
-| `item-search` | Optional `type` filter. | Not used for autopilot quantities. |
-| `pet-exchange` | Endpoint added. Path not published. | None. |
-| `guild-members` | Members list includes `hashed_id`. | `extensions.publicApi.guild.members` |
-| `world-bosses` | World-boss timers should use the Public API. Path not published. | `extensions.publicApi.worldBosses` |
+Do not lower `cookMin`, cook-before-hunt, or the battle-food floor because the API does not return food counts.
 
-Quests are not named in the wiki or the public patch notes, so there is no quest route in the catalog. Accepted and pending quests stay on the Playwright scrape.
+Quests are not listed on the official page. Accepted and pending quests stay on the scrape. Combat phase and enemy counts stay on the scrape.
 
-Combat phase, enemy counts, gold, and skill levels are overlaid when a future documented payload maps them. Today those JSON keys are not published, so the scrape remains the source.
+## Refresh wave
+
+Called when a character id is known, in order:
+
+1. `GET /v1/character/{hashed_character_id}/information` (`v1.character.view`) — priority
+2. `GET /v1/character/{hashed_character_id}/current-action` (`v1.character.current_action`) — priority
+3. `GET /v1/character/{hashed_character_id}/pets` (`v1.character.pets`) — same wave if budget allows
+
+Resolution calls, only when the hashed id is not configured:
+
+- `GET /v1/auth/check` (`v1.auth.check`)
+- `GET /v1/character/{hashed_character_id}/characters` (`v1.character.characters`) when the name was not on auth/check
+
+Not called every cycle (allowlisted, so a path check still accepts them): item search, item inspect, item market history, world bosses, dungeons, enemies, world locations, character metrics, effects, museum, companion exchange, guild routes, shrine progress.
+
+## Allowlist (24)
+
+| Method | Name | Path | Scope |
+|--------|------|------|-------|
+| `GET` | Authentication Check | `/v1/auth/check` | `v1.auth.check` |
+| `GET` | World Locations List | `/v1/world/locations/list` | `v1.world.locations.list` |
+| `GET` | World Bosses List | `/v1/combat/world_bosses/list` | `v1.combat.world_bosses.list` |
+| `GET` | Dungeons List | `/v1/combat/dungeons/list` | `v1.combat.dungeons.list` |
+| `GET` | Enemies List | `/v1/combat/enemies/list` | `v1.combat.enemies.list` |
+| `GET` | Item Search | `/v1/item/search` | `v1.item.search` |
+| `GET` | Item Inspection | `/v1/item/{hashed_item_id}/inspect` | `v1.item.inspect` |
+| `GET` | Item Market History | `/v1/item/{hashed_item_id}/market-history` | `v1.item.market_history` |
+| `GET` | Character View | `/v1/character/{hashed_character_id}/information` | `v1.character.view` |
+| `GET` | Character Metrics | `/v1/character/{hashed_character_id}/metrics` | `v1.character.metrics` |
+| `GET` | Character Effects | `/v1/character/{hashed_character_id}/effects` | `v1.character.effects` |
+| `GET` | Character Alt Characters | `/v1/character/{hashed_character_id}/characters` | `v1.character.characters` |
+| `GET` | Character Museum | `/v1/character/{hashed_character_id}/museum` | `v1.character.museum` |
+| `GET` | Character Current Action | `/v1/character/{hashed_character_id}/current-action` | `v1.character.current_action` |
+| `GET` | Character Pets | `/v1/character/{hashed_character_id}/pets` | `v1.character.pets` |
+| `GET` | Companion Exchange Listings | `/v1/pets/companion-exchange/listings` | `v1.pets.companion_exchange.listings` |
+| `GET` | Guild Information | `/v1/guild/{id}/information` | `v1.guild.information` |
+| `GET` | Guild Members | `/v1/guild/{id}/members` | `v1.guild.members` |
+| `GET` | Guild Activity | `/v1/guild/{id}/activity` | `v1.guild.activity` |
+| `GET` | Guild Energizing Pool Information | `/v1/guild/{id}/energizing-pool/information` | `v1.guild.energizing_pool.information` |
+| `GET` | Guild Hall | `/v1/guild/{id}/hall` | `v1.guild.hall` |
+| `GET` | Guild Conquest | `/v1/guild/conquest/view` | `v1.guild.conquest.view` |
+| `GET` | Guild Conquest Zone Inspection | `/v1/guild/conquest/zone/{zone_id}/inspect` | `v1.guild.conquest.zone.inspect` |
+| `GET` | Shrine Progress | `/v1/shrine/progress` | `v1.shrine.progress` |
+
+Item search, inspect, and market history are a global catalog. They are not per-character inventory.
 
 ## Where this runs
 

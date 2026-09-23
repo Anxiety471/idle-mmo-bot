@@ -162,6 +162,10 @@ export interface CurrentActionInfo {
   label?: string;
   /** "+N" produced counter from CURRENT ACTION when the UI shows it. */
   producedCount?: number;
+  /** Documented Public API action type, for example MINING. */
+  type?: string;
+  startedAt?: string;
+  expiresAt?: string;
 }
 
 export interface SnapshotZone {
