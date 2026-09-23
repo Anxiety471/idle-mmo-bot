@@ -14,6 +14,8 @@
  *  - filters allowed actions so endless Oak woodcutting loses priority until the run completes
  *  - missions-first early gold: quest_turnin / quest_talk_accept before market sell when quests
  *    are available; sell actions remain fallback when quests are dry or unavailable
+ *  - post-cook batch stages (cook / hunt / map) keep stage work ahead of quest_talk_accept
+ *    unless a pending quest is easy to finish; quest_turnin still leads when ready
  *
  * Hard constraints (huntFoundCap, no membership spend, gold Cheap Bait only) stay elsewhere.
  */
@@ -107,6 +109,11 @@ export interface PlaybookProgress {
   staleCoalGather: boolean;
   /** Consecutive flat coal-while-busy cycles (debug / tests). */
   staleCoalBusyCycles: number;
+  /**
+   * Cycles left to keep quest_talk_accept behind stage work after talk:no_action.
+   * Armed by notePlaybookOutcome; decremented each evaluatePlaybook tick.
+   */
+  questTalkNoActionCycles?: number;
   /** Per-tick quest difficulty/importance scoring for HttpJev + filters. */
   questCurriculum?: QuestCurriculum;
 }
@@ -131,6 +138,8 @@ interface PersistedPlaybook {
   lastCoalProgressSeen?: number;
   /** Consecutive evaluate ticks busy on coal with flat coal progress. */
   staleCoalBusyCycles?: number;
+  /** Remaining cycles to demote quest_talk_accept after talk:no_action. */
+  questTalkNoActionCycles?: number;
 }
 
 /** Sequential batch stages only — manage_pets is async and not in this order. */
@@ -198,6 +207,11 @@ export const FISH_COD_BACKOFF_FALLBACKS: AutopilotAction[] = [
  * Override with PLAYBOOK_PETS_EVERY_N_CYCLES.
  */
 export const PETS_ASYNC_EVERY_N_CYCLES = envInt('PLAYBOOK_PETS_EVERY_N_CYCLES', 1);
+/**
+ * After quest_talk_accept returns talk:no_action / no_action, keep that action
+ * behind stage work for this many evaluate ticks so hunt/cook can run.
+ */
+export const QUEST_TALK_NO_ACTION_COOLDOWN = 4;
 
 /** Resolved at call time so AUTOPILOT_LOG_DIR is honored after env load. */
 export function resolvePlaybookStatePath(): string {
@@ -288,6 +302,7 @@ function loadPersisted(): PersistedPlaybook {
       fishCodBackoffUntil: parsed.fishCodBackoffUntil,
       lastCoalProgressSeen: parsed.lastCoalProgressSeen,
       staleCoalBusyCycles: parsed.staleCoalBusyCycles ?? 0,
+      questTalkNoActionCycles: parsed.questTalkNoActionCycles ?? 0,
     };
   } catch {
     return { version: 1, stage: 'mine_coal', counts: emptyCounts() };
@@ -619,23 +634,82 @@ export function canSkipSellHalfForQuestFunding(snapshot: GameSnapshot): boolean 
   return questsAvailableForEarlyGold(snapshot);
 }
 
+/**
+ * Cook / hunt / map batch work stays ahead of missions-first quest_talk_accept.
+ * Early gold stages (mine, sell, bait, fish) still prepend talk when any quest is pending.
+ */
+function batchStageKeepsWorkAheadOfQuestTalk(stage: EarlyStageId): boolean {
+  return (
+    stage === 'cook_cod' ||
+    stage === 'hunt_battle_batch' ||
+    stage === 'hunt_rabbits' ||
+    stage === 'explore_map' ||
+    stage === 'manage_pets'
+  );
+}
+
+/**
+ * Easy hearth / progress-met pending quests may still jump the queue.
+ * A hard kill sitting in Pending does not, even if some other quest can turn in.
+ */
+function shouldElevateQuestTalk(snapshot: GameSnapshot, curriculum?: QuestCurriculum): boolean {
+  if (!hasPendingQuestAccept(snapshot)) return false;
+  if (hasEasyCompletePendingQuest(snapshot.pendingQuests)) return true;
+  if (!curriculum?.hasEasyFinishableQuest) return false;
+  if (curriculum.preferredActions.includes('quest_talk_accept')) return true;
+  return curriculum.scoredQuests.some(
+    (quest) => quest.tab === 'pending' && quest.kind === 'gather' && quest.difficulty === 'easy',
+  );
+}
+
+function demotePreferred(actions: AutopilotAction[], id: AutopilotAction): AutopilotAction[] {
+  if (!actions.includes(id)) return actions;
+  return [...actions.filter((action) => action !== id), id];
+}
+
+/**
+ * Demote quest_talk while a no_action cooldown is armed.
+ * notePlaybookOutcome sets the counter only when the action was quest_talk_accept
+ * (the value stored on AutopilotContext.lastAction) and the outcome matched
+ * talk:no_action / no_action. A successful accept clears the counter.
+ * Once armed, the window stays up for N cycles after the supervisor switches to hunt.
+ */
 function buildPreferredActions(
+  stage: EarlyStageId,
   meta: ReturnType<typeof stageMeta>,
   snapshot: GameSnapshot,
+  curriculum?: QuestCurriculum,
 ): AutopilotAction[] {
   const preferred = [...meta.preferred];
-  if (!questsAvailableForEarlyGold(snapshot)) {
-    return preferred;
+  const turnIn = hasTurnInReady(snapshot);
+  const pending = hasPendingQuestAccept(snapshot);
+  if (!turnIn && !pending) return preferred;
+
+  const elevateTalk = shouldElevateQuestTalk(snapshot, curriculum);
+  const batchFirst = batchStageKeepsWorkAheadOfQuestTalk(stage);
+  const nonSell = preferred.filter((action) => !EARLY_GOLD_SELL_SET.has(action));
+  const sellPreferred = preferred.filter((action) => EARLY_GOLD_SELL_SET.has(action));
+
+  // Post-cook stages: hunt/cook/map stay first. Turn-in still leads. Talk only leads
+  // for an easy-finishable pending quest, not a hard kill that sits in Pending forever.
+  if (batchFirst && !elevateTalk) {
+    const head: AutopilotAction[] = turnIn ? ['quest_turnin'] : [];
+    const body = nonSell.filter((action) => !head.includes(action));
+    const tail: AutopilotAction[] =
+      pending && !head.includes('quest_talk_accept') && !body.includes('quest_talk_accept')
+        ? ['quest_talk_accept']
+        : [];
+    return [...head, ...body, ...tail, ...sellPreferred];
   }
 
   const questActions: AutopilotAction[] = [];
-  if (hasTurnInReady(snapshot)) questActions.push('quest_turnin');
-  if (hasPendingQuestAccept(snapshot)) questActions.push('quest_talk_accept');
-
-  const nonSell = preferred.filter((a) => !EARLY_GOLD_SELL_SET.has(a));
-  const sellPreferred = preferred.filter((a) => EARLY_GOLD_SELL_SET.has(a));
-
-  return [...questActions, ...nonSell, ...sellPreferred];
+  if (turnIn) questActions.push('quest_turnin');
+  if (pending) questActions.push('quest_talk_accept');
+  return [
+    ...questActions,
+    ...nonSell.filter((action) => !questActions.includes(action)),
+    ...sellPreferred,
+  ];
 }
 
 function deriveStage(
@@ -987,7 +1061,7 @@ export function evaluatePlaybook(
   const backoffActive = stage === 'fish_cod' && fishBackoff.active;
   let preferredActions = backoffActive
     ? [...FISH_COD_BACKOFF_FALLBACKS]
-    : buildPreferredActions(meta, snapshot);
+    : buildPreferredActions(stage, meta, snapshot, questCurriculum);
   let deprioritizedActions = [...meta.deprioritized];
   let interruptActions = backoffActive
     ? meta.interrupt.filter((a) => a !== 'fish_cod')
@@ -1116,6 +1190,16 @@ export function evaluatePlaybook(
     ).trim();
   }
 
+  // Armed by notePlaybookOutcome when AutopilotContext.lastAction was quest_talk_accept
+  // and the outcome matched talk:no_action / no_action. Stays up for N cycles after
+  // the supervisor switches to hunt so talk cannot resume the stall.
+  const questTalkNoActionCycles = persisted.questTalkNoActionCycles ?? 0;
+  if (questTalkNoActionCycles > 0) {
+    preferredActions = demotePreferred(preferredActions, 'quest_talk_accept');
+  }
+  const questTalkNoActionCyclesNext =
+    questTalkNoActionCycles > 0 ? questTalkNoActionCycles - 1 : 0;
+
   savePersisted({
     version: 1,
     stage,
@@ -1130,6 +1214,7 @@ export function evaluatePlaybook(
     fishCodBackoffUntil: fishBackoff.active ? fishBackoff.until : undefined,
     lastCoalProgressSeen: staleTrack.lastCoalProgressSeen,
     staleCoalBusyCycles: staleTrack.staleCoalBusyCycles,
+    questTalkNoActionCycles: questTalkNoActionCyclesNext,
   });
 
   return {
@@ -1161,6 +1246,7 @@ export function evaluatePlaybook(
     consecutiveFishCodFailures: fishBackoff.failures,
     staleCoalGather,
     staleCoalBusyCycles: staleTrack.staleCoalBusyCycles,
+    questTalkNoActionCycles,
     questCurriculum,
   };
 }
@@ -1249,6 +1335,15 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
   // the inventory scrape (and cooking producedCount) in syncCountsFromSnapshot.
   let lastCoalProgressSeen = persisted.lastCoalProgressSeen;
   let staleCoalBusyCycles = persisted.staleCoalBusyCycles ?? 0;
+  let questTalkNoActionCycles = persisted.questTalkNoActionCycles ?? 0;
+  if (action === 'quest_talk_accept') {
+    // action is AutopilotContext.lastAction for this cycle.
+    if (/talk:no_action|no_action/i.test(outcome)) {
+      questTalkNoActionCycles = QUEST_TALK_NO_ACTION_COOLDOWN;
+    } else {
+      questTalkNoActionCycles = 0;
+    }
+  }
   if (action === 'mine_coal' && /restarted|already_busy/i.test(outcome)) {
     lastGatherRestartAt = new Date().toISOString();
     lastGatherSkill = 'mining';
@@ -1275,6 +1370,7 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
     fishCodBackoffUntil,
     lastCoalProgressSeen,
     staleCoalBusyCycles,
+    questTalkNoActionCycles,
   });
 }
 
@@ -1516,9 +1612,13 @@ export function filterAllowedByPlaybook(
   const preferred = new Set(playbook.preferredActions);
   const questPreferred = new Set(questCurriculum?.preferredActions ?? []);
   const missionSort = questsAvailable || Boolean(questCurriculum?.hasEasyFinishableQuest);
+  const elevateQuestTalk = shouldElevateQuestTalk(snapshot, questCurriculum);
+  const suppressQuestTalk =
+    (playbook.questTalkNoActionCycles ?? 0) > 0 ||
+    (batchStageKeepsWorkAheadOfQuestTalk(playbook.stage) && !elevateQuestTalk);
   const missionFirstTier = (action: AutopilotAction): number => {
     if (action === 'quest_turnin') return 0;
-    if (action === 'quest_talk_accept') return 1;
+    if (action === 'quest_talk_accept') return suppressQuestTalk ? 8 : 1;
     if (questPreferred.has(action) && (action.startsWith('gather_') || action === 'gather_oak')) return 2;
     const isSell = EARLY_GOLD_SELL_SET.has(action);
     if (preferred.has(action) && !isSell) return 3;
@@ -1622,11 +1722,39 @@ function matchesGatherAction(
   return pattern ? pattern.test(view.resource) : false;
 }
 
+function playbookWantsHuntCombat(playbook: PlaybookProgress): boolean {
+  if (isHuntCombatAction(playbook.stage)) return true;
+  if (playbook.interruptActions.some((id) => isHuntCombatAction(id))) return true;
+  if (playbook.preferredActions.some((id) => isHuntCombatAction(id))) return true;
+  return false;
+}
+
+/** Gather/craft that is not an in-progress hunt. Coal/oak/cod/yew are the live mismatches. */
+function isNonHuntGatherOrCraft(view: { resource: string; skill?: GatherState['skill'] }): boolean {
+  if (/hunt|battle|combat/i.test(view.resource)) return false;
+  if (/coal|oak|yew/i.test(view.resource)) return true;
+  if (/\bcod\b/i.test(view.resource)) return true;
+  if (!view.skill) return view.resource.trim().length > 0;
+  return (
+    view.skill === 'mining' ||
+    view.skill === 'woodcutting' ||
+    view.skill === 'fishing' ||
+    view.skill === 'cooking' ||
+    view.skill === 'smelting' ||
+    view.skill === 'forge' ||
+    view.skill === 'alchemy' ||
+    view.skill === 'construction'
+  );
+}
+
 /**
  * Deterministic gather interrupt while the early playbook is enabled and incomplete.
  * Interrupt when `interruptActions` wants a stage/gather switch and the running
  * resource is not already that coal/cod/cook (or quest gather) target.
- * Gather grace and fish-cod backoff never interrupt.
+ * Hunt combat in interrupt/preferred also interrupts a mismatched gather/craft
+ * (coal, oak, cod, yew) even when a gather-shaped id such as mine_coal matches.
+ * Gather grace and fish-cod backoff never interrupt. Active cooking stays when
+ * cook_cod is itself an interrupt/preferred target (cook-before-hunt).
  */
 export function shouldInterruptGatherForPlaybook(
   playbook: PlaybookProgress,
@@ -1645,6 +1773,13 @@ export function shouldInterruptGatherForPlaybook(
   }
 
   const view = activeGather(state);
+  if (playbookWantsHuntCombat(playbook) && isNonHuntGatherOrCraft(view)) {
+    const protectCook =
+      matchesGatherAction('cook_cod', view) &&
+      (playbook.interruptActions.includes('cook_cod') || playbook.preferredActions.includes('cook_cod'));
+    if (!protectCook) return true;
+  }
+
   const gatherTargets = playbook.interruptActions.filter((id) => GATHER_RESOURCE[id]);
   if (gatherTargets.length > 0) {
     return !gatherTargets.some((id) => matchesGatherAction(id, view));
