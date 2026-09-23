@@ -11,8 +11,7 @@ import {
   waitForEnemies,
   hasHuntProgress,
   hasPostHuntEnemySelectionReady,
-  inventoryCanCookBattleFood,
-  inventoryHasBattleFood,
+  needsCookBeforeHunt,
   pickBattleEnemy,
   prepareEnemyBattleSelection,
   readHuntState,
@@ -132,11 +131,11 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
     return combatRoundOutcome('blocked:verify', config);
   }
 
-  if (
-    !inventoryHasBattleFood(ctx.snapshot.inventory) &&
-    inventoryCanCookBattleFood(ctx.snapshot.inventory)
-  ) {
-    console.log('[combat] no battle food — cooking Cooked Cod before hunt');
+  const playbook = getPlaybookFromSnapshot(ctx.snapshot);
+  const cookTarget = playbook?.targets.cookMin ?? 100;
+  if (needsCookBeforeHunt(ctx.snapshot.inventory, cookTarget)) {
+    const cooked = ctx.snapshot.inventory['Cooked Cod'] ?? 0;
+    console.log(`[combat] Cooked Cod ${cooked}/${cookTarget} — cooking before hunt`);
     const cookResult = await tryCookCod(page, config, true);
     return combatRoundOutcome(`cook_before_hunt:${cookResult}`, config);
   }
@@ -202,11 +201,6 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
   const maxEnemies = await jev.chooseMaxEnemies(enemy);
   const stance = await jev.chooseStance(enemy);
   const battleResult = await configureAndBattle(page, enemy.index, maxEnemies, stance);
-  if (battleResult === 'no_food') {
-    console.log('[combat] battle food picker empty — cooking before battle');
-    const cookResult = await tryCookCod(page, config, true);
-    return combatRoundOutcome(`cook_before_hunt:${cookResult}`, config);
-  }
 
   for (let i = 0; i < 60; i++) {
     const battleState = await readBattleState(page);
@@ -220,14 +214,10 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
     await sleep(pollMs);
   }
 
-  const more = await huntMore(page, allowInterrupt);
-  if (more === 'no_food') {
-    console.log('[combat] Hunt More blocked by empty food picker — cooking before battle');
-    const cookResult = await tryCookCod(page, config, true);
-    return combatRoundOutcome(`cook_before_hunt:${cookResult}`, config);
-  }
-
-  return combatRoundOutcome(`battle:${battleResult}:huntMore:${more}`, config);
+  return combatRoundOutcome(
+    `battle:${battleResult}:huntMore:${await huntMore(page, allowInterrupt)}`,
+    config,
+  );
 }
 
 function combatExecuteResult(
@@ -623,16 +613,9 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
       const hasCod = (inv['Cod'] ?? 0) >= 1 || (inv['Raw Cod'] ?? 0) >= 1;
       const hasCoal = (inv['Coal Ore'] ?? 0) >= 1;
       const playbook = getPlaybookFromSnapshot(ctx.snapshot);
-      const batchCooking =
-        Boolean(playbook?.enabled && !playbook.complete && playbook.stage === 'cook_cod');
-      const cookTarget = playbook?.targets.cookMin ?? 5;
+      const cookTarget = playbook?.targets.cookMin ?? 100;
       const cooked = inv['Cooked Cod'] ?? 0;
-      const needsFood =
-        batchCooking
-          ? cooked < cookTarget
-          : cooked < 5 &&
-            (inv['Cooked Salmon'] ?? 0) < 5 &&
-            (inv['Cooked Tuna'] ?? 0) < 5;
+      const needsFood = cooked < cookTarget;
       return (
         ctx.snapshot.flags.sessionValid &&
         gatherIdle(ctx) &&

@@ -18,10 +18,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getLogDir } from '../logging/jsonl-writer.js';
-import {
-  inventoryCanCookBattleFood,
-  inventoryHasBattleFood,
-} from '../deterministic/combat.js';
+import { needsCookBeforeHunt } from '../deterministic/combat.js';
 import { hasEasyCompletePendingQuest } from '../deterministic/quest-accept.js';
 import type { AutopilotAction, AutopilotContext, GameSnapshot } from '../types.js';
 import {
@@ -1217,9 +1214,7 @@ export function filterAllowedByPlaybook(
   const coalIncomplete = !coalTargetMet(playbook.counts);
   const fishIncomplete = !fishTargetMet(playbook.counts);
   const cookIncomplete = !cookTargetMet(playbook.counts);
-  const cookBeforeHunt =
-    !inventoryHasBattleFood(snapshot.inventory) &&
-    inventoryCanCookBattleFood(snapshot.inventory);
+  const cookBeforeHunt = needsCookBeforeHunt(snapshot.inventory, playbook.targets.cookMin);
   if (coalIncomplete || playbook.stage === 'mine_coal') {
     next = next.filter(
       (a) => a !== 'fish_cod' && a !== 'cook_cod' && a !== 'hunt_rabbits' && a !== 'hunt_battle',

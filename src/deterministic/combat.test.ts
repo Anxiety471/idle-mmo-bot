@@ -3,8 +3,10 @@ import { describe, it } from 'node:test';
 import {
   enemyNameFromDetailText,
   enemyNameFromImageSrc,
+  cookedCodCount,
   inventoryCanCookBattleFood,
   inventoryHasBattleFood,
+  needsCookBeforeHunt,
   hasHuntProgress,
   huntingMetricsSection,
   isIdleBattleText,
@@ -239,6 +241,16 @@ describe('inventory battle food', () => {
     assert.equal(inventoryCanCookBattleFood({ 'Raw Cod': 2, Coal: 3 }), true);
     assert.equal(inventoryCanCookBattleFood({ Cod: 4 }), false);
     assert.equal(inventoryCanCookBattleFood({ 'Cooked Cod': 5 }), false);
+  });
+
+  it('cooks before hunt when Cooked Cod is empty or under the target', () => {
+    const ingredients = { Cod: 20, 'Coal Ore': 20 };
+    assert.equal(cookedCodCount({ ...ingredients, 'Cooked Cod': 0 }), 0);
+    assert.equal(needsCookBeforeHunt({ ...ingredients, 'Cooked Cod': 0 }, 100), true);
+    assert.equal(needsCookBeforeHunt({ ...ingredients, 'Cooked Cod': 40 }, 100), true);
+    assert.equal(needsCookBeforeHunt({ ...ingredients, 'Cooked Cod': 100 }, 100), false);
+    assert.equal(needsCookBeforeHunt({ ...ingredients, 'Cooked Cod': 140 }, 100), false);
+    assert.equal(needsCookBeforeHunt({ 'Cooked Cod': 0 }, 100), false);
   });
 });
 
