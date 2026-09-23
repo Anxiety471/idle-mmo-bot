@@ -1215,6 +1215,171 @@ describe('strict sequential real-count gates', () => {
     assert.ok(!readyFiltered.includes('cook_cod'));
   });
 
+  it('snaps hunt back to cook when soft cookedCod is inflated but the bag is short', () => {
+    statePath = join('/tmp', `playbook-cooked-drift-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'hunt_battle_batch',
+        counts: {
+          ...coalMetCounts({ sells: 2 }),
+          rawCod: 200,
+          cookedCod: 146,
+          huntBattles: 26,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    // IdleBocchi-like: restarts inflated soft cookedCod, bag still under cookMin.
+    const snapshot = minimalSnapshot({
+      inventory: { 'Cheap Bait': 20, 'Coal Ore': 80, Cod: 40, 'Cooked Cod': 43 },
+      gold: 50,
+      combatPhase: 'none',
+      currentAction: {
+        busy: true,
+        skill: 'cooking',
+        resource: 'Cooked Cod',
+        producedCount: 146,
+      },
+    });
+    const progress = evaluatePlaybook(snapshot);
+    assert.equal(progress.counts.cookedCod, 43);
+    assert.equal(cookTargetMet(progress.counts, snapshot.inventory), false);
+    assert.equal(progress.stage, 'cook_cod');
+    assert.ok(progress.curriculumHint.includes('cook gate'), progress.curriculumHint);
+    assert.equal(progress.preferredActions[0], 'cook_cod');
+    const filtered = filterAllowedByPlaybook(
+      ['hunt_battle_batch', 'hunt_battle', 'hunt_rabbits', 'cook_cod', 'quest_talk_accept', 'idle'],
+      snapshot,
+      progress,
+    );
+    assert.ok(!filtered.includes('hunt_battle_batch'), `filtered=${JSON.stringify(filtered)}`);
+    assert.ok(!filtered.includes('hunt_battle'), `filtered=${JSON.stringify(filtered)}`);
+    assert.ok(!filtered.includes('hunt_rabbits'), `filtered=${JSON.stringify(filtered)}`);
+    assert.equal(filtered[0], 'cook_cod', `filtered=${JSON.stringify(filtered)}`);
+  });
+
+  it('allows hunt when soft cookedCod is high and bag Cooked Cod meets cookMin', () => {
+    statePath = join('/tmp', `playbook-cooked-bag-met-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'hunt_battle_batch',
+        counts: {
+          ...coalMetCounts({ sells: 2 }),
+          rawCod: 200,
+          cookedCod: 146,
+          huntBattles: 26,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const snapshot = minimalSnapshot({
+      inventory: { 'Cheap Bait': 20, 'Coal Ore': 80, Cod: 40, 'Cooked Cod': 112 },
+      gold: 50,
+      combatPhase: 'none',
+    });
+    const progress = evaluatePlaybook(snapshot);
+    assert.equal(progress.counts.cookedCod, 112);
+    assert.equal(cookTargetMet(progress.counts, snapshot.inventory), true);
+    assert.equal(progress.stage, 'hunt_battle_batch');
+    const filtered = filterAllowedByPlaybook(
+      ['hunt_battle_batch', 'hunt_battle', 'cook_cod', 'idle'],
+      snapshot,
+      progress,
+    );
+    assert.equal(filtered[0], 'hunt_battle_batch', `filtered=${JSON.stringify(filtered)}`);
+    assert.ok(filtered.includes('hunt_battle'), `filtered=${JSON.stringify(filtered)}`);
+    const cookIdx = filtered.indexOf('cook_cod');
+    assert.ok(cookIdx === -1 || cookIdx > filtered.indexOf('hunt_battle_batch'));
+  });
+
+  it('does not bump cookedCod when cook_cod restarts and the bag is unchanged', () => {
+    statePath = join('/tmp', `playbook-cook-restart-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'cook_cod',
+        counts: {
+          ...coalMetCounts({ sells: 2 }),
+          rawCod: 200,
+          cookedCod: 43,
+          huntBattles: 4,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    for (const outcome of ['restarted', 'already_busy', 'kept_current']) {
+      notePlaybookOutcome('cook_cod', outcome);
+    }
+    const afterRestart = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      counts?: { cookedCod?: number };
+    };
+    assert.equal(afterRestart.counts?.cookedCod, 43);
+
+    const snapshot = minimalSnapshot({
+      inventory: { 'Cheap Bait': 20, 'Coal Ore': 80, Cod: 40, 'Cooked Cod': 43 },
+      gold: 50,
+    });
+    const progress = evaluatePlaybook(snapshot);
+    assert.equal(progress.counts.cookedCod, 43);
+    assert.equal(progress.stage, 'cook_cod');
+  });
+
+  it('credits cooking producedCount only when the bag omits Cooked Cod', () => {
+    statePath = join('/tmp', `playbook-cook-produced-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'cook_cod',
+        counts: {
+          ...coalMetCounts({ sells: 2 }),
+          rawCod: 200,
+          cookedCod: 10,
+          huntBattles: 0,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const snapshot = minimalSnapshot({
+      inventory: { 'Cheap Bait': 20, 'Coal Ore': 80, Cod: 40, 'Cooked Cod': 0 },
+      gold: 50,
+      flags: {
+        hasBait: true,
+        bankNearby: false,
+        gatherBusy: true,
+        inBattle: false,
+        sessionValid: true,
+      },
+      currentAction: {
+        busy: true,
+        skill: 'cooking',
+        resource: 'Cooked Cod',
+        producedCount: 25,
+      },
+    });
+    const progress = evaluatePlaybook(snapshot);
+    assert.equal(progress.counts.cookedCod, 25);
+    assert.equal(cookTargetMet(progress.counts, snapshot.inventory), false);
+    assert.equal(progress.stage, 'cook_cod');
+  });
+
   it('hard-prefers cook_cod over quest_talk_accept when cook-before-hunt', () => {
     statePath = join('/tmp', `playbook-cook-prefer-${Date.now()}.json`);
     process.env.PLAYBOOK_STATE_PATH = statePath;
