@@ -508,7 +508,13 @@ async function enemyNameFromTile(btn: Locator): Promise<string> {
   if (aria) return aria;
   const title = (await btn.getAttribute('title'))?.trim();
   if (title) return title;
+  const countLine = textLines(await safeInnerText(btn)).find((line) => PURE_NUMERIC_PATTERN.test(line));
+  if (countLine) return `stack ${countLine}`;
   return 'Enemy';
+}
+
+function textLines(text: string): string[] {
+  return text.split('\n').map((line) => line.trim()).filter(Boolean);
 }
 
 async function enemyInfosFromButtons(buttons: Locator[]): Promise<EnemyInfo[]> {
@@ -522,7 +528,170 @@ async function enemyInfosFromButtons(buttons: Locator[]): Promise<EnemyInfo[]> {
   return enemies;
 }
 
-/** Text cards or icon tiles from ENEMIES NEARBY (mixed enemy types). */
+/**
+ * Mark ENEMIES NEARBY count badges when monster images are missing or 0×0.
+ * Returns how many tiles were tagged with data-combat-count-tile.
+ * An IIFE string avoids DOM typings in this Node project.
+ */
+const MARK_ENEMY_COUNT_TILES = `(() => {
+  var previous = document.querySelectorAll('[data-combat-count-tile]');
+  for (var p = 0; p < previous.length; p++) previous[p].removeAttribute('data-combat-count-tile');
+
+  function norm(value) {
+    return String(value || '').replace(/\\s+/g, ' ').trim();
+  }
+
+  var nodes = Array.from(document.querySelectorAll('body *'));
+  var heading = null;
+  var bestArea = Infinity;
+  for (var i = 0; i < nodes.length; i++) {
+    var el = nodes[i];
+    if (!/^ENEMIES\\s+NEARBY$/i.test(norm(el.innerText))) continue;
+    var rect = el.getBoundingClientRect();
+    if (rect.width < 4 || rect.height < 4) continue;
+    var area = rect.width * rect.height;
+    if (area < bestArea) {
+      bestArea = area;
+      heading = el;
+    }
+  }
+  if (!heading) return 0;
+  var head = heading.getBoundingClientRect();
+
+  var hunt = null;
+  var buttons = document.querySelectorAll('button');
+  for (var b = 0; b < buttons.length; b++) {
+    if (norm(buttons[b].innerText) === 'Hunt More') {
+      hunt = buttons[b];
+      break;
+    }
+  }
+  var huntRect = hunt ? hunt.getBoundingClientRect() : null;
+  var maxY = Math.max(head.bottom + 180, huntRect ? huntRect.bottom : 0);
+
+  function inCharacterColumn(node) {
+    var cursor = node.parentElement;
+    for (var depth = 0; depth < 8 && cursor; depth++) {
+      var text = norm(cursor.innerText);
+      if (text.length > 1200) break;
+      if (/ENEMIES\\s+NEARBY/i.test(text)) continue;
+      if (/YOUR CHARACTER|PRIMARY STATS|SECONDARY STATS/i.test(text)) return true;
+      cursor = cursor.parentElement;
+    }
+    return false;
+  }
+
+  var hits = [];
+  for (var n = 0; n < nodes.length; n++) {
+    var candidate = nodes[n];
+    var own = norm(candidate.innerText);
+    if (!/^\\d+$/.test(own)) continue;
+    var box = candidate.getBoundingClientRect();
+    if (box.width < 8 || box.height < 8 || box.width > 240 || box.height > 180) continue;
+    var midY = box.top + box.height / 2;
+    var midX = box.left + box.width / 2;
+    if (midY < head.top - 8) continue;
+    if (box.top > maxY) continue;
+    if (midX < head.left - 40) continue;
+    if (huntRect && box.left >= huntRect.left - 4) continue;
+    if (!huntRect && midX > head.right + 520) continue;
+    if (inCharacterColumn(candidate)) continue;
+    hits.push(candidate);
+  }
+
+  var outermost = hits.filter(function (el) {
+    return !hits.some(function (other) { return other !== el && other.contains(el); });
+  });
+  outermost.sort(function (a, b) {
+    var ra = a.getBoundingClientRect();
+    var rb = b.getBoundingClientRect();
+    if (Math.abs(ra.top - rb.top) > 48) return ra.top - rb.top;
+    return ra.left - rb.left;
+  });
+  for (var t = 0; t < outermost.length; t++) {
+    outermost[t].setAttribute('data-combat-count-tile', String(t));
+  }
+  return outermost.length;
+})()`;
+
+/** Post-stop stack badges (2 / 140 / 116) when CDN images never produce alt tiles. */
+async function collectEnemyCountBadges(page: Page): Promise<Locator[]> {
+  if (!(await shouldCollectCountBadges(page))) return [];
+  let marked = 0;
+  try {
+    const result = await page.evaluate(MARK_ENEMY_COUNT_TILES);
+    marked = typeof result === 'number' ? result : 0;
+  } catch {
+    return [];
+  }
+  if (marked <= 0) return [];
+
+  const tiles: Locator[] = [];
+  for (let i = 0; i < marked; i++) {
+    tiles.push(page.locator(`[data-combat-count-tile="${i}"]`));
+  }
+  return tiles;
+}
+
+/**
+ * Active hunts show one zone-pool count under ENEMIES NEARBY. Those are not tiles.
+ * Post-stop screens show Hunt More plus the stack badges, with Stop gone.
+ */
+async function shouldCollectCountBadges(page: Page): Promise<boolean> {
+  if (await isHuntStopVisible(page)) return false;
+  if (await isButtonVisible(page, 'Hunt More')) return true;
+  const metrics = page.getByText('Total Enemies Found', { exact: true }).first();
+  const metricsVisible =
+    (await metrics.count()) > 0 && (await metrics.isVisible().catch(() => false));
+  return !metricsVisible;
+}
+
+async function tilesOverlap(a: Locator, b: Locator): Promise<boolean> {
+  const boxA = await a.boundingBox();
+  const boxB = await b.boundingBox();
+  if (!boxA || !boxB) return false;
+  const overlapX = Math.min(boxA.x + boxA.width, boxB.x + boxB.width) - Math.max(boxA.x, boxB.x);
+  const overlapY = Math.min(boxA.y + boxA.height, boxB.y + boxB.height) - Math.max(boxA.y, boxB.y);
+  if (overlapX <= 0 || overlapY <= 0) return false;
+  const smaller = Math.min(boxA.width * boxA.height, boxB.width * boxB.height);
+  return smaller > 0 && overlapX * overlapY >= smaller * 0.5;
+}
+
+async function withoutOverlappingTiles(candidates: Locator[], existing: Locator[]): Promise<Locator[]> {
+  if (existing.length === 0) return candidates;
+  const kept: Locator[] = [];
+  for (const candidate of candidates) {
+    let overlaps = false;
+    for (const prior of existing) {
+      if (await tilesOverlap(candidate, prior)) {
+        overlaps = true;
+        break;
+      }
+    }
+    if (!overlaps) kept.push(candidate);
+  }
+  return kept;
+}
+
+async function sortTilesByPosition(tiles: Locator[]): Promise<Locator[]> {
+  const placed: { tile: Locator; x: number; y: number }[] = [];
+  for (const tile of tiles) {
+    const box = await tile.boundingBox();
+    placed.push({ tile, x: box?.x ?? 0, y: box?.y ?? 0 });
+  }
+  placed.sort((a, b) => (Math.abs(a.y - b.y) > 48 ? a.y - b.y : a.x - b.x));
+  return placed.map((item) => item.tile);
+}
+
+async function enemyInfosFromTiles(buttons: Locator[]): Promise<EnemyInfo[]> {
+  const enemies: EnemyInfo[] = [];
+  for (let i = 0; i < buttons.length; i++) {
+    enemies.push({ name: await enemyNameFromTile(buttons[i]), index: i });
+  }
+  return enemies;
+}
+
+/** Text cards, icon tiles, or count badges from ENEMIES NEARBY (mixed enemy types). */
 async function collectEnemyTiles(page: Page): Promise<{ buttons: Locator[]; enemies: EnemyInfo[] }> {
   const textCards = await collectEnemyCardButtons(page);
   const textEnemies = await enemyInfosFromButtons(textCards);
@@ -531,11 +700,9 @@ async function collectEnemyTiles(page: Page): Promise<{ buttons: Locator[]; enem
   }
 
   const iconTiles = await collectEnemyIconTiles(page);
-  const enemies: EnemyInfo[] = [];
-  for (let i = 0; i < iconTiles.length; i++) {
-    enemies.push({ name: await enemyNameFromTile(iconTiles[i]), index: i });
-  }
-  return { buttons: iconTiles, enemies };
+  const badges = await withoutOverlappingTiles(await collectEnemyCountBadges(page), iconTiles);
+  const buttons = await sortTilesByPosition([...iconTiles, ...badges]);
+  return { buttons, enemies: await enemyInfosFromTiles(buttons) };
 }
 
 /**
@@ -546,6 +713,34 @@ export function pickBattleEnemy(enemies: EnemyInfo[]): EnemyInfo | undefined {
   if (enemies.length === 0) return undefined;
   const rabbit = enemies.find((e) => /\brabbit\b/i.test(e.name));
   return rabbit ?? enemies[0];
+}
+
+/** Rabbit first when present, then the other ready tiles in their existing order. */
+export function battleTargetsInOrder(enemies: EnemyInfo[]): EnemyInfo[] {
+  const preferred = pickBattleEnemy(enemies);
+  if (!preferred) return [];
+  return [preferred, ...enemies.filter((enemy) => enemy.index !== preferred.index)];
+}
+
+/**
+ * Why a Battle control is disabled, using only the disabled attribute and the Alpine
+ * bind string. Do not evaluate component state — that can hold account data.
+ */
+export function describeBattleControlDisabled(
+  disabledAttr: string | null,
+  bind: string | null,
+): string {
+  const bindText = (bind ?? '').trim();
+  const restrictive = /is_restrictive/i.test(bindText);
+  const processing = /is_processing/i.test(bindText);
+  let look = 'disabled';
+  if (restrictive && processing) look = 'restrictive or processing';
+  else if (restrictive) look = 'restrictive';
+  else if (processing) look = 'processing';
+  const disabledLabel =
+    disabledAttr === null ? 'absent' : disabledAttr === '' ? 'present' : disabledAttr;
+  const bindLabel = bindText.length > 0 ? bindText : 'absent';
+  return `disabled=${disabledLabel}; bind=${bindLabel}; bind looks ${look}`;
 }
 
 /** Battle-entity modal opened by clicking a hunted monster image. */
@@ -831,9 +1026,11 @@ export async function openEnemiesNearbyPanel(page: Page): Promise<CombatStepResu
 }
 
 /**
- * Post-Stop enemy selection is ready (detail panel, count badge, or creature cards).
- * Does NOT match the ENEMIES NEARBY sidebar label alone — that label stays visible
- * during active hunts (Stop button) and caused false positives + hunt_metrics_pending loops.
+ * Post-Stop enemy selection is ready (detail panel, icon tile, or count badge).
+ * Count badges still count when CDN images have no alt. The ENEMIES NEARBY label
+ * alone does not — that label stays visible during active hunts (Stop button) and
+ * caused false positives + hunt_metrics_pending loops. The single zone-pool count
+ * under that label during a hunt is not a tile.
  */
 export async function hasEnemySelectionReady(page: Page): Promise<boolean> {
   if (await isEnemyDetailPanelOpen(page)) return true;
@@ -1560,8 +1757,136 @@ export async function selectBattleFood(page: Page): Promise<'added' | 'none' | '
   }
 }
 
+/** Max wait for Battle to leave disabled after Max/stance. Live UI can sit on is_processing. */
+const BATTLE_ENABLE_WAIT_MS = 12_000;
+
+function battleEnableWaitMs(): number {
+  const envMs = Number(process.env.COMBAT_BATTLE_ENABLE_MS);
+  if (Number.isFinite(envMs) && envMs > 0) return envMs;
+  return BATTLE_ENABLE_WAIT_MS;
+}
+
+async function readBattleDisableHint(btn: Locator): Promise<string> {
+  const disabled = await btn.getAttribute('disabled').catch(() => null);
+  const bind =
+    (await btn.getAttribute('x-bind:disabled').catch(() => null)) ??
+    (await btn.getAttribute(':disabled').catch(() => null));
+  return describeBattleControlDisabled(disabled, bind);
+}
+
 /**
- * Open enemy detail by clicking the monster image, pack food, Max the stack, click Battle.
+ * Poll until the battle-entity Battle button is enabled.
+ * A disabled control must not become an uncaught Playwright click timeout.
+ */
+async function waitForEnabledBattleButton(page: Page): Promise<{
+  button: Locator | null;
+  enabled: boolean;
+  hint: string;
+}> {
+  const deadline = Date.now() + battleEnableWaitMs();
+  let button: Locator | null = null;
+  let hint = describeBattleControlDisabled(null, null);
+  while (true) {
+    const found = await visibleBattleButton(page);
+    if (found) {
+      button = found;
+      hint = await readBattleDisableHint(found);
+      if (await found.isEnabled().catch(() => false)) {
+        return { button, enabled: true, hint };
+      }
+    }
+    if (Date.now() >= deadline) break;
+    await page.waitForTimeout(200);
+  }
+  if (button) hint = await readBattleDisableHint(button);
+  return { button, enabled: false, hint };
+}
+
+async function clickEnemyTile(page: Page, tile: Locator): Promise<void> {
+  await dismissBlockingOverlays(page);
+  await tile.scrollIntoViewIfNeeded().catch(() => undefined);
+  await tile.click({ timeout: 5000 }).catch(async () => {
+    await tile.click({ force: true, timeout: 5000 }).catch(() => undefined);
+  });
+  await page
+    .getByText(/^STANCE$/i)
+    .or(page.getByText(/\d+\s+Combat EXP/i))
+    .or(page.locator('[x-data*="show-battle-entity"]'))
+    .first()
+    .waitFor({ state: 'visible', timeout: COMBAT_UI_SETTLE_MS })
+    .catch(() => undefined);
+}
+
+/** Close the battle-entity modal so the next ENEMIES NEARBY tile can open. */
+async function closeBattleEntityModal(page: Page): Promise<void> {
+  const modal = page.locator('[x-data*="show-battle-entity"]');
+  const modalVisible =
+    (await modal.count()) > 0 && (await modal.first().isVisible().catch(() => false));
+  if (!modalVisible && !(await isEnemyDetailPanelOpen(page))) return;
+
+  const scope = modalVisible ? modal.first() : page.locator('body');
+  const close = scope
+    .getByRole('button', { name: 'Close', exact: true })
+    .or(scope.getByRole('button', { name: /^close$/i }))
+    .or(scope.locator('[aria-label="Close" i]'));
+  const canClose =
+    (await close.count()) > 0 && (await close.first().isVisible().catch(() => false));
+  if (canClose) {
+    await close.first().click({ timeout: 2000 }).catch(() => undefined);
+  } else {
+    await page.keyboard.press('Escape').catch(() => undefined);
+  }
+  if ((await modal.count()) > 0) {
+    await modal
+      .first()
+      .waitFor({ state: 'hidden', timeout: canClose ? 2000 : 400 })
+      .catch(() => undefined);
+  }
+}
+
+type BattleClickResult = 'started' | 'disabled' | 'missing' | 'no_fight';
+
+async function clickEnabledBattle(page: Page, enemyLabel: string): Promise<BattleClickResult> {
+  const waited = await waitForEnabledBattleButton(page);
+  if (!waited.button) {
+    console.log(`[combat] Battle button missing for ${enemyLabel}`);
+    return 'missing';
+  }
+  if (!waited.enabled) {
+    console.log(`[combat] Battle stayed disabled for ${enemyLabel} — ${waited.hint}`);
+    return 'disabled';
+  }
+  try {
+    await waited.button.scrollIntoViewIfNeeded().catch(() => undefined);
+    await waited.button.click({ timeout: 5000 });
+  } catch (error) {
+    const hint = await readBattleDisableHint(waited.button);
+    const message = error instanceof Error ? error.message.split('\n')[0] : String(error);
+    console.log(`[combat] Battle click failed for ${enemyLabel} (${message}) — ${hint}`);
+    return 'disabled';
+  }
+  if (await waitForFightStarted(page)) return 'started';
+  console.log(`[combat] Battle click did not start a fight for ${enemyLabel} (no Run Away)`);
+  return 'no_fight';
+}
+
+async function prepareAndBattleOpenModal(
+  page: Page,
+  enemyLabel: string,
+  maxEnemies: number,
+  stance: Stance,
+): Promise<BattleClickResult> {
+  // Live order: food, then Max on the ENEMIES row, then wait until Battle is enabled.
+  // An empty picker does not abort the fight — cooking is decided before the hunt.
+  await selectBattleFood(page);
+  await setMaxEnemies(page, maxEnemies);
+  await setStance(page, stance);
+  return clickEnabledBattle(page, enemyLabel);
+}
+
+/**
+ * Open enemy detail by clicking the monster tile, pack food, Max the stack, click Battle.
+ * If Battle stays disabled (restrictive or still processing), try the next tile.
  */
 export async function configureAndBattle(
   page: Page,
@@ -1569,50 +1894,46 @@ export async function configureAndBattle(
   maxEnemies: number,
   stance: Stance,
 ): Promise<CombatStepResult> {
-  if (!(await isEnemyDetailPanelOpen(page))) {
-    const opened = await openEnemiesNearbyPanel(page);
-    if (opened !== 'enemy_selected') {
-      const { buttons, enemies } = await collectEnemyTiles(page);
-      const picked = pickBattleEnemy(enemies);
-      const targetIndex = picked?.index ?? enemyIndex;
-      if (buttons.length <= targetIndex) {
-        return 'failed';
+  const tiles = await collectEnemyTiles(page);
+  let ordered = battleTargetsInOrder(tiles.enemies);
+  if (ordered.length === 0 && tiles.buttons.length > enemyIndex) {
+    ordered = [{ name: 'Enemy', index: enemyIndex }];
+  }
+
+  if (ordered.length === 0 && (await isEnemyDetailPanelOpen(page))) {
+    const name = (await readEnemyNameFromDetailPanel(page)) ?? 'Enemy';
+    const only = await prepareAndBattleOpenModal(page, name, maxEnemies, stance);
+    return only === 'started' ? 'battle_started' : 'failed';
+  }
+  if (ordered.length === 0) return 'failed';
+
+  for (let i = 0; i < ordered.length; i++) {
+    const target = ordered[i];
+    const tile = tiles.buttons[target.index];
+    if (!tile) continue;
+
+    if (await isEnemyDetailPanelOpen(page)) {
+      await closeBattleEntityModal(page);
+    }
+    console.log(`[combat] opening enemy tile: ${target.name}`);
+    await clickEnemyTile(page, tile);
+    if (!(await isEnemyDetailPanelOpen(page))) {
+      console.log(`[combat] enemy tile did not open battle modal: ${target.name}`);
+      if (i < ordered.length - 1) {
+        console.log(`[combat] trying next enemy tile: ${ordered[i + 1].name}`);
       }
-      const tile = buttons[targetIndex];
-      await tile.scrollIntoViewIfNeeded().catch(() => undefined);
-      await tile.click({ timeout: 5000 }).catch(async () => {
-        await tile.click({ force: true, timeout: 5000 }).catch(() => undefined);
-      });
-      await page
-        .getByText(/^STANCE$/i)
-        .or(page.locator('[x-data*="show-battle-entity"]'))
-        .first()
-        .waitFor({ state: 'visible', timeout: COMBAT_UI_SETTLE_MS })
-        .catch(() => undefined);
+      continue;
+    }
+
+    const result = await prepareAndBattleOpenModal(page, target.name, maxEnemies, stance);
+    if (result === 'started') return 'battle_started';
+    if (i < ordered.length - 1) {
+      console.log(`[combat] trying next enemy tile: ${ordered[i + 1].name}`);
+      await closeBattleEntityModal(page);
     }
   }
 
-  if (!(await isEnemyDetailPanelOpen(page))) {
-    return 'failed';
-  }
-
-  // Live order: food, then Max on the ENEMIES row, then Battle.
-  // An empty picker does not abort the fight — cooking is decided before the hunt.
-  await selectBattleFood(page);
-  await setMaxEnemies(page, maxEnemies);
-  await setStance(page, stance);
-
-  const battleBtn = await visibleBattleButton(page);
-  if (!battleBtn) return 'failed';
-  await battleBtn.scrollIntoViewIfNeeded().catch(() => undefined);
-  await battleBtn.click({ timeout: 5000 });
-
-  // Only credit battle_started after Run Away / in-fight UI appears.
-  // Live bug: Battle click can no-op while ENEMIES NEARBY stays up.
-  if (await waitForFightStarted(page)) {
-    return 'battle_started';
-  }
-  console.log('[combat] Battle click did not start a fight (no Run Away)');
+  await closeBattleEntityModal(page);
   return 'failed';
 }
 
@@ -1685,12 +2006,8 @@ export async function huntMore(
     await setMaxEnemies(page, Number.MAX_SAFE_INTEGER);
     const battleBtn = await visibleBattleButton(page);
     if (battleBtn) {
-      await battleBtn.scrollIntoViewIfNeeded().catch(() => undefined);
-      await battleBtn.click({ timeout: 5000 }).catch(() => undefined);
-      if (await waitForFightStarted(page)) {
-        return 'battle_started';
-      }
-      console.log('[combat] huntMore Battle click did not start a fight (no Run Away)');
+      const clicked = await clickEnabledBattle(page, 'huntMore');
+      if (clicked === 'started') return 'battle_started';
       return 'failed';
     }
     await dismissBlockingOverlays(page);

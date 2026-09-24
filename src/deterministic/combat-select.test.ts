@@ -580,6 +580,313 @@ describe('ensureHuntActive enemy selection vs Hunt More', () => {
   });
 });
 
+/**
+ * Probe shape: ENEMIES NEARBY counts 2 / 140 / 116 and Hunt More, but no
+ * img[alt=Duck]. A collapsed duck image (no alt) still names Duck from its src.
+ * Character-sheet numbers must not become tiles.
+ */
+const COUNT_BADGES_NO_ALT = `<!DOCTYPE html>
+<html><body>
+  <div id="wrap" style="position:relative;width:980px;height:720px">
+    <div style="position:absolute;top:80px;left:180px;width:160px;height:18px">ENEMIES NEARBY</div>
+    <div id="duck" style="position:absolute;top:120px;left:180px;width:72px;height:72px">
+      <img alt="" src="/enemies/duck.png" style="width:0;height:0" />
+      <span>2</span>
+    </div>
+    <div id="goblin" style="position:absolute;top:120px;left:280px;width:72px;height:72px"><span>140</span></div>
+    <div id="crown" style="position:absolute;top:120px;left:400px;width:72px;height:72px"><span>116</span></div>
+    <button type="button" id="hunt-more" style="position:absolute;top:140px;left:520px">Hunt More</button>
+    <section style="position:absolute;top:80px;left:760px;width:180px">
+      <div>YOUR CHARACTER</div>
+      <div>Combat</div>
+      <div>Lv. 9</div>
+      <div>Attack Power</div>
+      <div id="stat-58" style="width:40px;height:20px">58</div>
+      <div>Agility</div>
+      <div id="stat-2" style="width:40px;height:20px">2</div>
+    </section>
+  </div>
+  <script>
+    document.getElementById('hunt-more').addEventListener('click', () => {
+      document.body.dataset.huntMoreClicks = String(Number(document.body.dataset.huntMoreClicks || '0') + 1);
+    });
+  </script>
+</body></html>`;
+
+/** Active hunt zone pool (40) under ENEMIES NEARBY must not become a selectable tile. */
+const ACTIVE_HUNT_ZONE_POOL = `<!DOCTYPE html>
+<html><body>
+  <button type="button">Stop</button>
+  <div>Hunting</div>
+  <div>Total Enemies Found</div>
+  <div>10</div>
+  <div style="position:absolute;top:200px;left:180px">ENEMIES NEARBY</div>
+  <div style="position:absolute;top:240px;left:180px;width:48px;height:24px">40</div>
+</body></html>`;
+
+const BATTLE_MODAL_SHELL = `
+  <div id="modal" hidden x-data="show-battle-entity">
+    <h2 id="who">Enemy</h2>
+    <div>3 Combat EXP</div>
+    <div>FOOD</div>
+    <div>STANCE</div>
+    <select name="location"><option value="offensive">Offensive (Damage)</option></select>
+    <div>ENEMIES</div>
+    <button type="button" id="enemax">Max</button>
+    <button type="button" id="battle" disabled x-bind:disabled="selected_battle_entity?.status?.is_restrictive || is_processing">Battle</button>
+    <button type="button" id="close">Close</button>
+  </div>`;
+
+function battleModalScript(enableNames: string): string {
+  return `<script>
+    const battle = document.getElementById('battle');
+    const modal = document.getElementById('modal');
+    const enable = new Set(${enableNames});
+    const openEnemy = (name) => {
+      const opened = document.body.dataset.opened ? document.body.dataset.opened.split(',') : [];
+      opened.push(name);
+      document.body.dataset.opened = opened.join(',');
+      document.getElementById('who').textContent = name;
+      if (enable.has(name)) {
+        battle.disabled = false;
+        battle.removeAttribute('disabled');
+      } else {
+        battle.disabled = true;
+        battle.setAttribute('disabled', 'disabled');
+      }
+      modal.hidden = false;
+    };
+    document.querySelectorAll('[data-enemy]').forEach((tile) => {
+      tile.addEventListener('click', () => openEnemy(tile.getAttribute('data-enemy')));
+    });
+    document.getElementById('close').addEventListener('click', () => {
+      modal.hidden = true;
+    });
+    document.getElementById('enemax').addEventListener('click', () => {
+      document.body.dataset.maxClicks = String(Number(document.body.dataset.maxClicks || '0') + 1);
+    });
+    battle.addEventListener('click', () => {
+      if (battle.disabled) {
+        document.body.dataset.clickedDisabled = '1';
+        return;
+      }
+      document.body.dataset.battled = document.getElementById('who').textContent;
+      modal.hidden = true;
+      const flee = document.createElement('button');
+      flee.type = 'button';
+      flee.textContent = 'Run Away';
+      document.body.appendChild(flee);
+    });
+  </script>`;
+}
+
+/** Rabbit is restrictive; Duck is the next tile and can fight. Goblin must not be opened. */
+const BATTLE_SKIPS_RESTRICTIVE = `<!DOCTYPE html>
+<html><body>
+  <div id="wrap" style="position:relative;width:900px;height:640px">
+    <div style="position:absolute;top:80px;left:160px">ENEMIES NEARBY</div>
+    <div role="button" data-enemy="Duck" style="position:absolute;top:120px;left:160px">
+      <img alt="Duck" src="/enemies/duck.png" style="width:72px;height:72px" />
+      <span>2</span>
+    </div>
+    <div role="button" data-enemy="Rabbit" style="position:absolute;top:120px;left:280px">
+      <img alt="Rabbit" src="/enemies/rabbit.png" style="width:72px;height:72px" />
+      <span>8</span>
+    </div>
+    <div role="button" data-enemy="Goblin" style="position:absolute;top:120px;left:400px">
+      <img alt="Goblin" src="/enemies/goblin.png" style="width:72px;height:72px" />
+      <span>140</span>
+    </div>
+    <button type="button" style="position:absolute;top:140px;left:560px">Hunt More</button>
+  </div>
+  ${BATTLE_MODAL_SHELL}
+  ${battleModalScript("['Duck', 'Goblin']")}
+</body></html>`;
+
+/** Battle starts disabled and becomes enabled shortly after Max. */
+const BATTLE_ENABLES_AFTER_MAX = `<!DOCTYPE html>
+<html><body>
+  <div style="position:relative;width:640px;height:480px">
+    <div style="position:absolute;top:40px;left:40px">ENEMIES NEARBY</div>
+    <div role="button" id="tile" data-enemy="Rabbit" style="position:absolute;top:80px;left:40px">
+      <img alt="Rabbit" src="/enemies/rabbit.png" style="width:72px;height:72px" />
+      <span>4</span>
+    </div>
+  </div>
+  ${BATTLE_MODAL_SHELL}
+  <script>
+    const battle = document.getElementById('battle');
+    const modal = document.getElementById('modal');
+    document.getElementById('tile').addEventListener('click', () => {
+      document.getElementById('who').textContent = 'Rabbit';
+      battle.disabled = true;
+      battle.setAttribute('disabled', 'disabled');
+      modal.hidden = false;
+    });
+    document.getElementById('close').addEventListener('click', () => {
+      modal.hidden = true;
+    });
+    document.getElementById('enemax').addEventListener('click', () => {
+      document.body.dataset.maxWhileDisabled = battle.disabled ? '1' : '0';
+      setTimeout(() => {
+        battle.disabled = false;
+        battle.removeAttribute('disabled');
+      }, 400);
+    });
+    battle.addEventListener('click', () => {
+      if (battle.disabled) return;
+      document.body.dataset.battled = 'Rabbit';
+      modal.hidden = true;
+      const flee = document.createElement('button');
+      flee.type = 'button';
+      flee.textContent = 'Run Away';
+      document.body.appendChild(flee);
+    });
+  </script>
+</body></html>`;
+
+/** Single restrictive enemy: Battle never enables. Must return failed, not throw. */
+const BATTLE_STAYS_DISABLED = `<!DOCTYPE html>
+<html><body>
+  <div style="position:relative;width:640px;height:480px">
+    <div style="position:absolute;top:40px;left:40px">ENEMIES NEARBY</div>
+    <div role="button" id="tile" data-enemy="Duck" style="position:absolute;top:80px;left:40px">
+      <img alt="Duck" src="/enemies/duck.png" style="width:72px;height:72px" />
+      <span>2</span>
+    </div>
+  </div>
+  ${BATTLE_MODAL_SHELL}
+  ${battleModalScript('[]')}
+</body></html>`;
+
+/** Count badge with no image still opens the battle modal. */
+const BATTLE_FROM_COUNT_BADGE = `<!DOCTYPE html>
+<html><body>
+  <div style="position:relative;width:640px;height:480px">
+    <div style="position:absolute;top:40px;left:40px;width:140px;height:18px">ENEMIES NEARBY</div>
+    <div id="badge" data-enemy="stack 2" style="position:absolute;top:80px;left:40px;width:72px;height:72px">2</div>
+  </div>
+  ${BATTLE_MODAL_SHELL}
+  ${battleModalScript("['stack 2']")}
+</body></html>`;
+
+async function captureLogs<T>(fn: () => Promise<T>): Promise<{ result: T; logs: string[] }> {
+  const logs: string[] = [];
+  const original = console.log;
+  console.log = (...args: unknown[]) => {
+    logs.push(args.map((part) => String(part)).join(' '));
+    original(...args);
+  };
+  try {
+    return { result: await fn(), logs };
+  } finally {
+    console.log = original;
+  }
+}
+
+describe('enemy count badges without alt images', () => {
+  it('reads stack badges under ENEMIES NEARBY and ignores character stats', async () => {
+    const page = await load(COUNT_BADGES_NO_ALT);
+    try {
+      const state = await readHuntState(page);
+      assert.deepEqual(
+        state.enemies.map((enemy) => enemy.name),
+        ['Duck', 'stack 140', 'stack 116'],
+      );
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('does not treat the active-hunt zone pool as an enemy tile', async () => {
+    const page = await load(ACTIVE_HUNT_ZONE_POOL);
+    try {
+      const state = await readHuntState(page);
+      assert.equal(state.enemies.length, 0);
+      assert.equal(state.totalEnemiesFound, 10);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('prefers count-badge enemies over Hunt More', async () => {
+    await withServedCombatPage(COUNT_BADGES_NO_ALT, async (page, config) => {
+      const result = await ensureHuntActive(page, config, false);
+      assert.equal(result, 'enemy_select_ready');
+      assert.equal(await page.locator('body').getAttribute('data-hunt-more-clicks'), null);
+    });
+  });
+});
+
+describe('disabled Battle button', () => {
+  it('waits for Battle to become enabled after Max', async () => {
+    const page = await load(BATTLE_ENABLES_AFTER_MAX);
+    try {
+      const result = await configureAndBattle(page, 0, 1, 'Offensive');
+      assert.equal(result, 'battle_started');
+      assert.equal(await page.locator('body').getAttribute('data-max-while-disabled'), '1');
+      assert.equal(await page.locator('body').getAttribute('data-battled'), 'Rabbit');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('returns failed when Battle stays disabled instead of throwing', async () => {
+    const prev = process.env.COMBAT_BATTLE_ENABLE_MS;
+    process.env.COMBAT_BATTLE_ENABLE_MS = '700';
+    const page = await load(BATTLE_STAYS_DISABLED);
+    try {
+      const { result, logs } = await captureLogs(() => configureAndBattle(page, 0, 1, 'Offensive'));
+      assert.equal(result, 'failed');
+      assert.equal(await page.locator('body').getAttribute('data-battled'), null);
+      assert.equal(await page.locator('body').getAttribute('data-clicked-disabled'), null);
+      const stayed = logs.find((line) => line.includes('Battle stayed disabled for Duck'));
+      assert.ok(stayed, `expected disabled log, got: ${logs.join(' | ')}`);
+      assert.match(stayed, /bind looks restrictive or processing/);
+      assert.match(stayed, /is_restrictive/);
+      assert.match(stayed, /is_processing/);
+    } finally {
+      if (prev === undefined) delete process.env.COMBAT_BATTLE_ENABLE_MS;
+      else process.env.COMBAT_BATTLE_ENABLE_MS = prev;
+      await page.close();
+    }
+  });
+
+  it('tries the next enemy when the preferred tile leaves Battle disabled', async () => {
+    const prev = process.env.COMBAT_BATTLE_ENABLE_MS;
+    process.env.COMBAT_BATTLE_ENABLE_MS = '700';
+    const page = await load(BATTLE_SKIPS_RESTRICTIVE);
+    try {
+      const { result, logs } = await captureLogs(() => configureAndBattle(page, 0, 1, 'Offensive'));
+      assert.equal(result, 'battle_started');
+      assert.equal(await page.locator('body').getAttribute('data-opened'), 'Rabbit,Duck');
+      assert.equal(await page.locator('body').getAttribute('data-battled'), 'Duck');
+      assert.ok(logs.some((line) => line.includes('Battle stayed disabled for Rabbit')));
+      assert.ok(logs.some((line) => line.includes('trying next enemy tile: Duck')));
+      assert.equal(
+        logs.some((line) => line.includes('opening enemy tile: Goblin')),
+        false,
+      );
+    } finally {
+      if (prev === undefined) delete process.env.COMBAT_BATTLE_ENABLE_MS;
+      else process.env.COMBAT_BATTLE_ENABLE_MS = prev;
+      await page.close();
+    }
+  });
+
+  it('battles a count badge when the tile has no enemy image', async () => {
+    const page = await load(BATTLE_FROM_COUNT_BADGE);
+    try {
+      const result = await configureAndBattle(page, 0, 1, 'Offensive');
+      assert.equal(result, 'battle_started');
+      assert.equal(await page.locator('body').getAttribute('data-opened'), 'stack 2');
+      assert.equal(await page.locator('body').getAttribute('data-battled'), 'stack 2');
+    } finally {
+      await page.close();
+    }
+  });
+});
+
 describe('Stop Hunting confirm', () => {
   it('clicks the dialog Stop button and not Close', async () => {
     const page = await load(STOP_HUNTING_DIALOG);
