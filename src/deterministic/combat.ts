@@ -943,8 +943,36 @@ async function clickHuntMoreWithVerify(
 }
 
 /**
+ * Enemy tiles are ready to battle and this is not the idle Start Hunt screen.
+ * Hunt More can sit under those tiles without starting a hunt — prefer the tiles.
+ */
+async function isEnemySelectPreferable(page: Page): Promise<boolean> {
+  if (!(await hasEnemySelectionReady(page))) return false;
+  return !(await isIdleBattleScreen(page));
+}
+
+/** Button/state probe for a bare ensureHuntActive failure. No page text or secrets. */
+async function logEnsureHuntActiveFailed(page: Page, reason: string): Promise<void> {
+  try {
+    const startHunt = await isButtonVisible(page, 'Start Hunt');
+    const huntMore = await isButtonVisible(page, 'Hunt More');
+    const stop = await isHuntStopVisible(page);
+    const idle = await isIdleBattleScreen(page);
+    const enemySelect = await hasEnemySelectionReady(page);
+    console.log(
+      `[combat] ensureHuntActive failed (${reason}) — startHunt=${startHunt} huntMore=${huntMore} stop=${stop} idle=${idle} enemySelect=${enemySelect}`,
+    );
+  } catch {
+    console.log(`[combat] ensureHuntActive failed (${reason}) — state unread`);
+  }
+}
+
+/**
  * Ensure combat is in a hunt-ready state. Handles fresh Start Hunt, post-hunt Hunt More,
  * active hunts (Stop visible), and leftover enemy-select screens.
+ *
+ * When ENEMIES NEARBY tiles are already on screen, battle them instead of Hunt More.
+ * Hunt More on that screen does not start a hunt and loops failed:failed.
  */
 export async function ensureHuntActive(
   page: Page,
@@ -957,6 +985,7 @@ export async function ensureHuntActive(
   await waitForCombatUiSettled(page);
   const initialVerify = await solveVerifyOrBlock(page, pollMs, verifyBudget);
   if (initialVerify === 'blocked' || initialVerify === 'still_present') {
+    await logEnsureHuntActiveFailed(page, `verify:${initialVerify}`);
     return 'failed';
   }
 
@@ -969,17 +998,35 @@ export async function ensureHuntActive(
   }
 
   if (await isButtonVisible(page, 'Start Hunt')) {
-    return clickStartHuntWithVerify(page, allowInterrupt, pollMs, verifyBudget);
+    const started = await clickStartHuntWithVerify(page, allowInterrupt, pollMs, verifyBudget);
+    if (started === 'failed') {
+      await logEnsureHuntActiveFailed(page, 'start_hunt');
+    }
+    return started;
   }
 
-  if (await isButtonVisible(page, 'Hunt More')) {
-    return clickHuntMoreWithVerify(page, allowInterrupt, pollMs, verifyBudget);
-  }
-
-  if (await hasEnemySelectionReady(page) && !(await isIdleBattleScreen(page))) {
+  if (await isEnemySelectPreferable(page)) {
     return 'enemy_select_ready';
   }
 
+  if (await isButtonVisible(page, 'Hunt More')) {
+    const huntMoreResult = await clickHuntMoreWithVerify(page, allowInterrupt, pollMs, verifyBudget);
+    if (
+      (huntMoreResult === 'failed' || huntMoreResult === 'no_action') &&
+      (await isEnemySelectPreferable(page))
+    ) {
+      console.log(
+        `[combat] Hunt More returned ${huntMoreResult}; enemy selection is ready — using enemy_select_ready`,
+      );
+      return 'enemy_select_ready';
+    }
+    if (huntMoreResult === 'failed') {
+      await logEnsureHuntActiveFailed(page, 'hunt_more');
+    }
+    return huntMoreResult;
+  }
+
+  await logEnsureHuntActiveFailed(page, 'no_controls');
   return 'failed';
 }
 
