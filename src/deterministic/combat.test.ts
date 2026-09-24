@@ -9,6 +9,7 @@ import {
   needsCookBeforeHunt,
   battleTargetsInOrder,
   describeBattleControlDisabled,
+  healFoodRank,
   hasHuntProgress,
   huntingMetricsSection,
   isActiveHuntPanelText,
@@ -310,6 +311,17 @@ Start Hunt
 YOUR CHARACTER`;
     assert.equal(isIdleBattleText(idle), true);
     assert.equal(isIdleBattleText(LIVE_ACTIVE_HUNT_PANEL), false);
+  });
+});
+
+describe('heal food choice', () => {
+  it('prefers tradable Cooked Cod over an Untradable stack', () => {
+    const tradable = healFoodRank('105 Cooked Cod +10 Health');
+    const untradable = healFoodRank('12 Cooked Cod (Untradable) +10 Health');
+    assert.equal(tradable, 0);
+    assert.ok(untradable !== null && tradable !== null && untradable > tradable);
+    assert.equal(healFoodRank('Max Health'), null);
+    assert.equal(healFoodRank('Use'), null);
   });
 });
 

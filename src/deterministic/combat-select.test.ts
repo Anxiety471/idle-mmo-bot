@@ -887,6 +887,295 @@ describe('disabled Battle button', () => {
   });
 });
 
+type LowHealthUse = 'enable' | 'stay_low' | 'close_modal' | 'leave_overlay';
+
+/** Battle modal with the live low-HP Heal → food → Quick Feed path. */
+function lowHealthBattleHtml(options: {
+  enemies: string[];
+  use: LowHealthUse;
+  status?: string;
+  healButton?: boolean;
+  battleDisabled?: boolean;
+}): string {
+  const status = options.status ?? 'CHARACTER_HEALTH_TOO_LOW';
+  const healButton = options.healButton !== false;
+  const battleDisabled = options.battleDisabled !== false;
+  const tiles = options.enemies
+    .map((name, index) => {
+      const left = 160 + index * 120;
+      return `<div role="button" data-enemy="${name}" style="position:absolute;top:120px;left:${left}px">
+      <img alt="${name}" src="/enemies/${name.toLowerCase()}.png" style="width:72px;height:72px" />
+      <span>${index + 2}</span>
+    </div>`;
+    })
+    .join('\n');
+  const disabledAttr = battleDisabled
+    ? 'disabled x-bind:disabled="selected_battle_entity?.status?.is_restrictive || is_processing"'
+    : '';
+  return `<!DOCTYPE html>
+<html><body>
+  <style>
+    .absolute.inset-0.bg-immo { position: fixed; inset: 0; z-index: 2; width: 100vw; height: 100vh; }
+    #quick { position: relative; z-index: 3; }
+  </style>
+  <div id="wrap" style="position:relative;width:900px;height:640px">
+    <div style="position:absolute;top:80px;left:160px">ENEMIES NEARBY</div>
+    ${tiles}
+    <button type="button" style="position:absolute;top:140px;left:560px">Hunt More</button>
+  </div>
+  <div id="modal" hidden x-data="show-battle-entity" data-status-value="${status}">
+    <h2 id="who">Enemy</h2>
+    <div>3 Combat EXP</div>
+    <div id="problem">PROBLEM</div>
+    <div id="health-copy">You do not have enough health. Heal</div>
+    ${healButton ? '<button type="button" id="heal">Heal</button>' : ''}
+    <div>FOOD</div>
+    <div>STANCE</div>
+    <select name="location"><option value="offensive">Offensive (Damage)</option></select>
+    <div>ENEMIES</div>
+    <button type="button" id="enemax">Max</button>
+    <button type="button" id="battle" ${disabledAttr}>Battle</button>
+    <button type="button" id="close">Close</button>
+  </div>
+  <div id="picker" hidden x-data="food-for-battle">
+    <div>Food</div>
+    <button type="button" id="untradable">12 Cooked Cod (Untradable) +10 Health</button>
+    <button type="button" id="cod">105 Cooked Cod +10 Health</button>
+  </div>
+  <div id="quick" hidden x-data="quick_view_food">
+    <input id="quantity" name="quantity" value="1" />
+    <a href="#max-health" id="max-health">Max Health</a>
+    <button type="button" id="use">Use</button>
+    <button type="button" id="quick-close">Close</button>
+  </div>
+  <div id="dim" class="absolute inset-0 bg-immo" hidden></div>
+  <script>
+    window.Alpine = {
+      $data(el) {
+        const value = el.getAttribute('data-status-value');
+        if (!value) return {};
+        return { selected_battle_entity: { status: { value: value, is_restrictive: value !== 'AVAILABLE' } } };
+      }
+    };
+    const order = [];
+    const note = (step) => {
+      order.push(step);
+      document.body.dataset.order = order.join(',');
+    };
+    const battle = document.getElementById('battle');
+    const modal = document.getElementById('modal');
+    const markReady = () => {
+      modal.setAttribute('data-status-value', 'AVAILABLE');
+      const problem = document.getElementById('problem');
+      const copy = document.getElementById('health-copy');
+      const heal = document.getElementById('heal');
+      if (problem) problem.remove();
+      if (copy) copy.remove();
+      if (heal) heal.remove();
+      battle.disabled = false;
+      battle.removeAttribute('disabled');
+    };
+    document.querySelectorAll('[data-enemy]').forEach((tile) => {
+      tile.addEventListener('click', () => {
+        const name = tile.getAttribute('data-enemy');
+        const opened = document.body.dataset.opened ? document.body.dataset.opened.split(',') : [];
+        opened.push(name);
+        document.body.dataset.opened = opened.join(',');
+        document.getElementById('who').textContent = name;
+        modal.hidden = false;
+      });
+    });
+    const heal = document.getElementById('heal');
+    if (heal) {
+      heal.addEventListener('click', () => {
+        note('heal');
+        document.getElementById('picker').hidden = false;
+      });
+    }
+    document.getElementById('untradable').addEventListener('click', () => note('untradable'));
+    document.getElementById('cod').addEventListener('click', () => {
+      note('cod');
+      document.getElementById('picker').hidden = true;
+      document.getElementById('quick').hidden = false;
+      document.getElementById('dim').hidden = false;
+    });
+    document.getElementById('max-health').addEventListener('click', (event) => {
+      event.preventDefault();
+      note('maxHealth');
+      document.getElementById('quantity').value = '99';
+    });
+    document.getElementById('use').addEventListener('click', () => {
+      note('use');
+      const mode = ${JSON.stringify(options.use)};
+      if (mode === 'leave_overlay') {
+        document.getElementById('quick').hidden = true;
+        markReady();
+        return;
+      }
+      document.getElementById('quick').hidden = true;
+      document.getElementById('dim').hidden = true;
+      if (mode === 'close_modal') {
+        markReady();
+        modal.hidden = true;
+        return;
+      }
+      if (mode === 'enable') markReady();
+    });
+    document.getElementById('quick-close').addEventListener('click', () => {
+      note('dismiss');
+      document.getElementById('quick').hidden = true;
+      document.getElementById('dim').hidden = true;
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      if (!document.getElementById('dim').hidden) {
+        note('escape');
+        document.getElementById('dim').hidden = true;
+      }
+    });
+    document.getElementById('close').addEventListener('click', () => {
+      modal.hidden = true;
+    });
+    document.getElementById('enemax').addEventListener('click', () => note('max'));
+    battle.addEventListener('click', () => {
+      const dim = document.getElementById('dim');
+      const quick = document.getElementById('quick');
+      if ((dim && !dim.hidden) || (quick && !quick.hidden)) {
+        document.body.dataset.overlayBlocked = '1';
+        return;
+      }
+      if (battle.disabled) {
+        document.body.dataset.clickedDisabled = '1';
+        return;
+      }
+      note('battle');
+      document.body.dataset.battled = document.getElementById('who').textContent;
+      modal.hidden = true;
+      const flee = document.createElement('button');
+      flee.type = 'button';
+      flee.textContent = 'Run Away';
+      document.body.appendChild(flee);
+    });
+  </script>
+</body></html>`;
+}
+
+describe('heal before battle when health is too low', () => {
+  it('feeds tradable Cooked Cod, Max Health, Use, then Battle', async () => {
+    const page = await load(lowHealthBattleHtml({ enemies: ['Duck'], use: 'enable' }));
+    try {
+      const { result, logs } = await captureLogs(() => configureAndBattle(page, 0, 1, 'Offensive'));
+      assert.equal(result, 'battle_started');
+      assert.equal(await page.locator('body').getAttribute('data-battled'), 'Duck');
+      assert.equal(await page.locator('#quantity').inputValue(), '99');
+      assert.equal(
+        await page.locator('body').getAttribute('data-order'),
+        'heal,cod,maxHealth,use,max,battle',
+      );
+      assert.equal(await page.locator('body').getAttribute('data-overlay-blocked'), null);
+      assert.ok(logs.some((line) => line.includes('battle status CHARACTER_HEALTH_TOO_LOW')));
+      assert.ok(logs.some((line) => line.includes('feeding 105 Cooked Cod +10 Health')));
+      assert.equal(logs.some((line) => line.includes('Untradable')), false);
+      assert.equal(logs.some((line) => line.includes('selected_battle_entity')), false);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('does not feed when battle status is already AVAILABLE', async () => {
+    const page = await load(
+      lowHealthBattleHtml({
+        enemies: ['Duck'],
+        use: 'enable',
+        status: 'AVAILABLE',
+        battleDisabled: false,
+      }),
+    );
+    try {
+      const { result, logs } = await captureLogs(() => configureAndBattle(page, 0, 1, 'Offensive'));
+      assert.equal(result, 'battle_started');
+      assert.equal(await page.locator('body').getAttribute('data-order'), 'max,battle');
+      assert.equal(logs.some((line) => line.includes('feeding')), false);
+      assert.equal(logs.some((line) => line.includes('battle status')), false);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('dismisses the quick-feed overlay with Escape after Use', async () => {
+    const page = await load(lowHealthBattleHtml({ enemies: ['Duck'], use: 'leave_overlay' }));
+    try {
+      const result = await configureAndBattle(page, 0, 1, 'Offensive');
+      assert.equal(result, 'battle_started');
+      assert.equal(await page.locator('#dim').isHidden(), true);
+      assert.equal(await page.locator('body').getAttribute('data-overlay-blocked'), null);
+      const order = await page.locator('body').getAttribute('data-order');
+      assert.match(order ?? '', /heal,cod,maxHealth,use,escape,max,battle/);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('re-opens the enemy tile when feeding closes the battle modal', async () => {
+    const page = await load(lowHealthBattleHtml({ enemies: ['Duck'], use: 'close_modal' }));
+    try {
+      const { result, logs } = await captureLogs(() => configureAndBattle(page, 0, 1, 'Offensive'));
+      assert.equal(result, 'battle_started');
+      assert.equal(await page.locator('body').getAttribute('data-opened'), 'Duck,Duck');
+      assert.ok(logs.some((line) => line.includes('re-opening enemy tile after heal: Duck')));
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('returns health_too_low and does not walk other enemy tiles', async () => {
+    const prev = process.env.COMBAT_BATTLE_ENABLE_MS;
+    process.env.COMBAT_BATTLE_ENABLE_MS = '700';
+    const page = await load(
+      lowHealthBattleHtml({ enemies: ['Duck', 'Goblin'], use: 'stay_low' }),
+    );
+    try {
+      const { result, logs } = await captureLogs(() => configureAndBattle(page, 0, 1, 'Offensive'));
+      assert.equal(result, 'health_too_low');
+      assert.equal(await page.locator('body').getAttribute('data-opened'), 'Duck');
+      assert.equal(await page.locator('body').getAttribute('data-battled'), null);
+      const order = await page.locator('body').getAttribute('data-order');
+      assert.equal(order?.match(/use/g)?.length, 3);
+      assert.ok(logs.some((line) => line.includes('health_too_low after heal retries')));
+      assert.ok(logs.some((line) => line.includes('not walking other enemy tiles')));
+      assert.equal(logs.some((line) => line.includes('Goblin')), false);
+    } finally {
+      if (prev === undefined) delete process.env.COMBAT_BATTLE_ENABLE_MS;
+      else process.env.COMBAT_BATTLE_ENABLE_MS = prev;
+      await page.close();
+    }
+  });
+
+  it('returns heal_failed when the Heal control is missing', async () => {
+    const prev = process.env.COMBAT_BATTLE_ENABLE_MS;
+    process.env.COMBAT_BATTLE_ENABLE_MS = '700';
+    const page = await load(
+      lowHealthBattleHtml({
+        enemies: ['Duck', 'Goblin'],
+        use: 'stay_low',
+        healButton: false,
+      }),
+    );
+    try {
+      const { result, logs } = await captureLogs(() => configureAndBattle(page, 0, 1, 'Offensive'));
+      assert.equal(result, 'heal_failed');
+      assert.equal(await page.locator('body').getAttribute('data-opened'), 'Duck');
+      assert.equal(logs.some((line) => line.includes('Heal control missing')), true);
+      assert.equal(logs.some((line) => line.includes('selected_battle_entity')), false);
+      assert.equal(logs.some((line) => /token|api[_-]?key/i.test(line)), false);
+    } finally {
+      if (prev === undefined) delete process.env.COMBAT_BATTLE_ENABLE_MS;
+      else process.env.COMBAT_BATTLE_ENABLE_MS = prev;
+      await page.close();
+    }
+  });
+});
+
 describe('Stop Hunting confirm', () => {
   it('clicks the dialog Stop button and not Close', async () => {
     const page = await load(STOP_HUNTING_DIALOG);

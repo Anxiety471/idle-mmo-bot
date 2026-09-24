@@ -103,6 +103,8 @@ export type CombatStepResult =
   | 'fled'
   | 'hunt_more_clicked'
   | 'no_action'
+  | 'health_too_low'
+  | 'heal_failed'
   | 'failed';
 
 export type QuestStepResult =
