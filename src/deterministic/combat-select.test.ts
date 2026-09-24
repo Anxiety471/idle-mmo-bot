@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { after, before, describe, it } from 'node:test';
 import { chromium, type Browser, type Page } from 'playwright';
+import type { AppConfig } from '../config.js';
 import {
   configureAndBattle,
+  ensureHuntActive,
   huntMore,
   pickBattleEnemy,
   prepareEnemyBattleSelection,
@@ -368,6 +371,214 @@ const STOP_OPENS_CONFIRM = `<!DOCTYPE html>
     });
   </script>
 </body></html>`;
+
+/**
+ * Live freeze: ENEMIES NEARBY icon tiles (Duck / Goblin / King Goblin) already
+ * on screen with Hunt More underneath. No Start Hunt, no Stop, not in battle.
+ */
+const ENEMIES_READY_AND_HUNT_MORE = `<!DOCTYPE html>
+<html><body>
+  <div id="wrap" style="position:relative;width:900px;height:640px">
+    <div style="position:absolute;top:240px;left:160px">ENEMIES NEARBY</div>
+    <div role="button" id="duck" style="position:absolute;top:300px;left:160px">
+      <img alt="Duck" src="/enemies/duck.png" style="width:72px;height:72px" />
+      <span>2</span>
+    </div>
+    <div role="button" id="goblin" style="position:absolute;top:300px;left:280px">
+      <img alt="Goblin" src="/enemies/goblin.png" style="width:72px;height:72px" />
+      <span>140</span>
+    </div>
+    <div role="button" id="king" style="position:absolute;top:300px;left:400px">
+      <img alt="King Goblin" src="/enemies/king-goblin.png" style="width:72px;height:72px" />
+      <span>116</span>
+    </div>
+    <button type="button" id="hunt-more" style="position:absolute;top:400px;left:520px">Hunt More</button>
+  </div>
+  <script>
+    document.getElementById('hunt-more').addEventListener('click', () => {
+      const n = Number(document.body.dataset.huntMoreClicks || '0') + 1;
+      document.body.dataset.huntMoreClicks = String(n);
+    });
+  </script>
+</body></html>`;
+
+/** Hunt More alone — no enemy tiles. Click must still go through the Hunt More path. */
+const HUNT_MORE_ONLY = `<!DOCTYPE html>
+<html><body>
+  <button type="button" id="hunt-more">Hunt More</button>
+  <script>
+    document.getElementById('hunt-more').addEventListener('click', () => {
+      const n = Number(document.body.dataset.huntMoreClicks || '0') + 1;
+      document.body.dataset.huntMoreClicks = String(n);
+    });
+  </script>
+</body></html>`;
+
+/**
+ * Tiles appear only after Hunt More is clicked, and the click does not start a hunt.
+ * Defense in depth should fall back to enemy_select_ready.
+ */
+const HUNT_MORE_REVEALS_TILES = `<!DOCTYPE html>
+<html><body>
+  <div id="wrap" style="position:relative;width:900px;height:640px">
+    <div id="nearby" hidden>
+      <div style="position:absolute;top:240px;left:160px">ENEMIES NEARBY</div>
+      <div role="button" id="duck" style="position:absolute;top:300px;left:160px">
+        <img alt="Duck" src="/enemies/duck.png" style="width:72px;height:72px" />
+        <span>2</span>
+      </div>
+    </div>
+    <button type="button" id="hunt-more" style="position:absolute;top:400px;left:520px">Hunt More</button>
+  </div>
+  <script>
+    document.getElementById('hunt-more').addEventListener('click', () => {
+      const n = Number(document.body.dataset.huntMoreClicks || '0') + 1;
+      document.body.dataset.huntMoreClicks = String(n);
+      document.getElementById('nearby').hidden = false;
+    });
+  </script>
+</body></html>`;
+
+/** Idle Battle screen: Start Hunt stays first even if Hunt More is also present. */
+const IDLE_START_HUNT = `<!DOCTYPE html>
+<html><body>
+  <p>Start a hunt to find nearby enemies</p>
+  <button type="button" id="start">Start Hunt</button>
+  <button type="button" id="hunt-more">Hunt More</button>
+  <script>
+    document.getElementById('hunt-more').addEventListener('click', () => {
+      const n = Number(document.body.dataset.huntMoreClicks || '0') + 1;
+      document.body.dataset.huntMoreClicks = String(n);
+    });
+    document.getElementById('start').addEventListener('click', () => {
+      document.body.dataset.startHuntClicks = '1';
+      document.getElementById('start').remove();
+      const stop = document.createElement('button');
+      stop.type = 'button';
+      stop.textContent = 'Stop';
+      document.body.appendChild(stop);
+      const hunting = document.createElement('div');
+      hunting.textContent = 'Hunting';
+      document.body.appendChild(hunting);
+      const found = document.createElement('div');
+      found.textContent = 'Total Enemies Found';
+      document.body.appendChild(found);
+    });
+  </script>
+</body></html>`;
+
+function testConfig(baseUrl: string): AppConfig {
+  return {
+    baseUrl,
+    pollMs: 2000,
+    headless: true,
+    storageStatePath: undefined,
+    buyBait: false,
+    forceInterrupt: false,
+    sellGoldThreshold: 800,
+    characterName: undefined,
+    accountSlug: undefined,
+  };
+}
+
+async function serveHtml(html: string): Promise<{ baseUrl: string; close: () => Promise<void> }> {
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(html);
+  });
+  await new Promise<void>((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve());
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('combat test server failed to bind');
+  }
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    close: () =>
+      new Promise((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      }),
+  };
+}
+
+async function withServedCombatPage(
+  html: string,
+  fn: (page: Page, config: AppConfig, logs: string[]) => Promise<void>,
+): Promise<void> {
+  const served = await serveHtml(html);
+  const page = await browser.newPage();
+  const logs: string[] = [];
+  const original = console.log;
+  console.log = (...args: unknown[]) => {
+    logs.push(args.map((part) => String(part)).join(' '));
+    original(...args);
+  };
+  try {
+    await fn(page, testConfig(served.baseUrl), logs);
+  } finally {
+    console.log = original;
+    await page.close();
+    await served.close();
+  }
+}
+
+describe('ensureHuntActive enemy selection vs Hunt More', () => {
+  it('returns enemy_select_ready for ENEMIES NEARBY tiles without clicking Hunt More', async () => {
+    await withServedCombatPage(ENEMIES_READY_AND_HUNT_MORE, async (page, config, logs) => {
+      const result = await ensureHuntActive(page, config, false);
+      assert.equal(result, 'enemy_select_ready');
+      assert.equal(await page.locator('body').getAttribute('data-hunt-more-clicks'), null);
+      assert.equal(
+        logs.some((line) => line.includes('Hunt More returned')),
+        false,
+      );
+    });
+  });
+
+  it('still clicks Hunt More when no enemy tiles are ready', async () => {
+    await withServedCombatPage(HUNT_MORE_ONLY, async (page, config, logs) => {
+      const result = await ensureHuntActive(page, config, false);
+      assert.equal(result, 'failed');
+      assert.equal(await page.locator('body').getAttribute('data-hunt-more-clicks'), '1');
+      assert.ok(
+        logs.some((line) => line.includes('ensureHuntActive failed (hunt_more)')),
+        `expected hunt_more failure log, got: ${logs.join(' | ')}`,
+      );
+      assert.ok(
+        logs.some((line) => line.includes('huntMore=true') && line.includes('enemySelect=false')),
+        `expected button probe, got: ${logs.join(' | ')}`,
+      );
+    });
+  });
+
+  it('keeps Start Hunt first on the idle battle screen', async () => {
+    await withServedCombatPage(IDLE_START_HUNT, async (page, config, logs) => {
+      const result = await ensureHuntActive(page, config, false);
+      assert.equal(result, 'hunt_started');
+      assert.equal(await page.locator('body').getAttribute('data-start-hunt-clicks'), '1');
+      assert.equal(await page.locator('body').getAttribute('data-hunt-more-clicks'), null);
+      assert.equal(
+        logs.some((line) => line.includes('ensureHuntActive failed')),
+        false,
+      );
+    });
+  });
+
+  it('falls back to enemy_select_ready when Hunt More fails and tiles are ready', async () => {
+    await withServedCombatPage(HUNT_MORE_REVEALS_TILES, async (page, config, logs) => {
+      const result = await ensureHuntActive(page, config, false);
+      assert.equal(result, 'enemy_select_ready');
+      assert.equal(await page.locator('body').getAttribute('data-hunt-more-clicks'), '1');
+      assert.ok(
+        logs.some((line) =>
+          line.includes('Hunt More returned failed; enemy selection is ready — using enemy_select_ready'),
+        ),
+        `expected fallback log, got: ${logs.join(' | ')}`,
+      );
+    });
+  });
+});
 
 describe('Stop Hunting confirm', () => {
   it('clicks the dialog Stop button and not Close', async () => {
