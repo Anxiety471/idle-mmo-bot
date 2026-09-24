@@ -7,6 +7,7 @@ import {
   configureAndBattle,
   ensureHuntActive,
   huntMore,
+  takeCookedCodSpentOnHeal,
   pickBattleEnemy,
   prepareEnemyBattleSelection,
   readHuntState,
@@ -1077,6 +1078,7 @@ describe('heal before battle when health is too low', () => {
       assert.ok(logs.some((line) => line.includes('feeding 105 Cooked Cod +10 Health')));
       assert.equal(logs.some((line) => line.includes('Untradable')), false);
       assert.equal(logs.some((line) => line.includes('selected_battle_entity')), false);
+      assert.equal(takeCookedCodSpentOnHeal(), 99);
     } finally {
       await page.close();
     }
@@ -1143,6 +1145,7 @@ describe('heal before battle when health is too low', () => {
       assert.equal(order?.match(/use/g)?.length, 3);
       assert.ok(logs.some((line) => line.includes('health_too_low after heal retries')));
       assert.ok(logs.some((line) => line.includes('not walking other enemy tiles')));
+      assert.equal(takeCookedCodSpentOnHeal(), 99 * 3);
       assert.equal(logs.some((line) => line.includes('Goblin')), false);
     } finally {
       if (prev === undefined) delete process.env.COMBAT_BATTLE_ENABLE_MS;

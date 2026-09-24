@@ -4,6 +4,7 @@ import {
   enemyNameFromDetailText,
   enemyNameFromImageSrc,
   cookedCodCount,
+  inventoryAfterCookedCodSpend,
   inventoryCanCookBattleFood,
   inventoryHasBattleFood,
   needsCookBeforeHunt,
@@ -338,6 +339,19 @@ describe('inventory battle food', () => {
     assert.equal(inventoryCanCookBattleFood({ 'Raw Cod': 2, Coal: 3 }), true);
     assert.equal(inventoryCanCookBattleFood({ Cod: 4 }), false);
     assert.equal(inventoryCanCookBattleFood({ 'Cooked Cod': 5 }), false);
+  });
+
+  it('treats a heal spend as crossing the cook gate without mutating the bag', () => {
+    const bag = { 'Cooked Cod': 100, 'Cooked Cod (Untradable)': 5, Cod: 20, 'Coal Ore': 20 };
+    assert.equal(needsCookBeforeHunt(bag, 100), false);
+    const after = inventoryAfterCookedCodSpend(bag, 10);
+    assert.ok(after);
+    assert.equal(after['Cooked Cod'], 90);
+    assert.equal(after['Cooked Cod (Untradable)'], 5);
+    assert.equal(bag['Cooked Cod'], 100);
+    assert.equal(needsCookBeforeHunt(after, 100), true);
+    assert.equal(cookedCodCount(after), 95);
+    assert.equal(inventoryAfterCookedCodSpend(bag, 0), bag);
   });
 
   it('cooks before hunt when Cooked Cod is empty or under the target', () => {

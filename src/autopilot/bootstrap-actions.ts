@@ -11,7 +11,10 @@ import {
   waitForEnemies,
   hasHuntProgress,
   hasPostHuntEnemySelectionReady,
+  cookedCodCount,
+  inventoryAfterCookedCodSpend,
   needsCookBeforeHunt,
+  takeCookedCodSpentOnHeal,
   isHuntActivelyRunning,
   pickBattleEnemy,
   prepareEnemyBattleSelection,
@@ -232,9 +235,18 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
   }
 
   // Do not start a fresh hunt when bag food is below the cook gate — that orphans
-  // hunting while the supervisor leaves combat to cook.
-  if (needsCookBeforeHunt(ctx.snapshot.inventory, cookTarget)) {
+  // hunting while the supervisor leaves combat to cook. Heal → Use spends Cooked
+  // Cod after the snapshot was taken, so apply that spend before the same check.
+  const cookedSpent = takeCookedCodSpentOnHeal();
+  const inventoryForCookGate = inventoryAfterCookedCodSpend(ctx.snapshot.inventory, cookedSpent);
+  if (needsCookBeforeHunt(inventoryForCookGate, cookTarget)) {
     console.log('[combat] skipping Hunt More — Cooked Cod below cook target');
+    if (cookedSpent > 0) {
+      const cooked = cookedCodCount(inventoryForCookGate);
+      console.log(
+        `[combat] heal spent ${cookedSpent} Cooked Cod — bag ${cooked}/${cookTarget}`,
+      );
+    }
     return combatRoundOutcome(`battle:${battleResult}:huntMore:skipped_cook_gate`, config);
   }
 

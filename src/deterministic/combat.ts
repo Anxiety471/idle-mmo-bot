@@ -1594,6 +1594,49 @@ export function needsCookBeforeHunt(
   return cookedCodCount(inventory) < target;
 }
 
+/**
+ * Bag after a Heal → Use spend. Plain Cooked Cod is used first.
+ * Does not mutate the snapshot inventory.
+ */
+export function inventoryAfterCookedCodSpend(
+  inventory: Record<string, number> | null | undefined,
+  spent: number,
+): Record<string, number> | null | undefined {
+  if (!inventory || !Number.isFinite(spent) || spent <= 0) return inventory;
+  const next: Record<string, number> = { ...inventory };
+  let remaining = Math.floor(spent);
+  const keys = Object.keys(next)
+    .filter((key) => /cooked\s*cod/i.test(key))
+    .sort((a, b) => {
+      const aPlain = /^cooked\s*cod$/i.test(a.trim()) ? 0 : 1;
+      const bPlain = /^cooked\s*cod$/i.test(b.trim()) ? 0 : 1;
+      return aPlain - bPlain;
+    });
+  for (const key of keys) {
+    if (remaining <= 0) break;
+    const have = next[key] ?? 0;
+    if (have <= 0) continue;
+    const take = Math.min(have, remaining);
+    next[key] = have - take;
+    remaining -= take;
+  }
+  return next;
+}
+
+/** Cooked Cod fed by Heal since the last configureAndBattle. */
+let cookedCodSpentOnHeal = 0;
+
+export function takeCookedCodSpentOnHeal(): number {
+  const spent = cookedCodSpentOnHeal;
+  cookedCodSpentOnHeal = 0;
+  return spent;
+}
+
+function noteCookedCodSpent(amount: number): void {
+  if (!Number.isFinite(amount) || amount <= 0) return;
+  cookedCodSpentOnHeal += Math.floor(amount);
+}
+
 async function buttonMatchesFoodLabel(btn: Locator, label: string): Promise<boolean> {
   const needle = label.toLowerCase();
   const bits = [
@@ -1990,13 +2033,25 @@ async function feedCharacterOnce(page: Page): Promise<FeedCycleResult> {
     console.log('[combat] Max Health clicked');
     await page.waitForTimeout(200);
   }
+  const feedQty = await readQuickFeedQuantity(quickScope);
   if (!(await clickNamedControl(quickScope, /^Use$/i))) {
     console.log('[combat] Quick Feed missing Use');
     await dismissQuickFeedOverlay(page);
     return 'no_use';
   }
+  noteCookedCodSpent(feedQty);
   await dismissQuickFeedOverlay(page);
   return 'fed';
+}
+
+async function readQuickFeedQuantity(scope: Locator): Promise<number> {
+  const input = scope.locator('input#quantity, input[name="quantity"]');
+  const visible = await firstVisible(input);
+  const target = visible ?? ((await input.count()) > 0 ? input.first() : null);
+  if (!target) return 1;
+  const raw = await target.inputValue().catch(() => '');
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
 }
 
 /**
@@ -2193,6 +2248,7 @@ export async function configureAndBattle(
   maxEnemies: number,
   stance: Stance,
 ): Promise<CombatStepResult> {
+  cookedCodSpentOnHeal = 0;
   const tiles = await collectEnemyTiles(page);
   let ordered = battleTargetsInOrder(tiles.enemies);
   if (ordered.length === 0 && tiles.buttons.length > enemyIndex) {
