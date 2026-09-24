@@ -36,9 +36,6 @@ Set `STORAGE_STATE=./storage-state.json` in `.env`. This file is gitignored — 
 | `STORAGE_STATE` | _(unset)_ | Path to saved session JSON |
 | `BUY_BAIT` | `false` | Auto-buy Cheap Bait when fishing (off by default) |
 | `FORCE_INTERRUPT` | `false` | Click Start anyway on replace dialog for combat |
-| `JEV_API_TOKEN` | _(unset)_ | TypeSafe API key for **HttpJev** (alias: `TYPESAFE_API_KEY`) |
-| `JEV_MODEL` | `jev-latest` | Jev model sent to TypeSafe System One API |
-| `JEV_NOUL_THRESHOLD` | `0.6` | Noul yes threshold for interrupt / flee |
 | `HUNT_FOUND_CAP` | `100` | Stop hunting and battle when **Total Enemies Found** reaches this count |
 | `IDLE_MMO_API_KEY` | _(unset)_ | Optional Public API key. Enables read-only `/v1` snapshot data. Never commit it. |
 | `IDLE_MMO_API_BASE` | `https://api.idle-mmo.com` | Public API origin (`https://host`, no path). Override only if the in-game docs show a different host. |
@@ -115,7 +112,7 @@ npm run farm-hearth
 
 1. Build structured **GameSnapshot** (location, levels, gold, inventory, quests, combat phase). When `IDLE_MMO_API_KEY` is set, documented character information and current action overlay gold, levels, location, and gather state. Inventory (Cooked Cod, bait, and other stacks) stays on the Playwright scrape. See [docs/IDLE_MMO_PUBLIC_API.md](docs/IDLE_MMO_PUBLIC_API.md).
 2. Derive **allowed actions** (gather, hunt, quest, craft, sell junk, …)
-3. **Jev** chooses one action (`HttpJev` when `JEV_API_TOKEN` set, else **ProgressiveStubJev**)
+3. **Jev** chooses one action (**ProgressiveStubJev** only — deterministic; TypeSafe/HttpJev removed from the live path)
 4. Execute **one** deterministic action, sleep, repeat
 
 Soft goals: keep skills training, advance combat for kill quests, accept/turn-in quests, rotate gather skills, smelt when coal stocked, sell configured junk only.
@@ -123,7 +120,6 @@ Soft goals: keep skills training, advance combat for kill quests, accept/turn-in
 The **bootstrap action list** (gather, hunt, quest, …) is a starting set — not a hard cap. As the bot explores Idle MMO, unregistered UI features are logged (`[autopilot:discover]`) and new loops are added via `registerDiscoveredAction()` + snapshot enrichers. An overseer agent can supervise logs; multi-bot parties are a future extension on the same per-account hooks.
 
 ```bash
-export JEV_API_TOKEN=your-key
 export STORAGE_STATE=./storage-state.json
 npm run autopilot
 
@@ -140,7 +136,7 @@ Each supervisor tick and Jev call appends one JSON line to gitignored files unde
 | File | Contents |
 |------|----------|
 | `decisions.jsonl` | Per tick: timestamp, cycle, snapshot fields (location, gold, levels, inventory, quests, flags, discovered routes), allowed actions, chosen action, execute outcome, backoffMs |
-| `jev.jsonl` | Per Jev call: method, model, usage, full answer (choice/noul/score + confidence/probabilities), result, fallback flag + error when API fails |
+| `jev.jsonl` | Per ProgressiveStubJev call: method, result, provider (deterministic) |
 
 `pageText` and secrets (API tokens, cookies, storage-state) are never written. Console logs are unchanged.
 
@@ -168,33 +164,24 @@ Combat uses `ensureHuntActive`: **Start Hunt** if idle, **Hunt More** if post-hu
 
 If a gather action is running, **Start Hunt** shows the replace dialog. With default Jev (no interrupt), the bot closes the dialog, logs clearly, and backs off 30s+ instead of spinning forever. Use `--interrupt` to click **Start anyway**.
 
-Add `-v` / `--verbose` to any command to log every Jev decision (wraps HttpJev or StubJev):
+Add `-v` / `--verbose` to any command to log every Jev decision (wraps ProgressiveStubJev):
 
 ```bash
 npm run gather -- -v
 ```
 
-### Jev (TypeSafe API)
+### Jev (deterministic ProgressiveStubJev)
 
-When `JEV_API_TOKEN` or `TYPESAFE_API_KEY` is set, the CLI uses **HttpJev** — a real advisor that calls `POST https://api.typesafe.ai/v1/systemone` with structured JSON state (no screenshots). Without a token, **StubJev** provides conservative defaults.
+Autopilot and CLI always use **ProgressiveStubJev** (via `LoggingJev` / optional `ConsoleJev`). TypeSafe **HttpJev** is removed from the live path — `JEV_API_TOKEN` / `TYPESAFE_API_KEY` are ignored if set. `HttpJev` source remains under `src/jev/` for unit tests only.
 
-| Advisor method | TypeSafe question | Decision rule |
-|----------------|-------------------|---------------|
-| `shouldInterruptGather` | noul | `true` when noul ≥ `JEV_NOUL_THRESHOLD` |
-| `decideHuntStop` | noul | `true` only when Total Enemies Found ≥ cap (default 100) |
-| `chooseStance` | choice | Balanced / Offensive / Defensive / Agile / Dexterous |
-| `chooseMaxEnemies` | score | 1–5 enemies from ordered rubric |
-| `shouldFlee` | noul | `true` when noul ≥ threshold |
-| `pickQuestPriority` | choice | quest title or `keep_gathering` (empty list) |
-
-On API failure, HttpJev logs the error and falls back to StubJev behavior.
-
-Smoke-test the API without launching the browser:
-
-```bash
-export JEV_API_TOKEN=your-key
-npm run jev-smoke
-```
+| Advisor method | ProgressiveStubJev behavior |
+|----------------|-----------------------------|
+| `shouldInterruptGather` | Playbook / heuristic (conservative by default) |
+| `decideHuntStop` | `true` when Total Enemies Found ≥ cap (default 100) |
+| `chooseStance` | Heuristic (e.g. Offensive under playbook) |
+| `chooseMaxEnemies` | Full hunted stack (UI Max) under playbook |
+| `shouldFlee` | Low HP heuristic |
+| `pickQuestPriority` | Prefer easy finishable quests / hearth |
 
 ## For overseer bots
 
@@ -205,9 +192,9 @@ Multi-character setup (accounts, `CHARACTER_NAME`, path layout): **[docs/CHARACT
 ## Architecture
 
 - **`src/deterministic/`** — pure Playwright click paths (gather, combat, quest, merchant). UI selectors may need updates when the game changes.
-- **`src/jev/`** — `JevAdvisor` decision hooks. **StubJev** (default), **HttpJev** (TypeSafe API), **ConsoleJev** (verbose wrapper).
+- **`src/jev/`** — `JevAdvisor` decision hooks. **ProgressiveStubJev** (live path), **StubJev** (CLI defaults), **ConsoleJev** (verbose wrapper). HttpJev retained for unit tests only.
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for Jev hook details and TypeSafe API mapping.
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for Jev hook details.
 
 ## Deterministic vs Jev
 
