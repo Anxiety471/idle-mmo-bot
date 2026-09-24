@@ -36,7 +36,8 @@ export class StubJev implements JevAdvisor {
   }
 
   async chooseMaxEnemies(_enemy: EnemyInfo): Promise<number> {
-    return 1;
+    // Same deterministic full-stack policy as ProgressiveStubJev.
+    return Number.MAX_SAFE_INTEGER;
   }
 
   async shouldFlee(battleState: BattleState): Promise<boolean> {

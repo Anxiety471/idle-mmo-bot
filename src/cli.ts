@@ -16,6 +16,8 @@ import {
   readHuntState,
   stopHunt,
   configureAndBattle,
+  DETERMINISTIC_MAX_ENEMIES,
+  deterministicStance,
   readBattleState,
   runAway,
   huntMore,
@@ -291,15 +293,15 @@ async function runCombat(
         continue;
       }
       console.log(`[combat] Selected enemy: ${enemy.name}`);
-      const maxEnemies = await jev.chooseMaxEnemies(enemy);
-      const stance = await jev.chooseStance(enemy);
+      const maxEnemies = DETERMINISTIC_MAX_ENEMIES;
+      const stance = deterministicStance(enemy.name);
       const battleResult = await configureAndBattle(
         session.page,
         enemy.index,
         maxEnemies,
         stance,
       );
-      console.log(`[combat] battle (${enemy.name}, max=${maxEnemies}, stance=${stance}) → ${battleResult}`);
+      console.log(`[combat] battle (${enemy.name}, max=full-stack, stance=${stance}, no Jev) → ${battleResult}`);
 
       // Monitor battle; flee if Jev says so
       for (let i = 0; i < 60; i++) {

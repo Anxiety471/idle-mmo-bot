@@ -300,6 +300,13 @@ export class HttpJev implements SupervisorAdvisor {
   }
 
   async chooseStance(enemy: EnemyInfo): Promise<Stance> {
+    const playbook = this.lastSnapshot ? getPlaybookFromSnapshot(this.lastSnapshot) : undefined;
+    if (playbook?.enabled && !playbook.complete) {
+      const stance = await this.fallback.chooseStance(enemy);
+      console.log(`[playbook] deterministic chooseStance → ${stance} (skipped HttpJev)`);
+      await this.logLocal('chooseStance', stance);
+      return stance;
+    }
     return this.withApiLog(
       'chooseStance',
       enemyPayload(enemy),
@@ -326,6 +333,13 @@ export class HttpJev implements SupervisorAdvisor {
   }
 
   async chooseMaxEnemies(enemy: EnemyInfo): Promise<number> {
+    const playbook = this.lastSnapshot ? getPlaybookFromSnapshot(this.lastSnapshot) : undefined;
+    if (playbook?.enabled && !playbook.complete) {
+      const n = await this.fallback.chooseMaxEnemies(enemy);
+      console.log(`[playbook] deterministic chooseMaxEnemies → max/full stack (skipped HttpJev)`);
+      await this.logLocal('chooseMaxEnemies', n);
+      return n;
+    }
     return this.withApiLog(
       'chooseMaxEnemies',
       enemyPayload(enemy),

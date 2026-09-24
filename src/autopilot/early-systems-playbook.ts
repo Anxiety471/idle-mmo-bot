@@ -1264,7 +1264,9 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
     }
   }
   if (action === 'hunt_battle_batch' || action === 'hunt_rabbits' || action === 'hunt_battle') {
-    if (/battle:|hunt_started|enemy_selected/i.test(outcome)) {
+    // Credit only when configureAndBattle/huntMore confirmed a real fight
+    // (battle_started), not bare "battle:failed:..." from no-op Battle clicks.
+    if (/battle_started|hunt_started|enemy_selected/i.test(outcome)) {
       counts.huntBattles += 1;
     }
   }
