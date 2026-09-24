@@ -4,11 +4,13 @@ import {
   enemyNameFromDetailText,
   enemyNameFromImageSrc,
   cookedCodCount,
+  inventoryAfterCookedCodSpend,
   inventoryCanCookBattleFood,
   inventoryHasBattleFood,
   needsCookBeforeHunt,
   battleTargetsInOrder,
   describeBattleControlDisabled,
+  healFoodRank,
   hasHuntProgress,
   huntingMetricsSection,
   isActiveHuntPanelText,
@@ -313,6 +315,17 @@ YOUR CHARACTER`;
   });
 });
 
+describe('heal food choice', () => {
+  it('prefers tradable Cooked Cod over an Untradable stack', () => {
+    const tradable = healFoodRank('105 Cooked Cod +10 Health');
+    const untradable = healFoodRank('12 Cooked Cod (Untradable) +10 Health');
+    assert.equal(tradable, 0);
+    assert.ok(untradable !== null && tradable !== null && untradable > tradable);
+    assert.equal(healFoodRank('Max Health'), null);
+    assert.equal(healFoodRank('Use'), null);
+  });
+});
+
 describe('inventory battle food', () => {
   it('treats any cooked stack as battle food', () => {
     assert.equal(inventoryHasBattleFood({ 'Cooked Cod': 2 }), true);
@@ -326,6 +339,19 @@ describe('inventory battle food', () => {
     assert.equal(inventoryCanCookBattleFood({ 'Raw Cod': 2, Coal: 3 }), true);
     assert.equal(inventoryCanCookBattleFood({ Cod: 4 }), false);
     assert.equal(inventoryCanCookBattleFood({ 'Cooked Cod': 5 }), false);
+  });
+
+  it('treats a heal spend as crossing the cook gate without mutating the bag', () => {
+    const bag = { 'Cooked Cod': 100, 'Cooked Cod (Untradable)': 5, Cod: 20, 'Coal Ore': 20 };
+    assert.equal(needsCookBeforeHunt(bag, 100), false);
+    const after = inventoryAfterCookedCodSpend(bag, 10);
+    assert.ok(after);
+    assert.equal(after['Cooked Cod'], 90);
+    assert.equal(after['Cooked Cod (Untradable)'], 5);
+    assert.equal(bag['Cooked Cod'], 100);
+    assert.equal(needsCookBeforeHunt(after, 100), true);
+    assert.equal(cookedCodCount(after), 95);
+    assert.equal(inventoryAfterCookedCodSpend(bag, 0), bag);
   });
 
   it('cooks before hunt when Cooked Cod is empty or under the target', () => {
