@@ -319,7 +319,86 @@ describe('battle from monster image', () => {
       await page.close();
     }
   });
+
+  it('solves a delayed Quick check after Battle and then starts the fight', async () => {
+    const prev = process.env.COMBAT_FIGHT_CONFIRM_MS;
+    process.env.COMBAT_FIGHT_CONFIRM_MS = '12000';
+    const page = await load(BATTLE_FLOW_QUICK_CHECK);
+    try {
+      const result = await configureAndBattle(page, 0, 1, 'Balanced');
+      assert.equal(result, 'battle_started');
+      assert.equal(await page.locator('body').getAttribute('data-battled'), '1');
+      assert.equal(await page.locator('body').getAttribute('data-captcha'), 'tree');
+      assert.equal(await page.getByRole('button', { name: 'Run Away', exact: true }).count(), 1);
+      assert.equal(await page.locator('#captcha').isVisible(), false);
+    } finally {
+      if (prev === undefined) delete process.env.COMBAT_FIGHT_CONFIRM_MS;
+      else process.env.COMBAT_FIGHT_CONFIRM_MS = prev;
+      await page.close();
+    }
+  });
 });
+
+/**
+ * Battle click opens gawain-captcha after a short delay (Alpine is_processing),
+ * so the immediate post-click probe can miss it. Only the Tree emoji continues.
+ */
+const BATTLE_FLOW_QUICK_CHECK = `<!DOCTYPE html>
+<html><body>
+  <div id="nearby">
+    <div>ENEMIES NEARBY</div>
+    <div role="button" id="tile">
+      <img alt="Rabbit" src="/enemies/rabbit.png" style="width:72px;height:72px" />
+      <span>10</span>
+    </div>
+  </div>
+  <div id="modal" hidden x-data="show-battle-entity">
+    <h2>Rabbit</h2>
+    <div>3 Combat EXP</div>
+    <div>STANCE</div>
+    <select name="location"><option value="balanced">Balanced (All Stats)</option></select>
+    <div>ENEMIES</div>
+    <input id="max_enemies" value="1" />
+    <button type="button" id="enemax">Max</button>
+    <button type="button" id="battle">Battle</button>
+  </div>
+  <div id="captcha" hidden role="dialog" x-data="gawain-captcha">
+    <h2>Quick check</h2>
+    <p>Thanks for playing. Choose the matching emoji below so we know you're here.</p>
+    <p>Press the Tree emoji to continue.</p>
+    <button type="button" id="heart">❤️</button>
+    <button type="button" id="tree">🌳</button>
+    <button type="button" id="star">⭐</button>
+    <button type="button" id="sun">☀️</button>
+    <button type="button" id="key">🔑</button>
+    <button type="button" id="apple">🍎</button>
+  </div>
+  <script>
+    const note = (id) => {
+      document.body.dataset.captcha = id;
+    };
+    document.getElementById('tile').addEventListener('click', () => {
+      document.getElementById('modal').hidden = false;
+    });
+    document.getElementById('battle').addEventListener('click', () => {
+      document.body.dataset.battled = '1';
+      setTimeout(() => {
+        document.getElementById('captcha').hidden = false;
+      }, 700);
+    });
+    document.getElementById('tree').addEventListener('click', () => {
+      note('tree');
+      document.getElementById('captcha').hidden = true;
+      const flee = document.createElement('button');
+      flee.type = 'button';
+      flee.textContent = 'Run Away';
+      document.body.appendChild(flee);
+    });
+    for (const id of ['heart', 'star', 'sun', 'key', 'apple']) {
+      document.getElementById(id).addEventListener('click', () => note(id));
+    }
+  </script>
+</body></html>`;
 
 /** Confirm copy from the live "Stop Hunting" dialog (Close + purple Stop). */
 const STOP_HUNTING_DIALOG = `<!DOCTYPE html>

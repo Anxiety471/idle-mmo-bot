@@ -2209,6 +2209,8 @@ async function clickEnabledBattle(page: Page, enemyLabel: string): Promise<Battl
     console.log(`[combat] Battle click failed for ${enemyLabel} (${message}) — ${hint}`);
     return 'disabled';
   }
+  // Captcha often replaces the modal in the same turn as the click.
+  await solvePostBattleCaptchaIfPresent(page, FIGHT_CONFIRM_POLL_MS);
   if (await waitForFightStarted(page)) return 'started';
   console.log(`[combat] Battle click did not start a fight for ${enemyLabel} (no Run Away)`);
   return 'no_fight';
@@ -2334,14 +2336,43 @@ async function isFightInProgress(page: Page): Promise<boolean> {
   return isButtonVisible(page, 'Run Away');
 }
 
+/** Default gap between fight-start probes. Solver clamps its own sleep to >= 2s. */
+const FIGHT_CONFIRM_POLL_MS = 500;
+
+/** Quick check after Battle can take a couple of emoji attempts before Run Away. */
+const POST_BATTLE_CAPTCHA_ATTEMPTS = 3;
+
+/** True when Battle opened the anti-bot Quick check (`modal('gawain-captcha')`). */
+async function isPostBattleHumanCheck(page: Page): Promise<boolean> {
+  if (await isHumanCheckPresent(page)) return true;
+  const gawain = page.locator('[x-data*="gawain-captcha"]');
+  if ((await gawain.count()) === 0) return false;
+  return gawain.first().isVisible().catch(() => false);
+}
+
+/**
+ * Solve a Quick check that appeared because Battle was clicked.
+ * Does nothing when no human check is up, so ordinary fight polls stay cheap.
+ */
+async function solvePostBattleCaptchaIfPresent(page: Page, pollMs: number): Promise<void> {
+  if (!(await isPostBattleHumanCheck(page))) return;
+  console.log('[combat] Quick check after Battle — solving human captcha');
+  await solveHumanCaptchaIfPresent(page, {
+    pollMs,
+    maxAttempts: POST_BATTLE_CAPTCHA_ATTEMPTS,
+  });
+}
+
 /**
  * After clicking Battle, wait until the fight UI is actually up (Run Away).
+ * Each poll solves a Quick check / gawain-captcha if Battle opened one — the
+ * click is not a no-op, but Run Away stays hidden until the emoji is pressed.
  * Returns false if the click was a no-op and ENEMIES NEARBY stayed put.
  */
 async function waitForFightStarted(
   page: Page,
   timeoutMs?: number,
-  pollMs = 500,
+  pollMs = FIGHT_CONFIRM_POLL_MS,
 ): Promise<boolean> {
   const envMs = Number(process.env.COMBAT_FIGHT_CONFIRM_MS);
   const limitMs =
@@ -2351,6 +2382,10 @@ async function waitForFightStarted(
     if (await isFightInProgress(page)) return true;
     const state = await readBattleState(page);
     if (state.inBattle) return true;
+    await solvePostBattleCaptchaIfPresent(page, pollMs);
+    if (await isFightInProgress(page)) return true;
+    const afterSolve = await readBattleState(page);
+    if (afterSolve.inBattle) return true;
     await page.waitForTimeout(pollMs);
   }
   return isFightInProgress(page);
