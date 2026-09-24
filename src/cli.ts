@@ -300,6 +300,7 @@ async function runCombat(
         enemy.index,
         maxEnemies,
         stance,
+        allowInterrupt,
       );
       console.log(`[combat] battle (${enemy.name}, max=full-stack, stance=${stance}, no Jev) → ${battleResult}`);
 

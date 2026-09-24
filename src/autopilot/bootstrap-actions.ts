@@ -220,7 +220,13 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
   const maxEnemies = DETERMINISTIC_MAX_ENEMIES;
   const stance = deterministicStance(enemy.name);
   console.log(`[combat] deterministic battle config max=full-stack stance=${stance} (no Jev)`);
-  const battleResult = await configureAndBattle(page, enemy.index, maxEnemies, stance);
+  const battleResult = await configureAndBattle(
+    page,
+    enemy.index,
+    maxEnemies,
+    stance,
+    allowInterrupt,
+  );
 
   for (let i = 0; i < 60; i++) {
     const battleState = await readBattleState(page);

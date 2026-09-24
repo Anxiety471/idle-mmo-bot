@@ -337,6 +337,66 @@ describe('battle from monster image', () => {
       await page.close();
     }
   });
+
+  it('clicks Start anyway when Battle is pressed during another action', async () => {
+    const page = await load(BATTLE_FLOW_REPLACE_DIALOG);
+    try {
+      const result = await configureAndBattle(page, 0, 1, 'Balanced', true);
+      assert.equal(result, 'battle_started');
+      assert.equal(await page.locator('body').getAttribute('data-battled'), '1');
+      assert.equal(await page.locator('body').getAttribute('data-started-anyway'), '1');
+      assert.equal(await page.locator('body').getAttribute('data-replace-closed'), null);
+      assert.equal(await page.locator('body').getAttribute('data-modal-closed'), null);
+      assert.equal(await page.getByRole('button', { name: 'Run Away', exact: true }).count(), 1);
+      assert.equal(await page.locator('#replace').isVisible(), false);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('closes the replace dialog and does not fight when interrupt is off', async () => {
+    const page = await load(BATTLE_FLOW_REPLACE_DIALOG);
+    try {
+      const result = await configureAndBattle(page, 0, 1, 'Balanced');
+      assert.equal(result, 'no_action');
+      assert.equal(await page.locator('body').getAttribute('data-battled'), '1');
+      assert.equal(await page.locator('body').getAttribute('data-replace-closed'), '1');
+      assert.equal(await page.locator('body').getAttribute('data-started-anyway'), null);
+      assert.equal(await page.getByRole('button', { name: 'Run Away', exact: true }).count(), 0);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('starts the fight from Hunt More when Battle needs Start anyway', async () => {
+    const page = await load(BATTLE_MODAL_REPLACE_DIALOG);
+    try {
+      const result = await huntMore(page, true);
+      assert.equal(result, 'battle_started');
+      assert.equal(await page.locator('body').getAttribute('data-started-anyway'), '1');
+      assert.equal(await page.getByRole('button', { name: 'Run Away', exact: true }).count(), 1);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('solves Quick check after Start anyway and then shows Run Away', async () => {
+    const prev = process.env.COMBAT_FIGHT_CONFIRM_MS;
+    process.env.COMBAT_FIGHT_CONFIRM_MS = '12000';
+    const page = await load(BATTLE_FLOW_REPLACE_THEN_CAPTCHA);
+    try {
+      const result = await configureAndBattle(page, 0, 1, 'Balanced', true);
+      assert.equal(result, 'battle_started');
+      assert.equal(await page.locator('body').getAttribute('data-started-anyway'), '1');
+      assert.equal(await page.locator('body').getAttribute('data-captcha'), 'tree');
+      assert.equal(await page.getByRole('button', { name: 'Run Away', exact: true }).count(), 1);
+      assert.equal(await page.locator('#captcha').isVisible(), false);
+    } finally {
+      if (prev === undefined) delete process.env.COMBAT_FIGHT_CONFIRM_MS;
+      else process.env.COMBAT_FIGHT_CONFIRM_MS = prev;
+      await page.close();
+    }
+  });
 });
 
 /**
@@ -395,6 +455,172 @@ const BATTLE_FLOW_QUICK_CHECK = `<!DOCTYPE html>
       document.body.appendChild(flee);
     });
     for (const id of ['heart', 'star', 'sun', 'key', 'apple']) {
+      document.getElementById(id).addEventListener('click', () => note(id));
+    }
+  </script>
+</body></html>`;
+
+/**
+ * Gather-busy Battle: modal Battle opens confirm-action-request
+ * ("Start a new action?" / Start anyway) instead of Run Away.
+ * The entity modal's own Close must not be the button we press.
+ */
+const BATTLE_FLOW_REPLACE_DIALOG = `<!DOCTYPE html>
+<html><body>
+  <div id="nearby">
+    <div>ENEMIES NEARBY</div>
+    <div role="button" id="tile">
+      <img alt="Rabbit" src="/enemies/rabbit.png" style="width:72px;height:72px" />
+      <span>10</span>
+    </div>
+  </div>
+  <div id="modal" hidden x-data="show-battle-entity">
+    <h2>Rabbit</h2>
+    <div>3 Combat EXP</div>
+    <div>STANCE</div>
+    <select name="location"><option value="balanced">Balanced (All Stats)</option></select>
+    <div>ENEMIES</div>
+    <input id="max_enemies" value="1" />
+    <button type="button" id="enemax">Max</button>
+    <button type="button" id="modal-close" aria-label="Close">×</button>
+    <button type="button" id="battle">Battle</button>
+  </div>
+  <div id="replace" hidden x-data="modal('confirm-action-request', false, null)">
+    <h2>Start a new action?</h2>
+    <p>You are already doing an action right now.</p>
+    <p>Starting a new action may finish, stop, or replace the action you are doing.</p>
+    <button type="button" id="replace-close">Close</button>
+    <button type="button" id="start-anyway">Start anyway</button>
+  </div>
+  <script>
+    document.getElementById('tile').addEventListener('click', () => {
+      document.getElementById('modal').hidden = false;
+    });
+    document.getElementById('battle').addEventListener('click', () => {
+      document.body.dataset.battled = '1';
+      document.getElementById('replace').hidden = false;
+    });
+    document.getElementById('start-anyway').addEventListener('click', () => {
+      document.body.dataset.startedAnyway = '1';
+      document.getElementById('replace').hidden = true;
+      const flee = document.createElement('button');
+      flee.type = 'button';
+      flee.textContent = 'Run Away';
+      document.body.appendChild(flee);
+    });
+    document.getElementById('replace-close').addEventListener('click', () => {
+      document.body.dataset.replaceClosed = '1';
+      document.getElementById('replace').hidden = true;
+    });
+    document.getElementById('modal-close').addEventListener('click', () => {
+      document.body.dataset.modalClosed = '1';
+      document.getElementById('modal').hidden = true;
+    });
+  </script>
+</body></html>`;
+
+/** Same confirm dialog, but the battle modal is already open (Hunt More path). */
+const BATTLE_MODAL_REPLACE_DIALOG = `<!DOCTYPE html>
+<html><body>
+  <div id="modal" x-data="show-battle-entity">
+    <h2>Rabbit</h2>
+    <div>3 Combat EXP</div>
+    <div>STANCE</div>
+    <select name="location"><option value="balanced">Balanced (All Stats)</option></select>
+    <div>ENEMIES</div>
+    <input id="max_enemies" value="4" />
+    <button type="button" id="enemax">Max</button>
+    <button type="button" id="modal-close" aria-label="Close">×</button>
+    <button type="button" id="battle">Battle</button>
+  </div>
+  <div id="replace" hidden x-data="modal('confirm-action-request', false, null)">
+    <h2>Start a new action?</h2>
+    <p>You are already doing an action right now.</p>
+    <button type="button" id="replace-close">Close</button>
+    <button type="button" id="start-anyway">Start anyway</button>
+  </div>
+  <script>
+    document.getElementById('battle').addEventListener('click', () => {
+      document.body.dataset.battled = '1';
+      document.getElementById('replace').hidden = false;
+    });
+    document.getElementById('start-anyway').addEventListener('click', () => {
+      document.body.dataset.startedAnyway = '1';
+      document.getElementById('replace').hidden = true;
+      document.getElementById('modal').remove();
+      const flee = document.createElement('button');
+      flee.type = 'button';
+      flee.textContent = 'Run Away';
+      document.body.appendChild(flee);
+    });
+    document.getElementById('replace-close').addEventListener('click', () => {
+      document.body.dataset.replaceClosed = '1';
+      document.getElementById('replace').hidden = true;
+    });
+  </script>
+</body></html>`;
+
+/** Start anyway, then the same delayed gawain Quick check as a normal Battle click. */
+const BATTLE_FLOW_REPLACE_THEN_CAPTCHA = `<!DOCTYPE html>
+<html><body>
+  <div id="nearby">
+    <div>ENEMIES NEARBY</div>
+    <div role="button" id="tile">
+      <img alt="Rabbit" src="/enemies/rabbit.png" style="width:72px;height:72px" />
+      <span>10</span>
+    </div>
+  </div>
+  <div id="modal" hidden x-data="show-battle-entity">
+    <h2>Rabbit</h2>
+    <div>3 Combat EXP</div>
+    <div>STANCE</div>
+    <select name="location"><option value="balanced">Balanced (All Stats)</option></select>
+    <div>ENEMIES</div>
+    <input id="max_enemies" value="1" />
+    <button type="button" id="enemax">Max</button>
+    <button type="button" id="battle">Battle</button>
+  </div>
+  <div id="replace" hidden x-data="modal('confirm-action-request', false, null)">
+    <h2>Start a new action?</h2>
+    <p>You are already doing an action right now.</p>
+    <button type="button" id="start-anyway">Start anyway</button>
+    <button type="button" id="replace-close">Close</button>
+  </div>
+  <div id="captcha" hidden role="dialog" x-data="gawain-captcha">
+    <h2>Quick check</h2>
+    <p>Thanks for playing. Choose the matching emoji below so we know you're here.</p>
+    <p>Press the Tree emoji to continue.</p>
+    <button type="button" id="heart">❤️</button>
+    <button type="button" id="tree">🌳</button>
+    <button type="button" id="star">⭐</button>
+  </div>
+  <script>
+    const note = (id) => {
+      document.body.dataset.captcha = id;
+    };
+    document.getElementById('tile').addEventListener('click', () => {
+      document.getElementById('modal').hidden = false;
+    });
+    document.getElementById('battle').addEventListener('click', () => {
+      document.body.dataset.battled = '1';
+      document.getElementById('replace').hidden = false;
+    });
+    document.getElementById('start-anyway').addEventListener('click', () => {
+      document.body.dataset.startedAnyway = '1';
+      document.getElementById('replace').hidden = true;
+      setTimeout(() => {
+        document.getElementById('captcha').hidden = false;
+      }, 700);
+    });
+    document.getElementById('tree').addEventListener('click', () => {
+      note('tree');
+      document.getElementById('captcha').hidden = true;
+      const flee = document.createElement('button');
+      flee.type = 'button';
+      flee.textContent = 'Run Away';
+      document.body.appendChild(flee);
+    });
+    for (const id of ['heart', 'star']) {
       document.getElementById(id).addEventListener('click', () => note(id));
     }
   </script>

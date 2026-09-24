@@ -170,28 +170,51 @@ async function waitForCombatUiSettled(page: Page, timeoutMs = COMBAT_UI_SETTLE_M
     });
 }
 
-/** Handle "Start a new action?" after Start Hunt or Hunt More. */
+/**
+ * Root of the confirm-action dialog when the page marks it.
+ * Battle's entity modal also has a Close control, so page-level Close is the
+ * fallback only when this root is absent (Start Hunt / Hunt More).
+ */
+async function replaceDialogRoot(page: Page): Promise<Locator | null> {
+  const rooted = page
+    .locator('[x-data*="confirm-action-request"]')
+    .filter({ hasText: 'Start a new action?' });
+  if ((await rooted.count()) > 0 && (await rooted.first().isVisible().catch(() => false))) {
+    return rooted.first();
+  }
+  return null;
+}
+
+/** Title node only — a parent that merely contains the phrase is not the dialog. */
+function replaceDialogHeading(page: Page): Locator {
+  return page.getByText('Start a new action?', { exact: true });
+}
+
+/** Handle "Start a new action?" after Start Hunt, Hunt More, or Battle. */
 async function handleReplaceDialog(
   page: Page,
   allowInterrupt: boolean,
 ): Promise<'continued' | 'no_action' | 'failed'> {
-  const dialog = page.getByText('Start a new action?');
+  const dialog = replaceDialogHeading(page).first();
   if (!(await dialog.isVisible({ timeout: 2000 }).catch(() => false))) {
     return 'continued';
   }
 
+  const root = await replaceDialogRoot(page);
+  const scope = root ?? page;
+
   if (allowInterrupt) {
-    const startAnyway = page.getByRole('button', { name: 'Start anyway', exact: true });
-    if (await startAnyway.count() > 0) {
-      await startAnyway.click();
+    const startAnyway = scope.getByRole('button', { name: 'Start anyway', exact: true });
+    if ((await startAnyway.count()) > 0) {
+      await startAnyway.first().click();
       return 'continued';
     }
     return 'failed';
   }
 
-  const closeButton = page.getByRole('button', { name: 'Close', exact: true });
-  if (await closeButton.count() > 0) {
-    await closeButton.click();
+  const closeButton = scope.getByRole('button', { name: 'Close', exact: true });
+  if ((await closeButton.count()) > 0) {
+    await closeButton.first().click();
     return 'no_action';
   }
 
@@ -2180,17 +2203,24 @@ type BattleClickResult =
   | 'disabled'
   | 'missing'
   | 'no_fight'
+  | 'no_action'
   | 'modal_closed'
   | 'health_too_low'
   | 'heal_failed';
 
 function battleClickToStep(result: BattleClickResult): CombatStepResult {
   if (result === 'started') return 'battle_started';
-  if (result === 'health_too_low' || result === 'heal_failed') return result;
+  if (result === 'health_too_low' || result === 'heal_failed' || result === 'no_action') {
+    return result;
+  }
   return 'failed';
 }
 
-async function clickEnabledBattle(page: Page, enemyLabel: string): Promise<BattleClickResult> {
+async function clickEnabledBattle(
+  page: Page,
+  enemyLabel: string,
+  allowInterrupt = false,
+): Promise<BattleClickResult> {
   const waited = await waitForEnabledBattleButton(page);
   if (!waited.button) {
     console.log(`[combat] Battle button missing for ${enemyLabel}`);
@@ -2209,9 +2239,24 @@ async function clickEnabledBattle(page: Page, enemyLabel: string): Promise<Battl
     console.log(`[combat] Battle click failed for ${enemyLabel} (${message}) — ${hint}`);
     return 'disabled';
   }
+  // Gather-busy Battle opens "Start a new action?" and never reaches Run Away
+  // until Start anyway. Same interrupt default as Start Hunt / Hunt More.
+  const dialog = await handleReplaceDialog(page, allowInterrupt);
+  if (dialog === 'no_action') {
+    console.log(
+      `[combat] Battle left the current action running for ${enemyLabel} (replace dialog closed)`,
+    );
+    return 'no_action';
+  }
+  if (dialog === 'failed') {
+    console.log(`[combat] Battle replace dialog could not be confirmed for ${enemyLabel}`);
+    return 'no_fight';
+  }
   // Captcha often replaces the modal in the same turn as the click.
   await solvePostBattleCaptchaIfPresent(page, FIGHT_CONFIRM_POLL_MS);
-  if (await waitForFightStarted(page)) return 'started';
+  const fight = await waitForFightStarted(page, undefined, FIGHT_CONFIRM_POLL_MS, allowInterrupt);
+  if (fight === 'started') return 'started';
+  if (fight === 'no_action') return 'no_action';
   console.log(`[combat] Battle click did not start a fight for ${enemyLabel} (no Run Away)`);
   return 'no_fight';
 }
@@ -2221,6 +2266,7 @@ async function prepareAndBattleOpenModal(
   enemyLabel: string,
   maxEnemies: number,
   stance: Stance,
+  allowInterrupt = false,
 ): Promise<BattleClickResult> {
   // Low HP blocks every enemy tile. Feed from Heal before food/Max/stance.
   const heal = await healBeforeBattleIfNeeded(page);
@@ -2235,7 +2281,7 @@ async function prepareAndBattleOpenModal(
   await selectBattleFood(page);
   await setMaxEnemies(page, maxEnemies);
   await setStance(page, stance);
-  return clickEnabledBattle(page, enemyLabel);
+  return clickEnabledBattle(page, enemyLabel, allowInterrupt);
 }
 
 /**
@@ -2243,12 +2289,16 @@ async function prepareAndBattleOpenModal(
  * Max the stack, click Battle.
  * CHARACTER_HEALTH_TOO_LOW is shared by every tile — heal, don't walk the list.
  * Other restrictive Battle buttons still try the next tile.
+ *
+ * allowInterrupt matches Start Hunt / Hunt More: false closes "Start a new action?"
+ * and keeps the current gather; true clicks Start anyway (--interrupt / FORCE_INTERRUPT).
  */
 export async function configureAndBattle(
   page: Page,
   enemyIndex: number,
   maxEnemies: number,
   stance: Stance,
+  allowInterrupt = false,
 ): Promise<CombatStepResult> {
   cookedCodSpentOnHeal = 0;
   const tiles = await collectEnemyTiles(page);
@@ -2259,7 +2309,13 @@ export async function configureAndBattle(
 
   if (ordered.length === 0 && (await isEnemyDetailPanelOpen(page))) {
     const name = (await readEnemyNameFromDetailPanel(page)) ?? 'Enemy';
-    const only = await prepareAndBattleOpenModal(page, name, maxEnemies, stance);
+    const only = await prepareAndBattleOpenModal(
+      page,
+      name,
+      maxEnemies,
+      stance,
+      allowInterrupt,
+    );
     return battleClickToStep(only);
   }
   if (ordered.length === 0) return 'failed';
@@ -2282,17 +2338,27 @@ export async function configureAndBattle(
       continue;
     }
 
-    let result = await prepareAndBattleOpenModal(page, target.name, maxEnemies, stance);
+    let result = await prepareAndBattleOpenModal(
+      page,
+      target.name,
+      maxEnemies,
+      stance,
+      allowInterrupt,
+    );
     if (result === 'modal_closed') {
       console.log(`[combat] re-opening enemy tile after heal: ${target.name}`);
       await clickEnemyTile(page, tile);
       result = (await isEnemyDetailPanelOpen(page))
-        ? await prepareAndBattleOpenModal(page, target.name, maxEnemies, stance)
+        ? await prepareAndBattleOpenModal(page, target.name, maxEnemies, stance, allowInterrupt)
         : 'missing';
     }
     if (result === 'started') return 'battle_started';
-    if (result === 'health_too_low' || result === 'heal_failed') {
-      console.log(`[combat] ${result} — character heal gate, not walking other enemy tiles`);
+    if (result === 'health_too_low' || result === 'heal_failed' || result === 'no_action') {
+      if (result === 'no_action') {
+        console.log('[combat] replace dialog closed — not walking other enemy tiles');
+      } else {
+        console.log(`[combat] ${result} — character heal gate, not walking other enemy tiles`);
+      }
       await closeBattleEntityModal(page);
       return result;
     }
@@ -2365,30 +2431,38 @@ async function solvePostBattleCaptchaIfPresent(page: Page, pollMs: number): Prom
 
 /**
  * After clicking Battle, wait until the fight UI is actually up (Run Away).
+ * A gather-busy click can open "Start a new action?" slightly after the click —
+ * Start anyway when allowInterrupt is set, otherwise Close and stop waiting.
  * Each poll solves a Quick check / gawain-captcha if Battle opened one — the
  * click is not a no-op, but Run Away stays hidden until the emoji is pressed.
- * Returns false if the click was a no-op and ENEMIES NEARBY stayed put.
+ * Returns timeout if the click was a no-op and ENEMIES NEARBY stayed put.
  */
 async function waitForFightStarted(
   page: Page,
   timeoutMs?: number,
   pollMs = FIGHT_CONFIRM_POLL_MS,
-): Promise<boolean> {
+  allowInterrupt = false,
+): Promise<'started' | 'no_action' | 'timeout'> {
   const envMs = Number(process.env.COMBAT_FIGHT_CONFIRM_MS);
   const limitMs =
     timeoutMs ?? (Number.isFinite(envMs) && envMs > 0 ? envMs : 15_000);
   const deadline = Date.now() + limitMs;
   while (Date.now() < deadline) {
-    if (await isFightInProgress(page)) return true;
+    if (await isFightInProgress(page)) return 'started';
     const state = await readBattleState(page);
-    if (state.inBattle) return true;
+    if (state.inBattle) return 'started';
+    if (await replaceDialogHeading(page).first().isVisible().catch(() => false)) {
+      const dialog = await handleReplaceDialog(page, allowInterrupt);
+      if (dialog === 'no_action') return 'no_action';
+      if (dialog === 'failed') return 'timeout';
+    }
     await solvePostBattleCaptchaIfPresent(page, pollMs);
-    if (await isFightInProgress(page)) return true;
+    if (await isFightInProgress(page)) return 'started';
     const afterSolve = await readBattleState(page);
-    if (afterSolve.inBattle) return true;
+    if (afterSolve.inBattle) return 'started';
     await page.waitForTimeout(pollMs);
   }
-  return isFightInProgress(page);
+  return (await isFightInProgress(page)) ? 'started' : 'timeout';
 }
 
 /**
@@ -2411,7 +2485,7 @@ export async function huntMore(
       await setMaxEnemies(page, Number.MAX_SAFE_INTEGER);
       const battleBtn = await visibleBattleButton(page);
       if (battleBtn) {
-        const clicked = await clickEnabledBattle(page, 'huntMore');
+        const clicked = await clickEnabledBattle(page, 'huntMore', allowInterrupt);
         if (clicked === 'started') return 'battle_started';
         return battleClickToStep(clicked);
       }
