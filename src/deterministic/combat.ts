@@ -204,7 +204,13 @@ async function handleReplaceDialog(
   const scope = root ?? page;
 
   if (allowInterrupt) {
-    const startAnyway = scope.getByRole('button', { name: 'Start anyway', exact: true });
+    const scopedStart = scope.getByRole('button', { name: 'Start anyway', exact: true });
+    // Start anyway is unique. If the confirm root does not wrap the button
+    // (Alpine teleport), still click the page-level control.
+    const startAnyway =
+      (await scopedStart.count()) > 0
+        ? scopedStart
+        : page.getByRole('button', { name: 'Start anyway', exact: true });
     if ((await startAnyway.count()) > 0) {
       await startAnyway.first().click();
       return 'continued';
