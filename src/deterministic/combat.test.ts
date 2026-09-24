@@ -7,6 +7,8 @@ import {
   inventoryCanCookBattleFood,
   inventoryHasBattleFood,
   needsCookBeforeHunt,
+  battleTargetsInOrder,
+  describeBattleControlDisabled,
   hasHuntProgress,
   huntingMetricsSection,
   isActiveHuntPanelText,
@@ -247,6 +249,46 @@ describe('pickBattleEnemy', () => {
 
   it('returns undefined for empty list', () => {
     assert.equal(pickBattleEnemy([]), undefined);
+  });
+});
+
+describe('battleTargetsInOrder', () => {
+  it('puts Rabbit first and then walks the other tiles', () => {
+    const order = battleTargetsInOrder([
+      { name: 'Duck', index: 0 },
+      { name: 'Goblin', index: 1 },
+      { name: 'Rabbit', index: 2 },
+    ]);
+    assert.deepEqual(
+      order.map((enemy) => enemy.name),
+      ['Rabbit', 'Duck', 'Goblin'],
+    );
+  });
+});
+
+describe('describeBattleControlDisabled', () => {
+  it('reports restrictive or processing from the live Alpine bind', () => {
+    const hint = describeBattleControlDisabled(
+      'disabled',
+      'selected_battle_entity?.status?.is_restrictive || is_processing',
+    );
+    assert.match(hint, /disabled=disabled/);
+    assert.match(hint, /is_restrictive/);
+    assert.match(hint, /is_processing/);
+    assert.match(hint, /bind looks restrictive or processing/);
+  });
+
+  it('reports processing when that is the only bind clause', () => {
+    const hint = describeBattleControlDisabled('', 'is_processing');
+    assert.match(hint, /disabled=present/);
+    assert.match(hint, /bind looks processing/);
+    assert.equal(/restrictive/.test(hint), false);
+  });
+
+  it('reports restrictive when that is the only bind clause', () => {
+    const hint = describeBattleControlDisabled('disabled', 'is_restrictive');
+    assert.match(hint, /bind looks restrictive/);
+    assert.equal(/processing/.test(hint), false);
   });
 });
 
