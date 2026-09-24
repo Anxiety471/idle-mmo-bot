@@ -369,13 +369,12 @@ describe('HttpJev early playbook deterministic choice', () => {
     assert.deepEqual(calls, ['action', 'interrupt', 'action', 'interrupt']);
   });
 
-  it('still calls TypeSafe for combat stance while the playbook is choosing actions', async () => {
+  it('skips TypeSafe for combat stance and max enemies while the playbook is choosing actions', async () => {
     const calls: string[] = [];
     const jev = new HttpJev(
       config,
       recordingClient(calls, (key): SystemOneResponse => {
-        if (key !== 'stance') throw new Error(`unexpected ${key}`);
-        return { model: 'test', answers: { stance: { type: 'choice', choice: 'Offensive' } } };
+        throw new Error(`unexpected TypeSafe call ${key}`);
       }),
     );
     const action = await jev.chooseNextAction(
@@ -385,8 +384,10 @@ describe('HttpJev early playbook deterministic choice', () => {
     );
     assert.equal(action, 'cook_cod');
     const stance = await jev.chooseStance({ name: 'Rabbit', index: 0 });
+    const max = await jev.chooseMaxEnemies({ name: 'Rabbit', index: 0 });
     assert.equal(stance, 'Offensive');
-    assert.deepEqual(calls, ['stance']);
+    assert.equal(max, Number.MAX_SAFE_INTEGER);
+    assert.deepEqual(calls, []);
   });
 
   it('ConsoleJev still prints the deterministic action', async () => {
@@ -511,6 +512,49 @@ describe('HttpJev early playbook deterministic choice', () => {
       ),
       false,
     );
+  });
+
+  it('chooseMaxEnemies and chooseStance stay deterministic while playbook is incomplete', async () => {
+    const snap = snapshot(
+      playbook({
+        stage: 'hunt_battle_batch',
+        preferredActions: ['hunt_battle_batch', 'hunt_battle'],
+        interruptActions: ['hunt_battle_batch', 'hunt_battle'],
+      }),
+    );
+    const enemy = { name: 'Rabbit', level: 1, index: 0 };
+    const calls: string[] = [];
+    const jev = new HttpJev(config, recordingClient(calls));
+    const stub = new ProgressiveStubJev();
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => {
+      lines.push(args.map(String).join(' '));
+    };
+    try {
+      // Seed lastSnapshot the same way live autopilot does via chooseNextAction.
+      await jev.chooseNextAction(snap, ['hunt_battle_batch', 'idle'], context);
+      const max = await jev.chooseMaxEnemies(enemy);
+      const stance = await jev.chooseStance(enemy);
+      assert.equal(max, await stub.chooseMaxEnemies(enemy));
+      assert.equal(stance, await stub.chooseStance(enemy));
+      assert.equal(max, Number.MAX_SAFE_INTEGER);
+      assert.equal(stance, 'Offensive');
+      assert.ok(
+        lines.some((line) =>
+          line.includes('[playbook] deterministic chooseMaxEnemies → max/full stack (skipped HttpJev)'),
+        ),
+      );
+      assert.ok(
+        lines.some((line) =>
+          line.includes('[playbook] deterministic chooseStance → Offensive (skipped HttpJev)'),
+        ),
+      );
+      // Only chooseNextAction should have run before the combat helpers; no TypeSafe calls.
+      assert.deepEqual(calls, []);
+    } finally {
+      console.log = original;
+    }
   });
 
   it('playbook interrupt helper matches coal, cod, cook, grace, and backoff', () => {

@@ -58,6 +58,9 @@ function combatLagging(snapshot: GameSnapshot): boolean {
  * ProgressiveStubJev — heuristic supervisor; uses registry priorities/tags so new actions
  * participate automatically when registered.
  */
+/** Fight the full hunted stack (UI Max). Not a 1–5 HttpJev score. */
+export const DETERMINISTIC_MAX_ENEMIES = Number.MAX_SAFE_INTEGER;
+
 export class ProgressiveStubJev implements SupervisorAdvisor {
   async chooseNextAction(
     snapshot: GameSnapshot,
@@ -218,7 +221,8 @@ export class ProgressiveStubJev implements SupervisorAdvisor {
   }
 
   async chooseMaxEnemies(_enemy: EnemyInfo): Promise<number> {
-    return 1;
+    // Deterministic early-playbook policy: always Max the ENEMIES stack.
+    return DETERMINISTIC_MAX_ENEMIES;
   }
 
   async shouldFlee(battleState: BattleState): Promise<boolean> {

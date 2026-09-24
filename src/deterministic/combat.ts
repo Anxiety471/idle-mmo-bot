@@ -20,6 +20,15 @@ import { effectivePollMs, type VerifyBudget } from './poll-interval.js';
  * Post-hunt sessions may show Hunt More / ENEMIES NEARBY without Start Hunt.
  */
 
+/** Always Max the ENEMIES stack — no Jev score. */
+export const DETERMINISTIC_MAX_ENEMIES = Number.MAX_SAFE_INTEGER;
+
+/** Fixed early-game stance — no Jev choice. */
+export function deterministicStance(enemyName: string): Stance {
+  if (/goblin|rabbit|duck/i.test(enemyName)) return 'Offensive';
+  return 'Offensive';
+}
+
 const COMBAT_PATH = '/combat/battle';
 /** Max wait for async combat controls after domcontentloaded (~3–4s observed). */
 const COMBAT_UI_SETTLE_MS = 10_000;
@@ -755,12 +764,13 @@ async function setStance(page: Page, stance: Stance): Promise<void> {
 
 async function setMaxEnemies(page: Page, maxEnemies: number): Promise<void> {
   // Live battle modal: ENEMIES row is prefilled with the stack (e.g. 218) and a Max button.
-  // Never overwrite that stack with a smaller advisor value.
-  const maxBtn = page.locator(
-    'xpath=//*[normalize-space()="ENEMIES"]/following::button[normalize-space()="Max"][1]',
-  );
+  // Always prefer Max so we fight the full hunted stack, not a stubbed 1.
+  const maxBtn = page
+    .locator('xpath=//*[normalize-space()="ENEMIES"]/following::button[normalize-space()="Max"][1]')
+    .or(page.getByRole('button', { name: 'Max', exact: true }));
   if ((await maxBtn.count()) > 0 && (await maxBtn.first().isVisible().catch(() => false))) {
     await maxBtn.first().click({ timeout: 3000 }).catch(() => undefined);
+    console.log('[combat] ENEMIES Max clicked (full stack)');
     return;
   }
 
@@ -768,11 +778,16 @@ async function setMaxEnemies(page: Page, maxEnemies: number): Promise<void> {
   if (await maxInput.count() === 0) {
     maxInput = page.locator('input[type="number"]');
   }
-  if (await maxInput.count() === 0) return;
+  if (await maxInput.count() === 0) {
+    console.log('[combat] ENEMIES Max control not found');
+    return;
+  }
 
   const current = Number(await maxInput.first().inputValue().catch(() => ''));
   if (Number.isFinite(current) && current >= maxEnemies && current > 0) return;
-  await maxInput.first().fill(String(maxEnemies));
+  const fillTo = maxEnemies >= 1_000_000 ? Math.max(current || 0, 9999) : maxEnemies;
+  await maxInput.first().fill(String(fillTo));
+  console.log(`[combat] ENEMIES input set to ${fillTo}`);
 }
 
 /**
@@ -1545,7 +1560,13 @@ export async function configureAndBattle(
   await battleBtn.scrollIntoViewIfNeeded().catch(() => undefined);
   await battleBtn.click({ timeout: 5000 });
 
-  return 'battle_started';
+  // Only credit battle_started after Run Away / in-fight UI appears.
+  // Live bug: Battle click can no-op while ENEMIES NEARBY stays up.
+  if (await waitForFightStarted(page)) {
+    return 'battle_started';
+  }
+  console.log('[combat] Battle click did not start a fight (no Run Away)');
+  return 'failed';
 }
 
 /** Read battle screen state if a fight is in progress. */
@@ -1579,6 +1600,28 @@ async function isFightInProgress(page: Page): Promise<boolean> {
 }
 
 /**
+ * After clicking Battle, wait until the fight UI is actually up (Run Away).
+ * Returns false if the click was a no-op and ENEMIES NEARBY stayed put.
+ */
+async function waitForFightStarted(
+  page: Page,
+  timeoutMs?: number,
+  pollMs = 500,
+): Promise<boolean> {
+  const envMs = Number(process.env.COMBAT_FIGHT_CONFIRM_MS);
+  const limitMs =
+    timeoutMs ?? (Number.isFinite(envMs) && envMs > 0 ? envMs : 15_000);
+  const deadline = Date.now() + limitMs;
+  while (Date.now() < deadline) {
+    if (await isFightInProgress(page)) return true;
+    const state = await readBattleState(page);
+    if (state.inBattle) return true;
+    await page.waitForTimeout(pollMs);
+  }
+  return isFightInProgress(page);
+}
+
+/**
  * Click Hunt More to repeat after a battle completes.
  * If the show-battle-entity modal is still up, Battle is the action — clicking
  * through it avoids huntMore:no_action while the modal covers Hunt More.
@@ -1597,7 +1640,11 @@ export async function huntMore(
     if (battleBtn) {
       await battleBtn.scrollIntoViewIfNeeded().catch(() => undefined);
       await battleBtn.click({ timeout: 5000 }).catch(() => undefined);
-      return 'battle_started';
+      if (await waitForFightStarted(page)) {
+        return 'battle_started';
+      }
+      console.log('[combat] huntMore Battle click did not start a fight (no Run Away)');
+      return 'failed';
     }
     await dismissBlockingOverlays(page);
   }

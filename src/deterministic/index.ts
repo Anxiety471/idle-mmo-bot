@@ -25,6 +25,8 @@ export {
   readHuntState,
   stopHunt,
   configureAndBattle,
+  DETERMINISTIC_MAX_ENEMIES,
+  deterministicStance,
   readBattleState,
   runAway,
   huntMore,

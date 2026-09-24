@@ -18,6 +18,8 @@ import {
   readHuntState,
   stopHunt,
   configureAndBattle,
+  DETERMINISTIC_MAX_ENEMIES,
+  deterministicStance,
   readBattleState,
   runAway,
   huntMore,
@@ -212,8 +214,9 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
 
   const enemy = pickBattleEnemy(huntState.enemies);
   if (!enemy) return combatRoundOutcome('stop:no_enemies', config);
-  const maxEnemies = await jev.chooseMaxEnemies(enemy);
-  const stance = await jev.chooseStance(enemy);
+  const maxEnemies = DETERMINISTIC_MAX_ENEMIES;
+  const stance = deterministicStance(enemy.name);
+  console.log(`[combat] deterministic battle config max=full-stack stance=${stance} (no Jev)`);
   const battleResult = await configureAndBattle(page, enemy.index, maxEnemies, stance);
 
   for (let i = 0; i < 60; i++) {

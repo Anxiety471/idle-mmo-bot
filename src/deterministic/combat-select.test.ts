@@ -107,6 +107,11 @@ const BATTLE_FLOW = `<!DOCTYPE html>
     });
     document.getElementById('battle').addEventListener('click', () => {
       note('battle');
+      document.getElementById('modal').hidden = true;
+      const flee = document.createElement('button');
+      flee.type = 'button';
+      flee.textContent = 'Run Away';
+      document.body.appendChild(flee);
     });
   </script>
 </body></html>`;
@@ -140,6 +145,11 @@ const BATTLE_MODAL_BLOCKS_HUNT_MORE = `<!DOCTYPE html>
     });
     document.getElementById('battle').addEventListener('click', () => {
       document.body.dataset.battled = '1';
+      document.querySelector('[x-data*="show-battle-entity"]').remove();
+      const flee = document.createElement('button');
+      flee.type = 'button';
+      flee.textContent = 'Run Away';
+      document.body.appendChild(flee);
     });
     document.getElementById('enemax').addEventListener('click', () => {
       document.getElementById('max_enemies').value = '4';
@@ -178,6 +188,11 @@ const BATTLE_FLOW_NO_FOOD = `<!DOCTYPE html>
     });
     document.getElementById('battle').addEventListener('click', () => {
       document.body.dataset.battled = '1';
+      document.getElementById('modal').hidden = true;
+      const flee = document.createElement('button');
+      flee.type = 'button';
+      flee.textContent = 'Run Away';
+      document.body.appendChild(flee);
     });
   </script>
 </body></html>`;
@@ -218,6 +233,38 @@ describe('post-stop enemy icon scrape', () => {
   });
 });
 
+
+/** Battle button present but does not start a fight — must return failed. */
+const BATTLE_FLOW_NOOP = `<!DOCTYPE html>
+<html><body>
+  <div id="nearby">
+    <div>ENEMIES NEARBY</div>
+    <div role="button" id="tile">
+      <img alt="Rabbit" src="/enemies/rabbit.png" style="width:72px;height:72px" />
+      <span>10</span>
+    </div>
+  </div>
+  <div id="modal" hidden x-data="show-battle-entity">
+    <h2>Rabbit</h2>
+    <div>3 Combat EXP</div>
+    <div>STANCE</div>
+    <select name="location"><option value="balanced">Balanced (All Stats)</option></select>
+    <div>ENEMIES</div>
+    <input id="max_enemies" value="1" />
+    <button type="button" id="enemax">Max</button>
+    <button type="button" id="battle">Battle</button>
+  </div>
+  <script>
+    document.getElementById('tile').addEventListener('click', () => {
+      document.getElementById('modal').hidden = false;
+    });
+    document.getElementById('battle').addEventListener('click', () => {
+      document.body.dataset.battled = '1';
+      // Intentionally do NOT show Run Away — simulates live no-op Battle click.
+    });
+  </script>
+</body></html>`;
+
 describe('battle from monster image', () => {
   it('clicks the image, packs Cooked Cod, Maxes enemies, then Battle', async () => {
     const page = await load(BATTLE_FLOW);
@@ -249,6 +296,22 @@ describe('battle from monster image', () => {
       assert.equal(result, 'battle_started');
       assert.equal(await page.locator('body').getAttribute('data-battled'), '1');
     } finally {
+      await page.close();
+    }
+  });
+
+  it('returns failed when Battle click does not reveal Run Away', async () => {
+    const prev = process.env.COMBAT_FIGHT_CONFIRM_MS;
+    process.env.COMBAT_FIGHT_CONFIRM_MS = '1500';
+    const page = await load(BATTLE_FLOW_NOOP);
+    try {
+      const result = await configureAndBattle(page, 0, 1, 'Balanced');
+      assert.equal(result, 'failed');
+      assert.equal(await page.locator('body').getAttribute('data-battled'), '1');
+      assert.equal(await page.getByRole('button', { name: 'Run Away', exact: true }).count(), 0);
+    } finally {
+      if (prev === undefined) delete process.env.COMBAT_FIGHT_CONFIRM_MS;
+      else process.env.COMBAT_FIGHT_CONFIRM_MS = prev;
       await page.close();
     }
   });
