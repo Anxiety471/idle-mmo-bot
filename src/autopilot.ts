@@ -65,13 +65,10 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
   });
   const supervisor = createSupervisor(options.verbose ?? false);
   const junkItems = parseJunkSellItems();
-  const hasJevToken = Boolean(
-    process.env.JEV_API_TOKEN?.trim() || process.env.TYPESAFE_API_KEY?.trim(),
-  );
 
   console.log('[autopilot] Progressive supervisor loop starting (SIGINT to stop)');
   console.log(
-    `[autopilot] Jev: ${hasJevToken ? 'HttpJev (TypeSafe API)' : 'ProgressiveStubJev (no token)'}`,
+    '[autopilot] Jev: ProgressiveStubJev (deterministic; TypeSafe/HttpJev removed from live path)',
   );
   console.log('[autopilot] Flow: snapshot → discover → allowed → Jev → execute one action');
   console.log('[autopilot] Bootstrap actions registered; discovery logs unregistered UI features');

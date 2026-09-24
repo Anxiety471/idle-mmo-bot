@@ -451,7 +451,7 @@ const program = new Command();
 program
   .name('idle-mmo-bot')
   .description('Idle MMO web automation (Playwright + Jev advisor hooks)')
-  .option('-v, --verbose', 'Log every Jev decision (wraps HttpJev or StubJev)', false);
+  .option('-v, --verbose', 'Log every Jev decision (wraps ProgressiveStubJev)', false);
 
 program
   .command('gather')

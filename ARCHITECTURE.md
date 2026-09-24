@@ -12,7 +12,7 @@
 ┌──────────────┐   one action    ┌─────────────────────┐
 │ Supervisor   │ ──────────────► │ actions/executor    │
 │ Advisor      │                 │ (deterministic)     │
-│ Http/ProgStub│                 └──────────┬──────────┘
+│ ProgStubJev  │                 └──────────┬──────────┘
 └──────────────┘                            │ Playwright
                                             ▼
                                      web.idle-mmo.com
@@ -31,7 +31,7 @@ SNAPSHOT_ENRICHERS.push(...)   ← add snapshot fields (zones, pets, …)
 discoverFeatures(page)         ← logs unregistered nav routes for overseer
 ```
 
-New actions need: `id`, `description`, `isAllowed(snapshot)`, `execute(page)`, `safety` (no real-money). HttpJev and ProgressiveStubJev read descriptions from the registry automatically.
+New actions need: `id`, `description`, `isAllowed(snapshot)`, `execute(page)`, `safety` (no real-money). ProgressiveStubJev (live path) reads descriptions from the registry automatically.
 
 ## Layers
 
@@ -78,9 +78,9 @@ Comments in each file note that UI selectors are live-tested but may drift.
 
 #### Implementations
 
-- **`ProgressiveStubJev`** — autopilot default when no API token; rotates gather skills, prioritizes kill quests / turn-ins / combat XP.
+- **`ProgressiveStubJev`** — **live autopilot path** (`createSupervisor` always); rotates gather skills, prioritizes kill quests / turn-ins / combat XP. Wrapped with `LoggingJev` (and optional `ConsoleJev` with `-v`).
 - **`StubJev`** — conservative defaults for single-purpose CLI commands.
-- **`HttpJev`** — real advisor via TypeSafe System One API (`POST /v1/systemone`). `chooseNextAction` uses a choice question over allowed actions. On API error, falls back to ProgressiveStubJev.
+- **`HttpJev`** — **unit tests only**. TypeSafe System One client kept in-tree so playbook tests can assert deterministic skips; **not** instantiated by `createSupervisor` / `createJev` even if `JEV_API_TOKEN` is set.
 - **`ConsoleJev`** — wraps any inner advisor and logs every decision; enabled with `-v`.
 
 #### Autopilot allowed actions
@@ -99,22 +99,9 @@ Comments in each file note that UI selectors are live-tested but may drift.
 | `sell_junk` | `inventory.ts` Sell to Vendor (configured list) |
 | `idle` | backoff on unknown UI |
 
-#### TypeSafe API mapping (`HttpJev`)
+#### Live path factory
 
-Each `JevAdvisor` method sends one System One request with structured JSON state (from `GatherState`, `HuntState`, `BattleState`, `EnemyInfo`, or `QuestInfo` — no `pageText`, no screenshots).
-
-| Method | State payload | Question key | Type | Result |
-|--------|---------------|--------------|------|--------|
-| `shouldInterruptGather` | `{ context, busy, busyElsewhere, skill, ... }` | `interrupt` | noul | `noul >= JEV_NOUL_THRESHOLD` |
-| `decideHuntStop` | hunt metrics + enemies | `stop` | noul | `noul >= threshold` |
-| `chooseStance` | `{ enemy }` | `stance` | choice | winning stance label |
-| `chooseMaxEnemies` | `{ enemy }` | `maxEnemies` | score | `round(score) + 1`, clamped 1–5 |
-| `shouldFlee` | `{ inBattle, playerHpPercent, ... }` | `flee` | noul | `noul >= threshold` |
-| `pickQuestPriority` | quest list | `priority` | choice | chosen title first; `keep_gathering` → `[]` |
-
-Config (`src/jev/jev-config.ts`): `JEV_API_TOKEN` / `TYPESAFE_API_KEY`, `JEV_MODEL` (default `jev-latest`), `JEV_NOUL_THRESHOLD` (default `0.6`).
-
-Smoke test: `npm run jev-smoke` (`src/jev-smoke.ts`).
+`createSupervisor` / `createJev` in `src/jev/create-jev.ts` **always** return `LoggingJev(ProgressiveStubJev)` (optionally wrapped in `ConsoleJev`). TypeSafe/HttpJev is removed from the live bot path — do not document or set `JEV_API_TOKEN` for autopilot.
 
 ### `src/cli.ts`
 

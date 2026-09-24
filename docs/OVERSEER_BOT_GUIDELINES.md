@@ -8,7 +8,7 @@ Read this document first, then [README.md](../README.md) and [ARCHITECTURE.md](.
 
 ## 1. Your role
 
-You supervise a **Playwright + TypeScript** bot that drives [Idle MMO](https://web.idle-mmo.com/) through deterministic UI flows. A **Jev** advisor (TypeSafe **HttpJev** when configured, otherwise **ProgressiveStubJev**) chooses among allowed actions each supervisor tick.
+You supervise a **Playwright + TypeScript** bot that drives [Idle MMO](https://web.idle-mmo.com/) through deterministic UI flows. A **Jev** advisor (**ProgressiveStubJev** only — TypeSafe/HttpJev removed from the live path) chooses among allowed actions each supervisor tick.
 
 You do **not** play the game manually in chat. You:
 
@@ -23,7 +23,7 @@ You do **not** play the game manually in chat. You:
 ## 2. Architecture (must understand before changing code)
 
 ```
-GameSnapshot → allowed-actions registry → Jev (HttpJev / ProgressiveStubJev) chooses
+GameSnapshot → allowed-actions registry → Jev (ProgressiveStubJev) chooses
   → deterministic execute (one action) → sleep → repeat
 ```
 
@@ -35,7 +35,7 @@ GameSnapshot → allowed-actions registry → Jev (HttpJev / ProgressiveStubJev)
 | Execute | `src/actions/executor.ts` → `src/deterministic/` | Playwright click paths |
 | Supervisor loop | `src/autopilot.ts` | Forever loop until SIGINT; relaunches browser on crash |
 
-**Early-systems playbook = curriculum, not a Jev replacement.** Implemented in `src/autopilot/early-systems-playbook.ts`. It tracks stage progress, filters deprioritized actions, injects interrupt actions when the wrong gather is running, and attaches `curriculumHint` to the snapshot for HttpJev. **Jev still chooses** among the filtered allowed set each tick.
+**Early-systems playbook = curriculum, not a Jev replacement.** Implemented in `src/autopilot/early-systems-playbook.ts`. It tracks stage progress, filters deprioritized actions, injects interrupt actions when the wrong gather is running, and attaches `curriculumHint` to the snapshot for ProgressiveStubJev. **Jev still chooses** among the filtered allowed set each tick.
 
 | Env | Default | Behavior |
 |-----|---------|----------|
@@ -57,9 +57,10 @@ Bootstrap actions register at startup via `registerBootstrapActions()` in `src/a
 
 | Secret | Purpose | How to set |
 |--------|---------|------------|
-| `JEV_API_TOKEN` | TypeSafe HttpJev (`TYPESAFE_API_KEY` alias also works) | Owner secure secret form / env on the runner |
 | `IDLE_MMO_API_KEY` | IdleMMO Public API read access (optional) | Owner secure secret form / env. Never commit, never print. |
 | Game session | Logged-in cookies for Playwright | Capture once → `storage-state.json` (gitignored) |
+
+TypeSafe **HttpJev** / `JEV_API_TOKEN` is **removed** from the live path — do not set `JEV_*` or `TYPESAFE_API_KEY` for autopilot.
 
 **Never** print tokens, passwords, API keys, or `storage-state.json` contents in chat or logs you share.
 
@@ -90,9 +91,6 @@ Key `.env` variables (see `.env.example` for full list):
 | `POLL_MS` | `5000` | Loop poll interval; see §4.12 when Cloudflare is hot (429 / blank Quick-check emojis) |
 | `BUY_BAIT` | `false` | Auto-buy Cheap Bait (gold only); or use `--buy-bait` on skill CLI |
 | `FORCE_INTERRUPT` | `false` | Click **Start anyway** on replace dialog; or `--interrupt` |
-| `JEV_API_TOKEN` | _(unset)_ | Without it, autopilot uses ProgressiveStubJev |
-| `JEV_MODEL` | `jev-latest` | HttpJev model |
-| `JEV_NOUL_THRESHOLD` | `0.6` | Noul yes threshold for interrupt / stop / flee |
 | `JUNK_SELL_ITEMS` | Burnt Cod, Burnt Fish, Burnt Salmon | Vendor trash only |
 | `AUTOPILOT_LOG_DIR` | `./logs` | Structured JSONL output directory |
 | `EARLY_PLAYBOOK` | on (enabled) | Early-systems curriculum filters; set `false` to disable |
@@ -114,18 +112,10 @@ npm run build
 
 Fix type errors before starting overnight autopilot.
 
-### 3.5 Smoke-test Jev (optional, no browser)
-
-```bash
-export JEV_API_TOKEN=your-key   # via env, not chat
-npm run jev-smoke
-```
-
-### 3.6 Start live autopilot
+### 3.5 Start live autopilot
 
 ```bash
 export STORAGE_STATE=./storage-state.json
-export JEV_API_TOKEN=your-key    # recommended for HttpJev
 npm run autopilot
 
 # Verbose Jev decisions + force combat interrupt on replace dialog
@@ -142,11 +132,11 @@ CLI / env equivalents:
 | `BUY_BAIT=true` | Enables autopilot `buy_bait` when gold ≥ 2 and no bait; also skill `--buy-bait` |
 | `EARLY_PLAYBOOK=false` | Disable early-systems stage filters (default: playbook **on**) |
 
-Without `JEV_API_TOKEN`, autopilot runs **ProgressiveStubJev** (still writes `jev.jsonl` via `LoggingJev`).
+Autopilot always runs **ProgressiveStubJev** (writes `jev.jsonl` via `LoggingJev`). TypeSafe/HttpJev is not used on the live path.
 
 For a fresh low-level character, leave **`EARLY_PLAYBOOK` enabled** (default) so the batch leveling loop (coal → fish → cook → hunt → repeat; pets async) runs automatically.
 
-### 3.7 Know where logs live
+### 3.6 Know where logs live
 
 All structured logs are **gitignored** under `logs/` by default (`AUTOPILOT_LOG_DIR` overrides).
 
@@ -238,7 +228,7 @@ Only one gather/craft action globally. Default: **Close** replace dialog (keep c
 
 ### 4.6 Secrets
 
-Never print or commit: `JEV_API_TOKEN`, `TYPESAFE_API_KEY`, passwords, `storage-state.json`, cookies.
+Never print or commit: `IDLE_MMO_API_KEY`, passwords, `storage-state.json`, cookies. Do not set `JEV_API_TOKEN` / `TYPESAFE_API_KEY` (removed from live path).
 
 ### 4.7 Bait trust (PR #16 — stop gold-drain `buy_bait` loops)
 
@@ -375,11 +365,11 @@ When `EARLY_PLAYBOOK` is enabled (default), `evaluatePlaybook()` runs a **repeat
 
 **Missions-first early gold:** While the early playbook is active, prefer `quest_turnin` and `quest_talk_accept` over `market_sell_half`, `sell_junk_for_gold`, and `sell_junk` when quests are available. Market sell remains fallback when quests are unavailable or dry. At `sell_half`, the playbook skips straight to `buy_bait` when gold is already ≥ 2g (bait cost) or quests can fund bait without a sell pass.
 
-**Quest curriculum (difficulty vs ability):** `evaluateQuestCurriculum()` in `src/autopilot/quest-curriculum.ts` scores each visible quest from snapshot `acceptedQuests` / `pendingQuests` (progress, combat level, inventory). HttpJev receives `questCurriculum` in the snapshot payload plus `[QUEST HIGH/LOW PRIORITY]` tags in action criteria. When an easy gather quest is finishable (e.g. **Wood for the Hearth** → accept → `gather_oak` to 150 → `quest_turnin`), playbook filters deprioritize `fish_cod` and hard hunts (`hunt_battle`) until it completes. Hard kill quests (e.g. Goblin Menace 0/30 at combat 1) stay accepted but do not block easy gather preference.
+**Quest curriculum (difficulty vs ability):** `evaluateQuestCurriculum()` in `src/autopilot/quest-curriculum.ts` scores each visible quest from snapshot `acceptedQuests` / `pendingQuests` (progress, combat level, inventory). ProgressiveStubJev and the playbook use `questCurriculum` plus preferred/deprioritized action hints. When an easy gather quest is finishable (e.g. **Wood for the Hearth** → accept → `gather_oak` to 150 → `quest_turnin`), playbook filters deprioritize `fish_cod` and hard hunts (`hunt_battle`) until it completes. Hard kill quests (e.g. Goblin Menace 0/30 at combat 1) stay accepted but do not block easy gather preference.
 
 **Pending accept (Hearth 150/150):** `quest_talk_accept` ranks pending cards by progress-met first (e.g. Wood for the Hearth 150/150 beats Goblin Menace), opens the card, waits for detail, then tries **Accept** / **Talk** plus known Hearth dialogue. Easy-complete pending quests interrupt busy gather (replace dialog → Start anyway) so `/quests` is reachable; playbook/Jev drop `continue_current` while that accept is allowed. If Talk enables Turn In, the same execute path or next `quest_turnin` tick finishes the quest.
 
-ProgressiveStubJev respects playbook hints when no API token. HttpJev receives `curriculumHint` and playbook metadata in the snapshot.
+ProgressiveStubJev respects playbook hints and `curriculumHint` / playbook metadata on the snapshot (live path; no TypeSafe token).
 
 ---
 
@@ -403,13 +393,13 @@ Each autopilot cycle runs `discoverFeatures()` (`src/autopilot/discovery.ts`):
 
 Registered bootstrap action IDs (starting set): `continue_current`, `gather_oak`, `gather_yew`, `mine_coal`, `fish_cod`, `buy_bait`, `cook_cod`, `craft_if_ready`, `market_sell_half`, `sell_junk_for_gold`, `hunt_battle`, `hunt_battle_batch`, `quest_talk_accept`, `quest_turnin`, `sell_junk`, `idle`, plus `explore_map`.
 
-HttpJev and ProgressiveStubJev read action descriptions from the registry automatically.
+ProgressiveStubJev reads action descriptions from the registry automatically.
 
 ### 6.2 Selling and junk
 
 Default junk: `Burnt Cod`, `Burnt Fish`, `Burnt Salmon`. Override with `JUNK_SELL_ITEMS`. Quest mats and protected items are never sold.
 
-**`sell_junk_for_gold`** (bootstrap action, priority 26) sells surplus gather junk via vendor UI when gold is below `SELL_GOLD_THRESHOLD` (default **800**) or during playbook `sell_half` / `sell_extras` stages. Protections: keeps at least 1 Cod and 1 Cooked Cod for heals, keeps Coal (15) and Oak (5) floors, and skips Cheap Bait when `fish_cod` / `buy_bait` needs it and bait is not yet trusted. HttpJev remains the decision brain; the playbook injects this action ahead of `market_sell_half` on sell stages.
+**`sell_junk_for_gold`** (bootstrap action, priority 26) sells surplus gather junk via vendor UI when gold is below `SELL_GOLD_THRESHOLD` (default **800**) or during playbook `sell_half` / `sell_extras` stages. Protections: keeps at least 1 Cod and 1 Cooked Cod for heals, keeps Coal (15) and Oak (5) floors, and skips Cheap Bait when `fish_cod` / `buy_bait` needs it and bait is not yet trusted. ProgressiveStubJev + playbook remain the decision path; the playbook injects this action ahead of `market_sell_half` on sell stages.
 
 ---
 
@@ -538,7 +528,6 @@ npm run mine
 npm run fish -- --buy-bait
 npm run combat -- --rounds 5 --interrupt
 npm run quest-turnin
-npm run jev-smoke
 ```
 
 ---

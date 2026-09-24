@@ -16,7 +16,6 @@
     "quest": "tsx src/cli.ts quest",
     "quest-turnin": "tsx src/cli.ts quest-turnin",
     "farm-hearth": "tsx src/cli.ts farm-hearth",
-    "jev-smoke": "tsx src/jev-smoke.ts",
     "autopilot": "tsx src/cli.ts autopilot",
     "test": "tsx --test src/**/*.test.ts"
   },
