@@ -26,7 +26,6 @@ import {
   readBattleState,
   runAway,
   huntMore,
-  turnInQuestWhenReady,
   openQuest,
   talkQuest,
   turnInQuest,
@@ -36,6 +35,7 @@ import {
   waitForQuestCard,
   waitForQuestDetail,
   navigateToQuestsInterrupting,
+  turnInCompletableQuests,
   rankPendingQuestForAccept,
   hasEasyCompletePendingQuest,
   getQuestDialogueLine,
@@ -70,7 +70,6 @@ import {
   verifyBackoffMs,
 } from '../deterministic/poll-interval.js';
 
-const HEARTH_QUEST = 'Wood for the Hearth';
 const KILL_QUEST_PATTERN = /goblin|duck|rabbit|menace|fortune|whisper/i;
 
 function sleep(ms: number): Promise<void> {
@@ -276,38 +275,28 @@ function combatExecuteResult(
 async function questTurnIn(
   page: Page,
   config: AppConfig,
+  acceptedQuests: SnapshotQuest[],
   interruptGather = false,
 ): Promise<string> {
+  const turnInReady = acceptedQuests.filter((q) => q.canTurnIn && q.tab === 'accepted');
+  if (turnInReady.length === 0) {
+    return 'no_turnin_ready';
+  }
+
   if (interruptGather) {
     const nav = await navigateToQuestsInterrupting(page, config);
     if (nav === 'blocked') return 'gather_interrupt_blocked';
   }
 
-  const hearth = await turnInQuestWhenReady(page, config, {
-    title: HEARTH_QUEST,
-    tab: 'Accepted',
-    progressItem: 'Oak Log',
+  const outcome = await turnInCompletableQuests(page, config, acceptedQuests, {
     skipNavigate: interruptGather,
   });
-  if (hearth.result === 'turned_in') return `turned_in:${HEARTH_QUEST}`;
 
-  if (!interruptGather) {
-    await navigateTo(page, config, '/quests');
+  if (outcome.result === 'turned_in' && outcome.turnedInTitle) {
+    return `turned_in:${outcome.turnedInTitle}`;
   }
-  await waitForQuestTabsSettled(page);
-  await switchQuestTab(page, 'Accepted');
 
-  const cards = page.getByRole('button');
-  const count = await cards.count();
-  for (let i = 0; i < count; i++) {
-    const label = (await cards.nth(i).innerText()).trim();
-    if (label.length < 4 || label === 'Turn In') continue;
-    await cards.nth(i).click({ force: true });
-    if (await isTurnInEnabled(page)) {
-      return `turned_in:${label}:${await turnInQuest(page)}`;
-    }
-  }
-  return `in_progress:${hearth.result}`;
+  return 'turnin_failed';
 }
 
 async function openPendingQuestCard(
@@ -535,7 +524,7 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
       );
       return {
         action: 'quest_turnin',
-        outcome: await questTurnIn(ctx.page, ctx.config, interruptGather),
+        outcome: await questTurnIn(ctx.page, ctx.config, ctx.snapshot.acceptedQuests, interruptGather),
       };
     },
   },

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { Page } from 'playwright';
-import { talkQuest } from './quest.js';
+import { talkQuest, questTitlePattern } from './quest.js';
+import { GOBLIN_QUEST } from './quest-accept.js';
 
 type MockButton = {
   name: string;
@@ -54,6 +55,12 @@ function createMockPage(options: {
 
   return page as unknown as Page;
 }
+
+describe('questTitlePattern', () => {
+  it('matches The-prefixed UI titles from scraped names', () => {
+    assert.match('The Goblin Menace', questTitlePattern(GOBLIN_QUEST));
+  });
+});
 
 describe('talkQuest', () => {
   it('returns no_action when Talk and Accept are missing', async () => {

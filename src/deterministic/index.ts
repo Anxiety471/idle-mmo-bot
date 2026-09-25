@@ -57,11 +57,16 @@ export {
   talkQuest,
   turnInQuest,
   turnInQuestWhenReady,
+  turnInCompletableQuests,
   readQuestProgress,
   isTurnInEnabled,
+  questTitlePattern,
+  sortTurnInCandidates,
   type OpenQuestOptions,
   type TurnInQuestOptions,
   type TurnInQuestOutcome,
+  type TurnInCompletableQuestsOptions,
+  type TurnInCompletableQuestsOutcome,
 } from './quest.js';
 
 export {
