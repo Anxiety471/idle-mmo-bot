@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import type { Page } from 'playwright';
 import {
   enemyNameFromDetailText,
   enemyNameFromImageSrc,
@@ -16,6 +17,8 @@ import {
   isActiveHuntPanelText,
   isIdleBattleText,
   parseHuntMetrics,
+  parsePlayerHpPercent,
+  readPageTextBounded,
   pickBattleEnemy,
 } from './combat.js';
 import type { EnemyInfo, HuntState } from '../types.js';
@@ -391,5 +394,64 @@ describe('enemyNameFromImageSrc', () => {
     assert.equal(enemyNameFromImageSrc('/enemies/crown-goblin.png'), 'Crown Goblin');
     assert.equal(enemyNameFromImageSrc('/enemies/goblin.png'), 'Goblin');
     assert.equal(enemyNameFromImageSrc('/enemies/unknown.png'), undefined);
+  });
+});
+
+describe('parsePlayerHpPercent', () => {
+  it('parses legacy "% HP" and "HP: N%" patterns', () => {
+    assert.equal(parsePlayerHpPercent('Run Away\nBattle\n42% HP\nSkills'), 42);
+    assert.equal(parsePlayerHpPercent('HP: 18%\nRun Away'), 18);
+    assert.equal(parsePlayerHpPercent('HP 99%'), 99);
+  });
+
+  it('parses live Health label with bare percent on the same line', () => {
+    assert.equal(parsePlayerHpPercent('Health 76%\nRun Away\nBattle'), 76);
+    assert.equal(parsePlayerHpPercent('Health\n76%\nStats'), 76);
+  });
+
+  it('prefers Health-scoped percent over unrelated sidebar percentages', () => {
+    const text = `Battle
+Health
+23%
+Skill A 88%
+Skill B 44%
+Run Away`;
+    assert.equal(parsePlayerHpPercent(text), 23);
+  });
+
+  it('returns undefined when Health is collapsed or HP digits are absent', () => {
+    assert.equal(parsePlayerHpPercent('Health\nRun Away\nBattle'), undefined);
+    assert.equal(parsePlayerHpPercent('Run Away\nBattle\nStats'), undefined);
+  });
+});
+
+describe('readPageTextBounded', () => {
+  it('returns empty string when body innerText exceeds the timeout', async () => {
+    const page = {
+      locator: () => ({
+        innerText: ({ timeout }: { timeout: number }) =>
+          new Promise<string>((_resolve, reject) => {
+            setTimeout(() => reject(new Error(`Timeout ${timeout}ms exceeded`)), timeout);
+          }),
+      }),
+    } as unknown as Page;
+
+    const start = Date.now();
+    const text = await readPageTextBounded(page, 40);
+    const elapsed = Date.now() - start;
+
+    assert.equal(text, '');
+    assert.ok(elapsed < 250);
+  });
+
+  it('returns trimmed body text when innerText resolves in time', async () => {
+    const page = {
+      locator: () => ({
+        innerText: async () => '  Run Away\nHealth\n55%\n',
+      }),
+    } as unknown as Page;
+
+    const text = await readPageTextBounded(page, 500);
+    assert.equal(text, 'Run Away\nHealth\n55%');
   });
 });
