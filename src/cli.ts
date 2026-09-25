@@ -18,7 +18,7 @@ import {
   configureAndBattle,
   DETERMINISTIC_MAX_ENEMIES,
   deterministicStance,
-  readBattleState,
+  monitorInBattle,
   runAway,
   huntMore,
   pickBattleEnemy,
@@ -304,17 +304,15 @@ async function runCombat(
       );
       console.log(`[combat] battle (${enemy.name}, max=full-stack, stance=${stance}, no Jev) → ${battleResult}`);
 
-      // Monitor battle; flee if Jev says so
-      for (let i = 0; i < 60; i++) {
-        const battleState = await readBattleState(session.page);
-        if (!battleState.inBattle) break;
-
-        if (await jev.shouldFlee(battleState)) {
-          const fleeResult = await runAway(session.page);
-          console.log(`[combat] flee → ${fleeResult}`);
-          break;
-        }
-        await sleep(pollMs);
+      const battleMonitor = await monitorInBattle(session.page, {
+        pollMs,
+        shouldFlee: (state) => jev.shouldFlee(state),
+      });
+      if (battleMonitor.status === 'fled') {
+        console.log(`[combat] flee → ${battleMonitor.fleeResult}`);
+      } else if (battleMonitor.status === 'timed_out' && battleMonitor.stillInBattle) {
+        const fleeResult = await runAway(session.page);
+        console.log(`[combat] battle monitor timeout — flee → ${fleeResult}`);
       }
 
       const moreResult = await huntMore(session.page, allowInterrupt);

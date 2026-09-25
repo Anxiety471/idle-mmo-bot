@@ -32,6 +32,11 @@ export function deterministicStance(enemyName: string): Stance {
 const COMBAT_PATH = '/combat/battle';
 /** Max wait for async combat controls after domcontentloaded (~3–4s observed). */
 const COMBAT_UI_SETTLE_MS = 10_000;
+/** Never block battle polls on an unbounded body.innerText (Max fights can stall for an hour). */
+export const BATTLE_TEXT_READ_TIMEOUT_MS = 3_000;
+/** Default wall-clock cap for in-fight monitor loops (overridable via COMBAT_BATTLE_MONITOR_MS). */
+export const BATTLE_MONITOR_MAX_POLLS = 60;
+const BATTLE_MONITOR_WALL_CLOCK_MS = 15 * 60 * 1000;
 
 /** Legacy playbook selector; UI may use other Tailwind height classes now. */
 const ENEMY_CARD_HEIGHT_CLASSES = ['h-24', 'h-20', 'h-28', 'h-32'];
@@ -66,8 +71,22 @@ const ENEMY_SLUG_MAP: Record<string, string> = {
   crown: 'Crown Goblin',
 };
 
+/** Bounded body text read — returns '' on timeout instead of hanging minutes. */
+export async function readPageTextBounded(
+  page: Page,
+  timeoutMs = BATTLE_TEXT_READ_TIMEOUT_MS,
+): Promise<string> {
+  return safeInnerText(page.locator('body'), timeoutMs);
+}
+
 async function pageText(page: Page): Promise<string> {
-  return page.locator('body').innerText();
+  return readPageTextBounded(page);
+}
+
+export function battleMonitorWallClockMs(): number {
+  const envMs = Number(process.env.COMBAT_BATTLE_MONITOR_MS);
+  if (Number.isFinite(envMs) && envMs > 0) return envMs;
+  return BATTLE_MONITOR_WALL_CLOCK_MS;
 }
 
 async function safeInnerText(locator: Locator, timeoutMs = 3000): Promise<string> {
@@ -2378,20 +2397,110 @@ export async function configureAndBattle(
   return 'failed';
 }
 
+/**
+ * Parse player HP percent from battle UI text.
+ * Live UI uses a Health label plus bare NN%; legacy builds used "% HP" / "HP: N%".
+ */
+export function parsePlayerHpPercent(text: string): number | undefined {
+  if (!text) return undefined;
+
+  const legacy =
+    text.match(/(\d{1,3})\s*%\s*HP\b/i) ?? text.match(/\bHP[:\s]*(\d{1,3})\s*%/i);
+  if (legacy) {
+    const value = Number.parseInt(legacy[1], 10);
+    if (value >= 0 && value <= 100) return value;
+  }
+
+  const healthAdjacent =
+    text.match(/\bHealth\b[^\d\n]{0,80}(\d{1,3})\s*%/i) ??
+    text.match(/\bHealth\b[\s\n]+(\d{1,3})\s*%/i);
+  if (healthAdjacent) {
+    const value = Number.parseInt(healthAdjacent[1], 10);
+    if (value >= 0 && value <= 100) return value;
+  }
+
+  return undefined;
+}
+
+async function readPlayerHpFromUi(page: Page): Promise<number | undefined> {
+  const healthLabel = page.getByText(/^Health$/i).first();
+  if ((await healthLabel.count()) === 0) return undefined;
+  if (!(await healthLabel.isVisible().catch(() => false))) return undefined;
+
+  const container = healthLabel.locator(
+    'xpath=ancestor::*[self::section or self::div][position()<=5]',
+  );
+  if ((await container.count()) > 0) {
+    const sectionText = await safeInnerText(container.first());
+    const parsed = parsePlayerHpPercent(sectionText);
+    if (parsed !== undefined) return parsed;
+  }
+
+  const parentText = await safeInnerText(healthLabel.locator('xpath=..'));
+  return parsePlayerHpPercent(parentText);
+}
+
 /** Read battle screen state if a fight is in progress. */
 export async function readBattleState(page: Page): Promise<BattleState> {
+  const runAwayVisible = await isButtonVisible(page, 'Run Away');
+  let playerHpPercent = runAwayVisible ? await readPlayerHpFromUi(page) : undefined;
   const text = await pageText(page);
-  const inBattle =
-    text.includes('Run Away') ||
-    (text.includes('Battle') && text.includes('HP'));
 
-  let playerHpPercent: number | undefined;
-  const hpMatch = text.match(/(\d+)\s*%\s*HP/i) ?? text.match(/HP[:\s]*(\d+)%/i);
-  if (hpMatch) {
-    playerHpPercent = Number.parseInt(hpMatch[1], 10);
+  const inBattle =
+    runAwayVisible ||
+    text.includes('Run Away') ||
+    (text.includes('Battle') && (text.includes('HP') || text.includes('Health')));
+
+  if (playerHpPercent === undefined) {
+    playerHpPercent = parsePlayerHpPercent(text);
   }
 
   return { inBattle, playerHpPercent, pageText: text };
+}
+
+export type InBattleMonitorResult =
+  | { status: 'ended' }
+  | { status: 'fled'; fleeResult: CombatStepResult }
+  | { status: 'timed_out'; stillInBattle: boolean };
+
+/**
+ * Poll in-fight state with iteration and wall-clock caps so Max-stack battles
+ * cannot freeze the autopilot when body text reads stall.
+ */
+export async function monitorInBattle(
+  page: Page,
+  options: {
+    pollMs: number;
+    shouldFlee: (state: BattleState) => Promise<boolean>;
+  },
+): Promise<InBattleMonitorResult> {
+  const deadline = Date.now() + battleMonitorWallClockMs();
+
+  for (let i = 0; i < BATTLE_MONITOR_MAX_POLLS; i++) {
+    if (Date.now() >= deadline) {
+      const stillInBattle = await isFightInProgress(page);
+      console.log(
+        `[combat] battle monitor wall-clock timeout (${battleMonitorWallClockMs()}ms) stillInBattle=${stillInBattle}`,
+      );
+      return { status: 'timed_out', stillInBattle };
+    }
+
+    const battleState = await readBattleState(page);
+    if (!battleState.inBattle) return { status: 'ended' };
+
+    if (await options.shouldFlee(battleState)) {
+      const fleeResult = await runAway(page);
+      return { status: 'fled', fleeResult };
+    }
+
+    await page.waitForTimeout(options.pollMs);
+  }
+
+  const stillInBattle = await isFightInProgress(page);
+  console.log(
+    `[combat] battle monitor poll cap (${BATTLE_MONITOR_MAX_POLLS}) reached stillInBattle=${stillInBattle}`,
+  );
+  return { status: 'timed_out', stillInBattle };
 }
 
 /** Click Run Away during an active battle. */

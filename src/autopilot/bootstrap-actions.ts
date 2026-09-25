@@ -23,7 +23,7 @@ import {
   configureAndBattle,
   DETERMINISTIC_MAX_ENEMIES,
   deterministicStance,
-  readBattleState,
+  monitorInBattle,
   runAway,
   huntMore,
   openQuest,
@@ -227,16 +227,19 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
     allowInterrupt,
   );
 
-  for (let i = 0; i < 60; i++) {
-    const battleState = await readBattleState(page);
-    if (!battleState.inBattle) break;
-    if (await jev.shouldFlee(battleState)) {
-      return combatRoundOutcome(
-        `battle:${battleResult}:flee:${await runAway(page)}`,
-        config,
-      );
-    }
-    await sleep(pollMs);
+  const battleMonitor = await monitorInBattle(page, {
+    pollMs,
+    shouldFlee: (state) => jev.shouldFlee(state),
+  });
+  if (battleMonitor.status === 'fled') {
+    return combatRoundOutcome(
+      `battle:${battleResult}:flee:${battleMonitor.fleeResult}`,
+      config,
+    );
+  }
+  if (battleMonitor.status === 'timed_out' && battleMonitor.stillInBattle) {
+    const fleeResult = await runAway(page);
+    return combatRoundOutcome(`battle:${battleResult}:timeout_flee:${fleeResult}`, config);
   }
 
   // Do not start a fresh hunt when bag food is below the cook gate — that orphans
