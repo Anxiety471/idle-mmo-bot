@@ -1,7 +1,8 @@
 import type { Page } from 'playwright';
 import type { AppConfig } from '../config.js';
-import type { QuestInfo, QuestState, QuestStepResult } from '../types.js';
+import type { QuestInfo, QuestState, QuestStepResult, SnapshotQuest } from '../types.js';
 import { navigateTo } from '../browser.js';
+import { GOBLIN_QUEST, HEARTH_QUEST } from './quest-accept.js';
 
 /**
  * Deterministic quest click-path helpers.
@@ -16,9 +17,33 @@ const QUESTS_PATH = '/quests';
 const QUEST_UI_SETTLE_MS = 10_000;
 /** Brief pause after tab switch for quest list to refresh. */
 const TAB_SWITCH_SETTLE_MS = 500;
+/** Short timeout for quest card / button probes — fail fast instead of blocking cycles. */
+const QUEST_LOCATOR_TIMEOUT_MS = 3_000;
+
+const TURN_IN_QUEST_VALUE_ORDER = [HEARTH_QUEST, GOBLIN_QUEST] as const;
 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Case-insensitive substring pattern for quest card buttons from scraped titles. */
+export function questTitlePattern(title: string): RegExp {
+  const normalized = title.replace(/^The\s+/i, '').trim();
+  return new RegExp(escapeRegex(normalized), 'i');
+}
+
+function turnInQuestValueRank(title: string): number {
+  const index = TURN_IN_QUEST_VALUE_ORDER.findIndex((known) => questTitlePattern(known).test(title));
+  return index === -1 ? TURN_IN_QUEST_VALUE_ORDER.length : index;
+}
+
+/** Sort accepted quests with canTurnIn — hearth first, then goblin, then alphabetical. */
+export function sortTurnInCandidates(quests: SnapshotQuest[]): SnapshotQuest[] {
+  return [...quests].sort((a, b) => {
+    const rankDiff = turnInQuestValueRank(a.title) - turnInQuestValueRank(b.title);
+    if (rankDiff !== 0) return rankDiff;
+    return a.title.localeCompare(b.title);
+  });
 }
 
 /** Click with force to beat Alpine questsInspect overlays intercepting pointer events. */
@@ -74,7 +99,7 @@ export async function waitForQuestCard(
   title: string,
   timeoutMs = QUEST_UI_SETTLE_MS,
 ): Promise<boolean> {
-  const card = page.getByRole('button', { name: title });
+  const card = page.getByRole('button', { name: questTitlePattern(title) });
   try {
     await card.first().waitFor({ state: 'visible', timeout: timeoutMs });
     return true;
@@ -138,9 +163,10 @@ export async function openQuest(
 
   // Substring match on button accessible name (works once tab list is visible).
   await dismissQuestUiChrome(page);
+  const pattern = questTitlePattern(title);
   const inspect = page.locator('[x-data="questsInspect"]');
-  const cardInInspect = inspect.getByRole('button', { name: title });
-  const card = (await cardInInspect.count()) > 0 ? cardInInspect : page.getByRole('button', { name: title });
+  const cardInInspect = inspect.getByRole('button', { name: pattern });
+  const card = (await cardInInspect.count()) > 0 ? cardInInspect : page.getByRole('button', { name: pattern });
   if (await card.count() === 0) {
     return 'failed';
   }
@@ -169,9 +195,13 @@ export async function switchQuestTab(page: Page, tabName: string): Promise<Quest
   const buttons = page.getByRole('button');
   const count = await buttons.count();
   for (let i = 0; i < count; i++) {
-    const label = (await buttons.nth(i).innerText()).trim();
-    if (pattern.test(label)) {
-      await buttons.nth(i).click({ force: true });
+    const button = buttons.nth(i);
+    if (!(await button.isVisible({ timeout: QUEST_LOCATOR_TIMEOUT_MS }).catch(() => false))) {
+      continue;
+    }
+    const label = await button.innerText({ timeout: QUEST_LOCATOR_TIMEOUT_MS }).catch(() => '');
+    if (pattern.test(label.trim())) {
+      await button.click({ force: true, timeout: QUEST_LOCATOR_TIMEOUT_MS }).catch(() => undefined);
       await page.waitForTimeout(TAB_SWITCH_SETTLE_MS);
       return 'opened';
     }
@@ -333,28 +363,26 @@ export async function talkQuest(
   return 'no_action';
 }
 
-/** Click Turn In only when the button is enabled. */
+/** Click Turn In or Complete only when the button is enabled inside questsInspect. */
 export async function turnInQuest(page: Page): Promise<QuestStepResult> {
   await dismissQuestUiChrome(page);
   const inspect = page.locator('[x-data="questsInspect"]');
-  const inInspect = inspect.getByRole('button', { name: 'Turn In', exact: true });
-  const turnInBtn =
-    (await inInspect.count()) > 0
-      ? inInspect
-      : page.getByRole('button', { name: 'Turn In', exact: true });
-  if (await turnInBtn.count() === 0) {
-    return 'no_action';
-  }
+  for (const label of ['Turn In', 'Complete'] as const) {
+    const inInspect = inspect.getByRole('button', { name: label, exact: true });
+    const actionBtn =
+      (await inInspect.count()) > 0
+        ? inInspect
+        : page.getByRole('button', { name: label, exact: true });
+    if (await actionBtn.count() === 0) continue;
 
-  const isDisabled = await turnInBtn.first().isDisabled();
-  if (isDisabled) {
-    return 'in_progress';
-  }
+    const isDisabled = await actionBtn.first().isDisabled();
+    if (isDisabled) continue;
 
-  if (!(await forceClick(turnInBtn))) {
-    return 'failed';
+    if (await forceClick(actionBtn)) {
+      return 'turned_in';
+    }
   }
-  return 'turned_in';
+  return 'no_action';
 }
 
 /** Read quest progress from Overview tab text. */
@@ -372,14 +400,79 @@ export async function readQuestProgress(page: Page, itemName: string): Promise<s
   return undefined;
 }
 
-/** Check whether Turn In is currently enabled. */
+/** Check whether Turn In or Complete is currently enabled. */
 export async function isTurnInEnabled(page: Page): Promise<boolean> {
   const inspect = page.locator('[x-data="questsInspect"]');
-  const inInspect = inspect.getByRole('button', { name: 'Turn In', exact: true });
-  const turnInBtn =
-    (await inInspect.count()) > 0
-      ? inInspect
-      : page.getByRole('button', { name: 'Turn In', exact: true });
-  if (await turnInBtn.count() === 0) return false;
-  return !(await turnInBtn.first().isDisabled());
+  for (const label of ['Turn In', 'Complete'] as const) {
+    const inInspect = inspect.getByRole('button', { name: label, exact: true });
+    const actionBtn =
+      (await inInspect.count()) > 0
+        ? inInspect
+        : page.getByRole('button', { name: label, exact: true });
+    if (await actionBtn.count() === 0) continue;
+    if (!(await actionBtn.first().isDisabled())) return true;
+  }
+  return false;
+}
+
+export interface TurnInCompletableQuestsOptions {
+  /** Skip /quests navigation when caller already interrupted onto the page. */
+  skipNavigate?: boolean;
+}
+
+export interface TurnInCompletableQuestsOutcome {
+  turnedInTitle?: string;
+  result: QuestStepResult;
+}
+
+/**
+ * Turn in accepted quests flagged canTurnIn by opening matching cards — never scans global nav buttons.
+ */
+export async function turnInCompletableQuests(
+  page: Page,
+  config: AppConfig,
+  acceptedQuests: SnapshotQuest[],
+  options: TurnInCompletableQuestsOptions = {},
+): Promise<TurnInCompletableQuestsOutcome> {
+  const candidates = sortTurnInCandidates(
+    acceptedQuests.filter((q) => q.canTurnIn && q.tab === 'accepted'),
+  );
+  if (candidates.length === 0) {
+    return { result: 'no_action' };
+  }
+
+  if (!options.skipNavigate) {
+    await navigateTo(page, config, QUESTS_PATH);
+  }
+  await waitForQuestTabsSettled(page);
+
+  const tabResult = await switchQuestTab(page, 'Accepted');
+  if (tabResult !== 'opened') {
+    return { result: 'failed' };
+  }
+
+  for (const quest of candidates) {
+    await dismissQuestUiChrome(page);
+
+    if (!(await waitForQuestCard(page, quest.title, QUEST_LOCATOR_TIMEOUT_MS))) {
+      continue;
+    }
+
+    const opened = await openQuest(page, config, quest.title, { skipNavigate: true });
+    if (opened === 'failed') {
+      continue;
+    }
+
+    if (await isTurnInEnabled(page)) {
+      const result = await turnInQuest(page);
+      if (result === 'turned_in') {
+        return { turnedInTitle: quest.title, result };
+      }
+      if (result === 'in_progress') {
+        return { turnedInTitle: quest.title, result };
+      }
+    }
+  }
+
+  return { result: 'failed' };
 }

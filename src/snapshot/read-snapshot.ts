@@ -55,6 +55,7 @@ function parseQuestCards(text: string, tab: SnapshotQuest['tab']): SnapshotQuest
   const knownTitles = [
     'Wood for the Hearth',
     'Goblin Menace',
+    'The Goblin Menace',
     "A Duck's Whisper",
     "A Duck's Whisper",
     "A Rabbits Fortune",
