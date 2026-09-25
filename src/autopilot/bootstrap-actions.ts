@@ -55,6 +55,7 @@ import { tryCookCod } from '../deterministic/cook.js';
 import { shouldHardStopHunt } from '../deterministic/hunt-cap.js';
 import { equipPet, managePets } from '../deterministic/pets.js';
 import {
+  enrichGatherStateFromSnapshot,
   getPlaybookFromSnapshot,
   recentBaitPurchase,
   shouldPreferBaitRestock,
@@ -130,7 +131,10 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
   const pollMs = effectivePollMs(config.pollMs);
   const huntBackoffMs = verifyBackoffMs(config.pollMs);
   const verifyBudget = createVerifyBudget();
-  const gatherSnapshot = await readGatherState(page, config);
+  const gatherSnapshot = enrichGatherStateFromSnapshot(
+    await readGatherState(page, config),
+    ctx.snapshot,
+  );
   const allowInterrupt = forceInterrupt || (await jev.shouldInterruptGather(gatherSnapshot));
 
   const preVerify = await attemptHumanVerify(page, verifyBudget, pollMs);
@@ -441,7 +445,9 @@ function gatherAction(
       const allowInterrupt =
         staleCoalForce ||
         playbookInterrupt ||
-        (await ctx.jev.shouldInterruptGather(skillState));
+        (await ctx.jev.shouldInterruptGather(
+          enrichGatherStateFromSnapshot(skillState, ctx.snapshot),
+        ));
       const result = await restartSkillGather(ctx.page, ctx.config, {
         skill,
         resourceLabel: resource,
@@ -667,7 +673,10 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
       );
     },
     execute: async (ctx) => {
-      const gatherState = await readGatherState(ctx.page, ctx.config);
+      const gatherState = enrichGatherStateFromSnapshot(
+        await readGatherState(ctx.page, ctx.config),
+        ctx.snapshot,
+      );
       const allowInterrupt =
         ctx.forceInterrupt || (await ctx.jev.shouldInterruptGather(gatherState));
       return {
@@ -686,7 +695,10 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
     isAllowed: (ctx) =>
       ctx.snapshot.flags.sessionValid && (ctx.snapshot.inventory['Coal Ore'] ?? 0) >= 1,
     execute: async (ctx) => {
-      const gatherState = await readGatherState(ctx.page, ctx.config);
+      const gatherState = enrichGatherStateFromSnapshot(
+        await readGatherState(ctx.page, ctx.config),
+        ctx.snapshot,
+      );
       const allowInterrupt =
         ctx.forceInterrupt || (await ctx.jev.shouldInterruptGather(gatherState));
       return {
