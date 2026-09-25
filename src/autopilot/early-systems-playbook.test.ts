@@ -375,7 +375,7 @@ describe('sticky baitOwned (no repurchase loop)', () => {
     assert.ok(!filtered.includes('fish_cod'));
     assert.ok(filtered.includes('continue_current'));
     assert.ok(filtered.includes('mine_coal'));
-    assert.ok(filtered.includes('cook_cod'));
+    assert.ok(!filtered.includes('cook_cod'), 'cook_cod needs raw Cod in bag');
   });
 
   it('notePlaybookOutcome resets fish_cod failure counter on restarted', () => {
@@ -1720,6 +1720,161 @@ describe('strict sequential real-count gates', () => {
     // Hunt met → explore_map on first cycle (batchCycles=0, mapPeeks=0) — not manage_pets.
     assert.equal(progress.stage, 'explore_map');
     assert.notEqual(progress.stage, 'manage_pets');
+  });
+});
+
+describe('stale rawCod cook_cod recovery', () => {
+  const envSnapshot = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
+  let statePath = '';
+
+  afterEach(() => {
+    restoreEnv(envSnapshot);
+    if (statePath) rmSync(statePath, { force: true });
+  });
+
+  it('clamps soft rawCod to 0 when bag has no Cod/Raw Cod', () => {
+    statePath = join('/tmp', `playbook-stale-rawcod-clamp-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'cook_cod',
+        counts: {
+          ...coalMetCounts({ sells: 2 }),
+          rawCod: 100,
+          cookedCod: 89,
+          huntBattles: 97,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const snapshot = minimalSnapshot({
+      inventory: { 'Coal Ore': 3800, 'Cheap Bait': 549, 'Cooked Cod': 89 },
+      gold: 50,
+    });
+    const progress = evaluatePlaybook(snapshot);
+
+    assert.equal(progress.counts.rawCod, 0);
+    assert.equal(progress.stage, 'fish_cod');
+    const saved = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      counts?: { rawCod?: number };
+      stage?: string;
+    };
+    assert.equal(saved.counts?.rawCod, 0);
+    assert.equal(saved.stage, 'fish_cod');
+  });
+
+  it('does not inject cook_cod when bag lacks raw Cod', () => {
+    const playbook: PlaybookProgress = {
+      enabled: true,
+      stage: 'cook_cod',
+      stageIndex: 4,
+      stageGoal: 'Cook Cod',
+      preferredActions: ['cook_cod'],
+      deprioritizedActions: [],
+      interruptActions: ['cook_cod'],
+      counts: {
+        ...coalMetCounts({ sells: 2 }),
+        rawCod: 100,
+        cookedCod: 89,
+        huntBattles: 97,
+      },
+      baitOwned: true,
+      targets: { coalMin: 100, coalMax: 100, codMin: 100, codMax: 100, cookMin: 100, huntMin: 120 },
+      curriculumHint: 'cook',
+      complete: false,
+      gatherGraceActive: false,
+      fishCodBackoffActive: false,
+      consecutiveFishCodFailures: 0,
+      staleCoalGather: false,
+      staleCoalBusyCycles: 0,
+    };
+    const snapshot = minimalSnapshot({
+      inventory: { 'Coal Ore': 3800, 'Cheap Bait': 549, 'Cooked Cod': 89 },
+      flags: {
+        hasBait: true,
+        bankNearby: false,
+        gatherBusy: false,
+        inBattle: false,
+        sessionValid: true,
+      },
+    });
+
+    const filtered = filterAllowedByPlaybook(
+      ['fish_cod', 'idle', 'continue_current', 'mine_coal'],
+      snapshot,
+      playbook,
+    );
+
+    assert.ok(!filtered.includes('cook_cod'), `filtered=${JSON.stringify(filtered)}`);
+    assert.ok(filtered.includes('fish_cod'));
+  });
+
+  it('snaps to fish_cod and clears rawCod on cook_cod missing_requirement', () => {
+    statePath = join('/tmp', `playbook-cook-missing-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'cook_cod',
+        counts: {
+          ...coalMetCounts({ sells: 2 }),
+          rawCod: 100,
+          cookedCod: 89,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    notePlaybookOutcome('cook_cod', 'missing_requirement');
+
+    const saved = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      stage?: string;
+      counts?: { rawCod?: number };
+    };
+    assert.equal(saved.stage, 'fish_cod');
+    assert.equal(saved.counts?.rawCod, 0);
+  });
+
+  it('preserves soft rawCod while actively fishing Cod with empty bag scrape', () => {
+    statePath = join('/tmp', `playbook-rawcod-fishing-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'fish_cod',
+        counts: {
+          ...coalMetCounts({ sells: 2 }),
+          rawCod: 42,
+          cookedCod: 0,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const progress = evaluatePlaybook(
+      minimalSnapshot({
+        inventory: { 'Coal Ore': 100, 'Cheap Bait': 20 },
+        flags: {
+          hasBait: true,
+          bankNearby: false,
+          gatherBusy: true,
+          inBattle: false,
+          sessionValid: true,
+        },
+        currentAction: { busy: true, skill: 'fishing', resource: 'Cod' },
+      }),
+    );
+
+    assert.equal(progress.counts.rawCod, 42);
+    assert.equal(progress.stage, 'fish_cod');
   });
 });
 

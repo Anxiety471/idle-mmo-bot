@@ -384,7 +384,7 @@ function syncCountsFromSnapshot(
 ): PlaybookCounts {
   const next = { ...counts };
   const coal = invCount(snapshot, ['Coal Ore', 'Coal']);
-  const rawCod = invCount(snapshot, ['Cod', 'Raw Cod']);
+  const rawCod = rawCodBagCount(snapshot);
   const cooked = cookedCodCount(snapshot.inventory);
   // CURRENT ACTION "+N" is a live floor while icon inventory under-reports.
   const produced =
@@ -393,10 +393,11 @@ function syncCountsFromSnapshot(
       : 0;
   if (coal > 0) next.coal = Math.max(next.coal, coal);
   if (produced > 0) next.coal = Math.max(next.coal, produced);
-  if (rawCod > 0) next.rawCod = Math.max(next.rawCod, rawCod);
-  // Coal and raw cod only ratchet up (icon inventory under-reports and is not
-  // eaten). Cooked Cod is consumed in battles and by pets, so a positive bag
-  // scrape replaces the soft counter — including clamping it down.
+  // Coal only ratchets up (icon inventory under-reports and is not eaten).
+  // Raw Cod is consumed by cooking; bag scrape clamps stale soft counts down.
+  syncRawCodCount(next, snapshot, rawCod);
+  // Cooked Cod is consumed in battles and by pets, so a positive bag scrape
+  // replaces the soft counter — including clamping it down.
   syncCookedCodCount(next, snapshot, cooked);
 
   const resource = snapshot.currentAction?.resource ?? snapshot.currentAction?.label ?? '';
@@ -537,6 +538,46 @@ export function cookTargetMet(
     if (bag > 0) return bag >= COOK_MIN;
   }
   return counts.cookedCod >= COOK_MIN;
+}
+
+/**
+ * Raw Cod / Cod stacks from the bag scrape. Exact keys only — invCount fuzzy
+ * matching would treat Cooked Cod as raw fish.
+ */
+export function rawCodBagCount(snapshot: GameSnapshot): number {
+  const inv = snapshot.inventory;
+  return Math.max(inv['Cod'] ?? 0, inv['Raw Cod'] ?? 0);
+}
+
+/** True when inventory scrape shows at least one Cod / Raw Cod stack. */
+export function bagHasRawCod(snapshot: GameSnapshot): boolean {
+  return rawCodBagCount(snapshot) >= 1;
+}
+
+/**
+ * Bag Raw Cod ratchets up while fishing (icon scrape under-reports). When the
+ * bag is empty and we are not actively fishing Cod, clamp soft rawCod down —
+ * cooking consumes raw fish and a stale latch blocks fish_cod recovery.
+ */
+function syncRawCodCount(
+  next: PlaybookCounts,
+  snapshot: GameSnapshot,
+  bagRawCod: number,
+): void {
+  const resource = snapshot.currentAction?.resource ?? snapshot.currentAction?.label ?? '';
+  const fishingCod =
+    /\bcod\b/i.test(resource) &&
+    snapshot.currentAction?.skill === 'fishing' &&
+    Boolean(snapshot.currentAction?.busy || snapshot.flags.gatherBusy);
+  if (bagRawCod > 0) {
+    next.rawCod = Math.max(next.rawCod, bagRawCod);
+    return;
+  }
+  // Bag empty while soft still high — raw cod was cooked/sold. Skip while fishing
+  // (icon scrape under-reports) and when hunt batch is complete (counts reset next).
+  if (!fishingCod && next.rawCod > bagRawCod) {
+    next.rawCod = bagRawCod;
+  }
 }
 
 /**
@@ -958,7 +999,11 @@ export function evaluatePlaybook(
         `(coal=${counts.coal}/${COAL_MIN}, busyCycles=${counts.coalBusyCycles} ignored for gate)`;
     }
     stage = 'mine_coal';
-  } else if (!fishMet && persistedIdx > STAGE_ORDER.indexOf('fish_cod')) {
+  } else if (
+    !fishMet &&
+    persistedIdx > STAGE_ORDER.indexOf('fish_cod') &&
+    !(huntMet && persistedStage === 'hunt_battle_batch')
+  ) {
     if (!trustHasBait(snapshot, baitOwned, persisted.stage)) {
       stage = counts.sells < 1 && !canSkipSellHalfForQuestFunding(snapshot) ? 'sell_half' : 'buy_bait';
       snapBackReason =
@@ -1124,6 +1169,7 @@ export function evaluatePlaybook(
 
   // When bag food is under cook target, hard-prefer cook over hunt/quest-talk noise.
   if (
+    bagHasRawCod(snapshot) &&
     !mustFinishActiveHunt(snapshot) &&
     needsCookBeforeHunt(snapshot.inventory, COOK_MIN) &&
     (stage === 'hunt_battle_batch' ||
@@ -1332,6 +1378,15 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
     lastGatherSkill = 'fishing';
     lastGatherResource = 'Cod';
   }
+  if (action === 'cook_cod' && /missing_requirement/i.test(outcome)) {
+    counts.rawCod = 0;
+    if (STAGE_ORDER.indexOf(stage) >= STAGE_ORDER.indexOf('cook_cod')) {
+      stage = 'fish_cod';
+    }
+    console.warn(
+      '[playbook] cook_cod missing_requirement — no raw Cod in bag; snap to fish_cod and clear stale rawCod soft count',
+    );
+  }
   // cook_cod restarted / already_busy / kept_current means cooking is in
   // progress, not that one Cooked Cod landed in the bag. Credit comes from
   // the inventory scrape (and cooking producedCount) in syncCountsFromSnapshot.
@@ -1523,6 +1578,7 @@ export function filterAllowedByPlaybook(
       ]);
       for (const id of inject) {
         if (!finishHunt && cookBeforeHunt && isHuntCombatAction(id)) continue;
+        if (id === 'cook_cod' && !bagHasRawCod(snapshot)) continue;
         if (!next.includes(id)) next.push(id);
       }
     }
@@ -1559,6 +1615,9 @@ export function filterAllowedByPlaybook(
         continue;
       }
       if (finishHunt && id === 'cook_cod') {
+        continue;
+      }
+      if (id === 'cook_cod' && !bagHasRawCod(snapshot)) {
         continue;
       }
       if (!next.includes(id) && ['mine_coal', 'fish_cod', 'cook_cod', 'market_sell_half', 'sell_junk_for_gold', 'explore_map', 'hunt_battle_batch', 'manage_pets', 'equip_pet', 'buy_bait', 'sell_junk'].includes(id)) {
@@ -1654,6 +1713,10 @@ export function filterAllowedByPlaybook(
     }
     return 0;
   });
+
+  if (!bagHasRawCod(snapshot)) {
+    next = next.filter((a) => a !== 'cook_cod');
+  }
 
   // Cook-before-hunt must beat mission-first quest_talk_accept spam. Keep turn-in first.
   if (cookBeforeHunt && !finishHunt && next.includes('cook_cod')) {
