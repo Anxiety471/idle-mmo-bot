@@ -226,7 +226,7 @@ export class ProgressiveStubJev implements SupervisorAdvisor {
   }
 
   async shouldFlee(battleState: BattleState): Promise<boolean> {
-    if (battleState.playerHpPercent === undefined) return false;
+    if (battleState.playerHpStale || battleState.playerHpPercent === undefined) return false;
     return battleState.playerHpPercent < LOW_HP_THRESHOLD;
   }
 

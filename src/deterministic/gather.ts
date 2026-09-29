@@ -26,7 +26,7 @@ const CURRENT_ACTION_MARKER = 'CURRENT ACTION';
 /** Max time to wait for async gather panel after navigation. */
 const GATHER_UI_SETTLE_MS = 10_000;
 /** Shorter settle when probing other skill pages for a global busy check. */
-const PROBE_SETTLE_MS = 3_000;
+const PROBE_SETTLE_MS = Number(process.env.SKILL_PROBE_SETTLE_MS) || 1_000;
 
 /** Bait-related phrases observed / expected when fishing without Cheap Bait. */
 const BAIT_REQUIREMENT_PATTERNS = [

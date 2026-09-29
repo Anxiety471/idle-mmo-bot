@@ -50,6 +50,7 @@ export {
   isIdleBattleScreen,
   isIdleBattleText,
   isHuntActivelyRunning,
+  isFightInProgress,
 } from './combat.js';
 
 export {

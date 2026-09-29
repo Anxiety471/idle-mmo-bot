@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { huntFoundCap, isHuntHardStop } from './hunt-cap.js';
+import {
+  enemyBacklogTotal,
+  huntFoundCap,
+  isHuntHardStop,
+  shouldSkipHuntMore,
+} from './hunt-cap.js';
 
 describe('huntFoundCap', () => {
   const previous = process.env.HUNT_FOUND_CAP;
@@ -26,6 +31,29 @@ describe('huntFoundCap', () => {
       if (previous === undefined) delete process.env.HUNT_FOUND_CAP;
       else process.env.HUNT_FOUND_CAP = previous;
     }
+  });
+});
+
+describe('enemy backlog cap', () => {
+  it('sums tile quantities for backlog totals', () => {
+    assert.equal(
+      enemyBacklogTotal([
+        { name: 'Duck', index: 0, quantity: 2 },
+        { name: 'Goblin', index: 1, quantity: 27 },
+        { name: 'Goblin King', index: 2, quantity: 126 },
+      ]),
+      155,
+    );
+  });
+
+  it('skips Hunt More when backlog meets the cap even if found counter is higher', () => {
+    delete process.env.HUNT_FOUND_CAP;
+    const enemies = [
+      { name: 'Duck', index: 0, quantity: 2 },
+      { name: 'Goblin King', index: 1, quantity: 120 },
+    ];
+    assert.equal(shouldSkipHuntMore(enemies), true);
+    assert.equal(shouldSkipHuntMore([{ name: 'Rabbit', index: 0, quantity: 40 }]), false);
   });
 });
 

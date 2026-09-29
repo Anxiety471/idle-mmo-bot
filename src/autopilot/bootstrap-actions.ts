@@ -24,8 +24,10 @@ import {
   DETERMINISTIC_MAX_ENEMIES,
   deterministicStance,
   monitorInBattle,
+  battleMonitorWallClockMs,
   runAway,
   huntMore,
+  isFightInProgress,
   openQuest,
   talkQuest,
   turnInQuest,
@@ -55,11 +57,12 @@ import { tryCookCod } from '../deterministic/cook.js';
 import { shouldHardStopHunt } from '../deterministic/hunt-cap.js';
 import { equipPet, managePets } from '../deterministic/pets.js';
 import {
+  formatHuntBattleRoundOutcome,
   getPlaybookFromSnapshot,
   recentBaitPurchase,
   shouldPreferBaitRestock,
 } from './early-systems-playbook.js';
-import { pollUntilHuntStop } from '../jev/hunt-cap.js';
+import { enemyBacklogTotal, pollUntilHuntStop, shouldSkipHuntMore } from '../jev/hunt-cap.js';
 import {
   attemptHumanVerify,
   isHumanCheckPresent,
@@ -139,6 +142,12 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
 
   const playbook = getPlaybookFromSnapshot(ctx.snapshot);
   const cookTarget = playbook?.targets.cookMin ?? 100;
+  const huntCookFloor = playbook?.targets.huntCookFloor ?? 30;
+  const huntBatchActive = playbook?.stage === 'hunt_battle_batch' || playbook?.stage === 'hunt_rabbits';
+  const cookGateOptions = {
+    huntBatchActive,
+    huntCookFloor,
+  };
   const huntActive = await isHuntActivelyRunning(page);
   const huntPeek = huntActive ? await readHuntState(page) : null;
   const foundNow = huntPeek?.totalEnemiesFound ?? ctx.snapshot.totalEnemiesFound;
@@ -146,13 +155,13 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
     huntActive ||
     shouldHardStopHunt(foundNow, ctx.snapshot.combatLevel, ctx.snapshot.totalLevel) ||
     ctx.snapshot.combatPhase === 'enemy_select';
-  if (!mustBattle && needsCookBeforeHunt(ctx.snapshot.inventory, cookTarget)) {
+  if (!mustBattle && needsCookBeforeHunt(ctx.snapshot.inventory, cookTarget, cookGateOptions)) {
     const cooked = ctx.snapshot.inventory['Cooked Cod'] ?? 0;
     console.log(`[combat] Cooked Cod ${cooked}/${cookTarget} — cooking before hunt`);
     const cookResult = await tryCookCod(page, config, true);
     return combatRoundOutcome(`cook_before_hunt:${cookResult}`, config);
   }
-  if (mustBattle && needsCookBeforeHunt(ctx.snapshot.inventory, cookTarget)) {
+  if (mustBattle && needsCookBeforeHunt(ctx.snapshot.inventory, cookTarget, cookGateOptions)) {
     console.log(
       `[combat] skipping cook-before-hunt — hunt active/over cap (found=${foundNow ?? 'n/a'})`,
     );
@@ -219,6 +228,16 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
   const maxEnemies = DETERMINISTIC_MAX_ENEMIES;
   const stance = deterministicStance(enemy.name);
   console.log(`[combat] deterministic battle config max=full-stack stance=${stance} (no Jev)`);
+  console.log(
+    `[combat] enemy pick ${enemy.name} qty=${enemy.quantity ?? '?'} idx=${enemy.index} of [` +
+      huntState.enemies
+        .map((e) => `${e.name}:${e.quantity ?? '?'}${e.restrictive ? '(restrictive)' : ''}`)
+        .join(', ') +
+      ']',
+  );
+  // Run Away already on screen before Battle means an older fight is running —
+  // it must not be credited again as this round's fight.
+  const fightActiveBeforeBattle = await isFightInProgress(page).catch(() => false);
   const battleResult = await configureAndBattle(
     page,
     enemy.index,
@@ -231,22 +250,37 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
     return combatRoundOutcome('blocked:verify', config);
   }
 
+  const fightConfirmed =
+    battleResult === 'battle_started' ||
+    (!fightActiveBeforeBattle && (await isFightInProgress(page).catch(() => false)));
+  if (fightConfirmed && battleResult !== 'battle_started') {
+    console.log(
+      `[combat] fight active after configureAndBattle=${battleResult} — treating as battle_started for outcome`,
+    );
+  }
+
   let battleMonitor: Awaited<ReturnType<typeof monitorInBattle>> = { status: 'ended' };
-  if (battleResult === 'battle_started') {
+  if (fightConfirmed) {
     battleMonitor = await monitorInBattle(page, {
       pollMs,
+      wallClockMs: battleMonitorWallClockMs(enemy.quantity),
       shouldFlee: (state) => jev.shouldFlee(state),
     });
   }
   if (battleMonitor.status === 'fled') {
     return combatRoundOutcome(
-      `battle:${battleResult}:flee:${battleMonitor.fleeResult}`,
+      formatHuntBattleRoundOutcome(fightConfirmed, battleResult, `flee:${battleMonitor.fleeResult}`),
       config,
     );
   }
   if (battleMonitor.status === 'timed_out' && battleMonitor.stillInBattle) {
+    // Hard upper bound: wall-clock or poll cap both end in Run Away.
+    console.log(`[combat] battle monitor ${battleMonitor.reason ?? 'timeout'} — running away`);
     const fleeResult = await runAway(page);
-    return combatRoundOutcome(`battle:${battleResult}:timeout_flee:${fleeResult}`, config);
+    return combatRoundOutcome(
+      formatHuntBattleRoundOutcome(fightConfirmed, battleResult, `timeout_flee:${fleeResult}`),
+      config,
+    );
   }
 
   // Do not start a fresh hunt when bag food is below the cook gate — that orphans
@@ -254,7 +288,7 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
   // Cod after the snapshot was taken, so apply that spend before the same check.
   const cookedSpent = takeCookedCodSpentOnHeal();
   const inventoryForCookGate = inventoryAfterCookedCodSpend(ctx.snapshot.inventory, cookedSpent);
-  if (needsCookBeforeHunt(inventoryForCookGate, cookTarget)) {
+  if (needsCookBeforeHunt(inventoryForCookGate, cookTarget, cookGateOptions)) {
     console.log('[combat] skipping Hunt More — Cooked Cod below cook target');
     if (cookedSpent > 0) {
       const cooked = cookedCodCount(inventoryForCookGate);
@@ -262,7 +296,28 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
         `[combat] heal spent ${cookedSpent} Cooked Cod — bag ${cooked}/${cookTarget}`,
       );
     }
-    return combatRoundOutcome(`battle:${battleResult}:huntMore:skipped_cook_gate`, config);
+    return combatRoundOutcome(
+      formatHuntBattleRoundOutcome(fightConfirmed, battleResult, 'huntMore:skipped_cook_gate'),
+      config,
+    );
+  }
+
+  const backlogState = await readHuntState(page).catch(() => huntState);
+  if (
+    shouldSkipHuntMore(
+      backlogState.enemies,
+      ctx.snapshot.combatLevel,
+      ctx.snapshot.totalLevel,
+    )
+  ) {
+    const backlog = enemyBacklogTotal(backlogState.enemies);
+    console.log(
+      `[combat] skipping Hunt More — enemy backlog ${backlog} >= cap (fight backlog first)`,
+    );
+    return combatRoundOutcome(
+      formatHuntBattleRoundOutcome(fightConfirmed, battleResult, 'huntMore:skipped_backlog_cap'),
+      config,
+    );
   }
 
   const huntMoreResult = await huntMore(page, allowInterrupt);
@@ -270,7 +325,10 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
     return combatRoundOutcome('blocked:verify', config);
   }
 
-  return combatRoundOutcome(`battle:${battleResult}:huntMore:${huntMoreResult}`, config);
+  return combatRoundOutcome(
+    formatHuntBattleRoundOutcome(fightConfirmed, battleResult, `huntMore:${huntMoreResult}`),
+    config,
+  );
 }
 
 function combatExecuteResult(

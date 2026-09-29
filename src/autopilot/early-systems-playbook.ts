@@ -88,6 +88,7 @@ export interface PlaybookProgress {
     codMin: number;
     codMax: number;
     cookMin: number;
+    huntCookFloor: number;
     huntMin: number;
   };
   curriculumHint: string;
@@ -167,6 +168,7 @@ const COAL_MAX = envInt('PLAYBOOK_COAL_MAX', COAL_MIN);
 const COD_MIN = envInt('PLAYBOOK_FISH_TARGET', 100);
 const COD_MAX = envInt('PLAYBOOK_FISH_MAX', COD_MIN);
 const COOK_MIN = envInt('PLAYBOOK_COOK_TARGET', 100);
+const HUNT_COOK_FLOOR = envInt('PLAYBOOK_HUNT_COOK_FLOOR', 30);
 const HUNT_MIN = envInt('PLAYBOOK_HUNT_TARGET', 120);
 
 /** Quest actions preferred over market sell for early gold while playbook is active. */
@@ -529,15 +531,22 @@ export function fishTargetMet(counts: PlaybookCounts): boolean {
  * missing stack falls back to the soft counter because icon inventory often
  * omits Cooked Cod entirely.
  */
+export function huntCookBagThreshold(stage?: string): number {
+  if (stage === 'hunt_battle_batch' || stage === 'hunt_rabbits') return HUNT_COOK_FLOOR;
+  return COOK_MIN;
+}
+
 export function cookTargetMet(
   counts: PlaybookCounts,
   inventory?: Record<string, number> | null,
+  stage?: string,
 ): boolean {
+  const minBag = huntCookBagThreshold(stage);
   if (inventory) {
     const bag = cookedCodCount(inventory);
-    if (bag > 0) return bag >= COOK_MIN;
+    if (bag > 0) return bag >= minBag;
   }
-  return counts.cookedCod >= COOK_MIN;
+  return counts.cookedCod >= minBag;
 }
 
 /**
@@ -616,6 +625,24 @@ function huntBattleCount(counts: PlaybookCounts): number {
 /** Hard hunt gate: successful hunt/battle outcome counter only. */
 export function huntTargetMet(counts: PlaybookCounts): boolean {
   return huntBattleCount(counts) >= HUNT_MIN;
+}
+
+/** Primary battle segment for hunt round outcomes — credit only when a fight actually ran. */
+export function huntBattleOutcomePrimarySegment(
+  fightConfirmed: boolean,
+  battleResult: string,
+): string {
+  return fightConfirmed ? 'battle_started' : battleResult;
+}
+
+/** Build `battle:<primary>:<tail>` so notePlaybookOutcome can credit confirmed fights. */
+export function formatHuntBattleRoundOutcome(
+  fightConfirmed: boolean,
+  battleResult: string,
+  tail: string,
+): string {
+  const primary = huntBattleOutcomePrimarySegment(fightConfirmed, battleResult);
+  return `battle:${primary}:${tail}`;
 }
 
 /**
@@ -952,6 +979,7 @@ export function evaluatePlaybook(
         codMin: COD_MIN,
         codMax: COD_MAX,
         cookMin: COOK_MIN,
+        huntCookFloor: HUNT_COOK_FLOOR,
         huntMin: HUNT_MIN,
       },
       curriculumHint: 'Early playbook disabled (EARLY_PLAYBOOK=false).',
@@ -987,7 +1015,8 @@ export function evaluatePlaybook(
   let stage = deriveStage(counts, snapshot, persistedStage, baitOwned);
   const coalMet = coalTargetMet(counts);
   const fishMet = fishTargetMet(counts);
-  const cookMet = cookTargetMet(counts, snapshot.inventory);
+  const cookMetAdvance = cookTargetMet(counts, snapshot.inventory);
+  const cookMet = cookTargetMet(counts, snapshot.inventory, persistedStage);
   const huntMet = huntTargetMet(counts);
   // Treat legacy stages (removed from STAGE_ORDER) for snap-back comparisons.
   const persistedIdx =
@@ -1057,7 +1086,7 @@ export function evaluatePlaybook(
   if (stage === 'fish_cod' && fishMet) {
     stage = 'cook_cod';
   }
-  if (stage === 'cook_cod' && cookMet) stage = 'hunt_battle_batch';
+  if (stage === 'cook_cod' && cookMetAdvance) stage = 'hunt_battle_batch';
   // Legacy: persisted sell_extras (removed from STAGE_ORDER) → hunt when cook met.
   if (stage === 'sell_extras' && cookMet && !huntMet) {
     stage = 'hunt_battle_batch';
@@ -1179,11 +1208,14 @@ export function evaluatePlaybook(
   if (
     bagHasRawCod(snapshot) &&
     !mustFinishActiveHunt(snapshot) &&
-    needsCookBeforeHunt(snapshot.inventory, COOK_MIN) &&
+    needsCookBeforeHunt(snapshot.inventory, COOK_MIN, {
+      huntBatchActive: stage === 'hunt_battle_batch' || stage === 'hunt_rabbits',
+      huntCookFloor: HUNT_COOK_FLOOR,
+    }) &&
     (stage === 'hunt_battle_batch' ||
       stage === 'hunt_rabbits' ||
       stage === 'cook_cod' ||
-      cookTargetMet(counts, snapshot.inventory))
+      cookTargetMet(counts, snapshot.inventory, stage))
   ) {
     preferredActions = [
       'cook_cod',
@@ -1288,6 +1320,7 @@ export function evaluatePlaybook(
       codMin: COD_MIN,
       codMax: COD_MAX,
       cookMin: COOK_MIN,
+      huntCookFloor: HUNT_COOK_FLOOR,
       huntMin: HUNT_MIN,
     },
     curriculumHint,
@@ -1485,8 +1518,15 @@ export function filterAllowedByPlaybook(
   // Strict sequential gates: drop later-stage actions while earlier real targets unmet.
   const coalIncomplete = !coalTargetMet(playbook.counts);
   const fishIncomplete = !fishTargetMet(playbook.counts);
-  const cookIncomplete = !cookTargetMet(playbook.counts, snapshot.inventory);
-  const cookBeforeHunt = needsCookBeforeHunt(snapshot.inventory, playbook.targets.cookMin);
+  const cookIncomplete = !cookTargetMet(
+    playbook.counts,
+    snapshot.inventory,
+    playbook.stage,
+  );
+  const cookBeforeHunt = needsCookBeforeHunt(snapshot.inventory, playbook.targets.cookMin, {
+    huntBatchActive: playbook.stage === 'hunt_battle_batch' || playbook.stage === 'hunt_rabbits',
+    huntCookFloor: playbook.targets.huntCookFloor,
+  });
   const finishHunt = mustFinishActiveHunt(snapshot);
   if (finishHunt) {
     // Over-cap / active hunt wins over cook gates — stop+battle before cooking.

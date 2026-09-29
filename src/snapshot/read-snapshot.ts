@@ -17,6 +17,8 @@ import {
 } from './inventory-scrape.js';
 import { parseHuntMetrics } from '../deterministic/combat.js';
 import { applyPublicApiToSnapshot } from './merge-public-api.js';
+import { loadIdleMmoApiConfig, readPublicApi } from '../api/idle-mmo-api.js';
+import { noteBusySkillForInventoryCache } from './inventory-scrape.js';
 
 const SKILL_IDS: SkillId[] = [
   'woodcutting',
@@ -114,14 +116,41 @@ async function readQuestsForTab(
   return parseQuestCards(text, tabKey);
 }
 
+function logSnapshotStep(step: string, startedAt: number): void {
+  const ms = Date.now() - startedAt;
+  console.log(`[snapshot] step=${step} ms=${ms}`);
+}
+
 /** Build a structured GameSnapshot from live Playwright page state. */
 export async function readGameSnapshot(page: Page, config: AppConfig): Promise<GameSnapshot> {
+  const snapshotStarted = Date.now();
   const path = new URL(page.url()).pathname;
   let text = await bodyText(page);
 
+  let apiBusySkill: string | undefined;
+  const apiLoaded = loadIdleMmoApiConfig();
+  if (apiLoaded.enabled) {
+    const apiStep = Date.now();
+    try {
+      const apiRead = await readPublicApi();
+      if (apiRead.enabled && apiRead.read.patch.currentAction?.busy) {
+        apiBusySkill = apiRead.read.patch.currentAction.skill;
+      }
+      if (apiRead.enabled && noteBusySkillForInventoryCache(apiBusySkill ?? null)) {
+        console.log(`[snapshot] busy skill changed → ${apiBusySkill ?? 'idle'}; inventory cache dropped`);
+      }
+    } catch {
+      // Best-effort — DOM scrape continues.
+    }
+    logSnapshotStep('public_api_prefetch', apiStep);
+  }
+
+  const questStep = Date.now();
   const acceptedQuests = await readQuestsForTab(page, config, 'Accepted', 'accepted');
   const pendingQuests = await readQuestsForTab(page, config, 'Pending Nearby', 'pending');
+  logSnapshotStep('quests', questStep);
 
+  const inventoryStep = Date.now();
   await navigateTo(page, config, '/inventory');
   // Icon grid + CDN skins need a beat before badge text/img src are stable.
   await page.waitForTimeout(1_800);
@@ -129,10 +158,13 @@ export async function readGameSnapshot(page: Page, config: AppConfig): Promise<G
   const domInventory = await scrapeInventoryFromDom(page).catch(() => ({}));
   const inventory = buildInventoryMap(inventoryText, domInventory);
   const hasBait = detectHasBait(inventory, inventoryText);
+  logSnapshotStep('inventory', inventoryStep);
 
+  const skillStep = Date.now();
   const gatherState = await readSkillState(page, config, 'woodcutting', {
-    probeOtherSkills: true,
+    probeOtherSkills: !apiBusySkill,
   });
+  logSnapshotStep('skill_state', skillStep);
   const gatherBusy = gatherState.busy || Boolean(gatherState.busyElsewhere);
 
   let combatPhase: CombatPhase = 'none';
@@ -218,5 +250,7 @@ export async function readGameSnapshot(page: Page, config: AppConfig): Promise<G
     // Map enricher is best-effort.
   }
 
-  return applyPublicApiToSnapshot(snapshot);
+  const merged = await applyPublicApiToSnapshot(snapshot);
+  logSnapshotStep('total', snapshotStarted);
+  return merged;
 }

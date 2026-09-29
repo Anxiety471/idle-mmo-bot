@@ -15,6 +15,9 @@ import {
   huntTargetMet,
   normalizeEarlyStageId,
   notePlaybookOutcome,
+  formatHuntBattleRoundOutcome,
+  isConfirmedHuntBattleOutcome,
+  huntBattleOutcomePrimarySegment,
   QUEST_TALK_NO_ACTION_COOLDOWN,
   recentBaitPurchase,
   resolvePlaybookStatePath,
@@ -92,7 +95,15 @@ function fishCodPlaybook(overrides: Partial<PlaybookProgress> = {}): PlaybookPro
     interruptActions: ['fish_cod'],
     counts: emptyPlaybookCounts(),
     baitOwned: true,
-    targets: { coalMin: 100, coalMax: 100, codMin: 100, codMax: 100, cookMin: 100, huntMin: 120 },
+    targets: {
+      coalMin: 100,
+      coalMax: 100,
+      codMin: 100,
+      codMax: 100,
+      cookMin: 100,
+      huntCookFloor: 30,
+      huntMin: 120,
+    },
     curriculumHint: 'fish',
     complete: false,
     gatherGraceActive: true,
@@ -437,6 +448,34 @@ describe('sticky baitOwned (no repurchase loop)', () => {
     assert.equal(saved.counts?.huntBattles, 1);
   });
 
+  it('notePlaybookOutcome credits hunt when Hunt More skipped for backlog cap', () => {
+    statePath = join('/tmp', `playbook-hunt-skipped-backlog-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({ version: 1, stage: 'hunt_battle_batch', counts: emptyPlaybookCounts(), baitOwned: true })}\n`,
+    );
+
+    const outcome = formatHuntBattleRoundOutcome(
+      true,
+      'failed',
+      'huntMore:skipped_backlog_cap',
+    );
+    assert.equal(isConfirmedHuntBattleOutcome(outcome), true);
+    notePlaybookOutcome('hunt_battle_batch', outcome);
+
+    const saved = JSON.parse(readFileSync(statePath, 'utf8')) as { counts?: { huntBattles?: number } };
+    assert.equal(saved.counts?.huntBattles, 1);
+  });
+
+  it('formatHuntBattleRoundOutcome normalizes confirmed fights to battle_started for huntMore:no_action', () => {
+    const outcome = formatHuntBattleRoundOutcome(true, 'failed', 'huntMore:no_action');
+    assert.equal(outcome, 'battle:battle_started:huntMore:no_action');
+    assert.equal(isConfirmedHuntBattleOutcome(outcome), true);
+    assert.equal(huntBattleOutcomePrimarySegment(false, 'failed'), 'failed');
+  });
+
   it('notePlaybookOutcome does not credit huntBattles when battle_started appears only in huntMore tail', () => {
     statePath = join('/tmp', `playbook-hunt-tail-${Date.now()}.json`);
     process.env.PLAYBOOK_STATE_PATH = statePath;
@@ -518,7 +557,15 @@ describe('missions-first early gold', () => {
       interruptActions: ['sell_junk_for_gold', 'market_sell_half', 'sell_junk'],
       counts: emptyPlaybookCounts(),
       baitOwned: false,
-      targets: { coalMin: 100, coalMax: 100, codMin: 100, codMax: 100, cookMin: 100, huntMin: 120 },
+      targets: {
+      coalMin: 100,
+      coalMax: 100,
+      codMin: 100,
+      codMax: 100,
+      cookMin: 100,
+      huntCookFloor: 30,
+      huntMin: 120,
+    },
       curriculumHint: 'sell',
       complete: false,
       gatherGraceActive: false,
@@ -1237,7 +1284,7 @@ describe('strict sequential real-count gates', () => {
     );
 
     const short = minimalSnapshot({
-      inventory: { 'Cheap Bait': 20, 'Coal Ore': 40, Cod: 12, 'Cooked Cod': 40 },
+      inventory: { 'Cheap Bait': 20, 'Coal Ore': 40, Cod: 12, 'Cooked Cod': 25 },
       gold: 50,
     });
     const shortProgress = evaluatePlaybook(short);
@@ -1263,7 +1310,7 @@ describe('strict sequential real-count gates', () => {
     assert.ok(!readyFiltered.includes('cook_cod'));
   });
 
-  it('snaps hunt back to cook when soft cookedCod is inflated but the bag is short', () => {
+  it('snaps hunt back to cook when bag food falls below hunt cook floor', () => {
     statePath = join('/tmp', `playbook-cooked-drift-${Date.now()}.json`);
     process.env.PLAYBOOK_STATE_PATH = statePath;
     process.env.EARLY_PLAYBOOK = 'true';
@@ -1282,9 +1329,9 @@ describe('strict sequential real-count gates', () => {
       })}\n`,
     );
 
-    // IdleBocchi-like: restarts inflated soft cookedCod, bag still under cookMin.
+    // Bag below PLAYBOOK_HUNT_COOK_FLOOR after battle-food packing — snap back to cook.
     const snapshot = minimalSnapshot({
-      inventory: { 'Cheap Bait': 20, 'Coal Ore': 80, Cod: 40, 'Cooked Cod': 43 },
+      inventory: { 'Cheap Bait': 20, 'Coal Ore': 80, Cod: 40, 'Cooked Cod': 25 },
       gold: 50,
       combatPhase: 'none',
       currentAction: {
@@ -1295,8 +1342,8 @@ describe('strict sequential real-count gates', () => {
       },
     });
     const progress = evaluatePlaybook(snapshot);
-    assert.equal(progress.counts.cookedCod, 43);
-    assert.equal(cookTargetMet(progress.counts, snapshot.inventory), false);
+    assert.equal(progress.counts.cookedCod, 25);
+    assert.equal(cookTargetMet(progress.counts, snapshot.inventory, 'hunt_battle_batch'), false);
     assert.equal(progress.stage, 'cook_cod');
     assert.ok(progress.curriculumHint.includes('cook gate'), progress.curriculumHint);
     assert.equal(progress.preferredActions[0], 'cook_cod');
@@ -1348,6 +1395,36 @@ describe('strict sequential real-count gates', () => {
     assert.ok(filtered.includes('hunt_battle'), `filtered=${JSON.stringify(filtered)}`);
     const cookIdx = filtered.indexOf('cook_cod');
     assert.ok(cookIdx === -1 || cookIdx > filtered.indexOf('hunt_battle_batch'));
+  });
+
+  it('keeps hunt_battle_batch when bag is below cookMin but above hunt cook floor', () => {
+    statePath = join('/tmp', `playbook-hunt-cook-floor-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'hunt_battle_batch',
+        counts: {
+          ...coalMetCounts({ sells: 2 }),
+          rawCod: 200,
+          cookedCod: 112,
+          huntBattles: 26,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const snapshot = minimalSnapshot({
+      inventory: { 'Cheap Bait': 20, 'Coal Ore': 80, Cod: 40, 'Cooked Cod': 80 },
+      gold: 50,
+      combatPhase: 'none',
+    });
+    const progress = evaluatePlaybook(snapshot);
+    assert.equal(cookTargetMet(progress.counts, snapshot.inventory, 'hunt_battle_batch'), true);
+    assert.equal(progress.stage, 'hunt_battle_batch');
+    assert.equal(progress.preferredActions[0], 'hunt_battle_batch');
   });
 
   it('does not bump cookedCod when cook_cod restarts and the bag is unchanged', () => {
@@ -1813,7 +1890,15 @@ describe('stale rawCod cook_cod recovery', () => {
         huntBattles: 97,
       },
       baitOwned: true,
-      targets: { coalMin: 100, coalMax: 100, codMin: 100, codMax: 100, cookMin: 100, huntMin: 120 },
+      targets: {
+      coalMin: 100,
+      coalMax: 100,
+      codMin: 100,
+      codMax: 100,
+      cookMin: 100,
+      huntCookFloor: 30,
+      huntMin: 120,
+    },
       curriculumHint: 'cook',
       complete: false,
       gatherGraceActive: false,
@@ -2590,7 +2675,15 @@ describe('post-cook quest talk does not outrank hunt', () => {
       interruptActions: ['mine_coal', 'hunt_battle_batch', 'hunt_battle'],
       counts: emptyPlaybookCounts(),
       baitOwned: true,
-      targets: { coalMin: 100, coalMax: 100, codMin: 100, codMax: 100, cookMin: 100, huntMin: 120 },
+      targets: {
+      coalMin: 100,
+      coalMax: 100,
+      codMin: 100,
+      codMax: 100,
+      cookMin: 100,
+      huntCookFloor: 30,
+      huntMin: 120,
+    },
       curriculumHint: 'hunt',
       complete: false,
       gatherGraceActive: false,
