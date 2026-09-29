@@ -619,6 +619,14 @@ export function huntTargetMet(counts: PlaybookCounts): boolean {
 }
 
 /**
+ * Playbook hunt credit only when configureAndBattle confirmed a real fight
+ * (primary segment battle_started), not incidental battle_started substrings.
+ */
+export function isConfirmedHuntBattleOutcome(outcome: string): boolean {
+  return /^battle:battle_started:/i.test(outcome);
+}
+
+/**
  * Opportunistic pets maintenance: soft-prefer / interrupt manage_pets even while busy
  * (claim/feed/battle/sleep). Does not gate the batch. Equip is handled separately when idle.
  * Fires once per batch (petManages===0) on every Nth completed cycle.
@@ -1310,9 +1318,7 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
     }
   }
   if (action === 'hunt_battle_batch' || action === 'hunt_rabbits' || action === 'hunt_battle') {
-    // Credit only when configureAndBattle/huntMore confirmed a real fight
-    // (battle_started), not bare "battle:failed:..." from no-op Battle clicks.
-    if (/battle_started|hunt_started|enemy_selected/i.test(outcome)) {
+    if (isConfirmedHuntBattleOutcome(outcome)) {
       counts.huntBattles += 1;
     }
   }
