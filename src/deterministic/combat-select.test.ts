@@ -381,6 +381,45 @@ describe('battle from monster image', () => {
     }
   });
 
+  it('waits for a delayed "Start a new action?" after Battle and clicks Start anyway', async () => {
+    const page = await load(battleFlowDelayedReplace(400));
+    try {
+      const result = await configureAndBattle(page, 0, 1, 'Balanced', true);
+      assert.equal(result, 'battle_started');
+      assert.equal(await page.locator('body').getAttribute('data-started-anyway'), '1');
+      assert.equal(await page.getByRole('button', { name: 'Run Away', exact: true }).count(), 1);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('closes a delayed replace dialog when interrupt is off', async () => {
+    const page = await load(battleFlowDelayedReplace(400));
+    try {
+      const result = await configureAndBattle(page, 0, 1, 'Balanced');
+      assert.equal(result, 'no_action');
+      assert.equal(await page.locator('body').getAttribute('data-replace-closed'), '1');
+      assert.equal(await page.locator('body').getAttribute('data-started-anyway'), null);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('handles a replace dialog that renders after the initial wait (no pending_verify)', async () => {
+    const prev = process.env.COMBAT_FIGHT_CONFIRM_MS;
+    process.env.COMBAT_FIGHT_CONFIRM_MS = '8000';
+    const page = await load(battleFlowDelayedReplace(3500));
+    try {
+      const result = await configureAndBattle(page, 0, 1, 'Balanced', true);
+      assert.equal(result, 'battle_started');
+      assert.equal(await page.locator('body').getAttribute('data-started-anyway'), '1');
+    } finally {
+      if (prev === undefined) delete process.env.COMBAT_FIGHT_CONFIRM_MS;
+      else process.env.COMBAT_FIGHT_CONFIRM_MS = prev;
+      await page.close();
+    }
+  });
+
   it('solves Quick check after Start anyway and then shows Run Away', async () => {
     const prev = process.env.COMBAT_FIGHT_CONFIRM_MS;
     process.env.COMBAT_FIGHT_CONFIRM_MS = '12000';
@@ -519,6 +558,66 @@ const BATTLE_FLOW_REPLACE_DIALOG = `<!DOCTYPE html>
     });
   </script>
 </body></html>`;
+
+/**
+ * Live gather-busy Battle (fishing): Battle goes is_processing, and the
+ * confirm-action-request dialog renders only after the request returns.
+ * Start anyway closes the entity modal and the fight starts.
+ */
+function battleFlowDelayedReplace(delayMs: number): string {
+  return `<!DOCTYPE html>
+<html><body>
+  <div id="nearby">
+    <div>ENEMIES NEARBY</div>
+    <div role="button" id="tile">
+      <img alt="Duck" src="/enemies/duck.png" style="width:72px;height:72px" />
+      <span>37</span>
+    </div>
+  </div>
+  <div id="modal" hidden x-data="modal('show-battle-entity', false, null)">
+    <h2>Duck</h2>
+    <div>4 Combat EXP</div>
+    <div>STANCE</div>
+    <select name="location"><option value="balanced">Balanced (All Stats)</option></select>
+    <div>ENEMIES</div>
+    <input id="max_enemies" value="1" />
+    <button type="button" id="enemax">Max</button>
+    <button type="button" id="battle" x-bind:disabled="selected_battle_entity?.status?.is_restrictive || is_processing">Battle</button>
+  </div>
+  <div id="replace" hidden x-data="modal('confirm-action-request', false, null)">
+    <h2>Start a new action?</h2>
+    <p>You are already doing an action right now.</p>
+    <button type="button" id="replace-close">Close</button>
+    <button type="button" id="start-anyway">Start anyway</button>
+  </div>
+  <script>
+    document.getElementById('tile').addEventListener('click', () => {
+      document.getElementById('modal').hidden = false;
+    });
+    document.getElementById('battle').addEventListener('click', () => {
+      document.body.dataset.battled = '1';
+      document.getElementById('battle').disabled = true;
+      setTimeout(() => {
+        document.getElementById('replace').hidden = false;
+      }, ${delayMs});
+    });
+    document.getElementById('start-anyway').addEventListener('click', () => {
+      document.body.dataset.startedAnyway = '1';
+      document.getElementById('replace').hidden = true;
+      document.getElementById('modal').hidden = true;
+      const flee = document.createElement('button');
+      flee.type = 'button';
+      flee.textContent = 'Run Away';
+      document.body.appendChild(flee);
+    });
+    document.getElementById('replace-close').addEventListener('click', () => {
+      document.body.dataset.replaceClosed = '1';
+      document.getElementById('replace').hidden = true;
+      document.getElementById('battle').disabled = false;
+    });
+  </script>
+</body></html>`;
+}
 
 /** Same confirm dialog, but the battle modal is already open (Hunt More path). */
 const BATTLE_MODAL_REPLACE_DIALOG = `<!DOCTYPE html>
