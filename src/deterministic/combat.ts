@@ -322,12 +322,34 @@ async function clickStartAnywayRobustInner(
 }
 
 /** Handle "Start a new action?" after Start Hunt, Hunt More, or Battle. */
+/**
+ * "Start a new action?" opens only after the click's request round-trip (~300ms live),
+ * so an immediate isVisible() misses it. Note: Locator.isVisible ignores `timeout`.
+ */
+export const REPLACE_DIALOG_APPEAR_MS = 2_500;
+
+/**
+ * Poll for the replace dialog after a click. Stops early when the click clearly went
+ * somewhere else (Run Away up, or a Quick check is rendering).
+ */
+export async function waitForReplaceDialog(page: Page, timeoutMs: number): Promise<boolean> {
+  const heading = replaceDialogHeading(page).first();
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  for (;;) {
+    if (await heading.isVisible().catch(() => false)) return true;
+    if (Date.now() >= deadline) return false;
+    if (await isButtonVisible(page, 'Run Away')) return false;
+    if (await isPostBattleHumanCheckExtended(page).catch(() => false)) return false;
+    await page.waitForTimeout(100);
+  }
+}
+
 async function handleReplaceDialog(
   page: Page,
   allowInterrupt: boolean,
+  appearMs = REPLACE_DIALOG_APPEAR_MS,
 ): Promise<'continued' | 'no_action' | 'failed'> {
-  const dialog = replaceDialogHeading(page).first();
-  if (!(await dialog.isVisible({ timeout: 2000 }).catch(() => false))) {
+  if (!(await waitForReplaceDialog(page, appearMs))) {
     return 'continued';
   }
 
@@ -2650,13 +2672,36 @@ async function clickEnabledBattle(
     console.log(`[combat] Quick check still present after Battle for ${enemyLabel}`);
     return 'verify_blocked';
   }
+  const late: { dialog: 'continued' | 'no_action' | 'failed' } = { dialog: 'continued' };
   const confirm = await confirmBattleStarted(page, {
     tileName: enemyLabel,
     qtyBefore: confirmOptions?.qtyBefore,
     pollMs: FIGHT_CONFIRM_POLL_MS,
     config: confirmOptions?.config,
     readEnemies: async () => (await readHuntState(page)).enemies,
+    // Replace dialog that shows up after the initial wait would otherwise leave Battle
+    // stuck on is_processing until timeout -> pending_verify with no fight.
+    onReplaceDialog: async () => {
+      console.log(`[combat] late "Start a new action?" after Battle for ${enemyLabel}`);
+      late.dialog = await handleReplaceDialog(page, allowInterrupt, 0);
+      if (late.dialog === 'continued') {
+        const captchaAfter = await waitAndSolvePostBattleCaptcha(page, FIGHT_CONFIRM_POLL_MS);
+        if (captchaAfter === 'blocked') return false;
+        return true;
+      }
+      return false;
+    },
   });
+  if (late.dialog === 'no_action') {
+    console.log(
+      `[combat] Battle left the current action running for ${enemyLabel} (replace dialog closed)`,
+    );
+    return 'no_action';
+  }
+  if (late.dialog === 'failed') {
+    console.log(`[combat] Battle replace dialog could not be confirmed for ${enemyLabel}`);
+    return 'no_fight';
+  }
   const mapped = confirmOutcomeToBattleClick(confirm);
   if (mapped === 'started') return 'started';
   if (mapped === 'pending_verify') {

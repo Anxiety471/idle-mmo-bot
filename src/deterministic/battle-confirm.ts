@@ -162,6 +162,20 @@ export interface ConfirmBattleStartedOptions {
   config?: AppConfig;
   /** When true, reload once on accepted_unrendered before giving up. */
   allowReloadVerify?: boolean;
+  /**
+   * Called when "Start a new action?" is visible during the poll (gather-busy Battle
+   * where the dialog rendered late). Return true to keep polling, false to stop as
+   * `rejected`. Without it the dialog just sits on top of an is_processing Battle.
+   */
+  onReplaceDialog?: () => Promise<boolean>;
+}
+
+async function replaceDialogVisible(page: Page): Promise<boolean> {
+  return page
+    .getByText('Start a new action?', { exact: true })
+    .first()
+    .isVisible()
+    .catch(() => false);
 }
 
 /**
@@ -224,8 +238,16 @@ export async function confirmBattleStarted(
   let acceptHint = false;
   let captchaRounds = 0;
 
+  let replaceRounds = 0;
+
   while (Date.now() < deadline) {
     if (await runAwayVisible(page)) return 'started';
+
+    if (options.onReplaceDialog && replaceRounds < 2 && (await replaceDialogVisible(page))) {
+      replaceRounds += 1;
+      if (!(await options.onReplaceDialog())) return 'rejected';
+      continue;
+    }
 
     const modalNow = await isEnemyModalVisible(page);
     if (modalOpenAtClick && !modalNow) {
