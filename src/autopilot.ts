@@ -8,6 +8,11 @@ import {
 } from './character/roster.js';
 import { loadConfig } from './config.js';
 import { launchBrowser } from './browser.js';
+import {
+  closeBrowserSessionWithTimeout,
+  shouldProactivelyRecycleBrowser,
+  shouldRelaunchBrowserAfterError,
+} from './browser-session.js';
 import { executeAction } from './actions/executor.js';
 import { registerBootstrapActions } from './autopilot/bootstrap-actions.js';
 import { deriveAllowedActions } from './autopilot/action-registry.js';
@@ -25,6 +30,7 @@ import {
   notePlaybookOutcome,
 } from './autopilot/early-systems-playbook.js';
 import type { AutopilotAction, AutopilotContext } from './types.js';
+import type { BrowserSession } from './browser.js';
 
 export interface RunAutopilotOptions {
   verbose?: boolean;
@@ -43,6 +49,27 @@ function isGatherAction(action: AutopilotAction): boolean {
     action === 'cook_cod'
   );
 }
+
+let activeSession: BrowserSession | null = null;
+let shuttingDown = false;
+
+async function shutdownFromSignal(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[autopilot] ${signal} — closing browser and exiting`);
+  if (activeSession) {
+    await closeBrowserSessionWithTimeout(activeSession).catch(() => undefined);
+    activeSession = null;
+  }
+  process.exit(0);
+}
+
+process.once('SIGTERM', () => {
+  void shutdownFromSignal('SIGTERM');
+});
+process.once('SIGINT', () => {
+  void shutdownFromSignal('SIGINT');
+});
 
 // Register bootstrap actions once; discovered actions register via registerDiscoveredAction().
 registerBootstrapActions();
@@ -93,8 +120,12 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
 
   const sessionRelaunchMs = Math.max(config.pollMs * 6, 30_000);
 
-  while (true) {
+  while (!shuttingDown) {
     const session = await launchBrowser(config);
+    activeSession = session;
+    const sessionLaunchedAtMs = Date.now();
+    let relaunchReason: string | undefined;
+
     try {
       const charResult = await ensureActiveCharacter(session.page, config);
       console.log(
@@ -108,7 +139,16 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
         );
       }
 
-      while (true) {
+      while (!shuttingDown) {
+        const recycle = await shouldProactivelyRecycleBrowser({
+          browser: session.browser,
+          launchedAtMs: sessionLaunchedAtMs,
+        });
+        if (recycle.recycle) {
+          relaunchReason = `proactive recycle (${recycle.reason})`;
+          break;
+        }
+
         context.cycle++;
         setLogContext({
           cycle: context.cycle,
@@ -128,6 +168,9 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           console.error(`[autopilot] snapshot failed: ${message}`);
+          if (shouldRelaunchBrowserAfterError(message)) {
+            relaunchReason = message;
+          }
           await sleep(sessionRelaunchMs);
           break;
         }
@@ -200,6 +243,10 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           console.error(`[autopilot] execute ${action} error: ${message}`);
+          if (shouldRelaunchBrowserAfterError(message)) {
+            relaunchReason = message;
+            break;
+          }
           result = { action, outcome: 'error', backoffMs: config.pollMs * 2 };
         }
 
@@ -218,9 +265,16 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
       console.error(
         `[autopilot] session error — relaunching in ${sessionRelaunchMs / 1000}s: ${message}`,
       );
+      if (shouldRelaunchBrowserAfterError(message)) {
+        relaunchReason = message;
+      }
       await sleep(sessionRelaunchMs);
     } finally {
-      await session.close().catch(() => undefined);
+      await closeBrowserSessionWithTimeout(session).catch(() => undefined);
+      if (activeSession === session) activeSession = null;
+      if (relaunchReason) {
+        console.log(`[autopilot] relaunching browser after: ${relaunchReason}`);
+      }
     }
   }
 }

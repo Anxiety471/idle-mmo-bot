@@ -227,10 +227,17 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
     allowInterrupt,
   );
 
-  const battleMonitor = await monitorInBattle(page, {
-    pollMs,
-    shouldFlee: (state) => jev.shouldFlee(state),
-  });
+  if (battleResult === 'blocked_verify') {
+    return combatRoundOutcome('blocked:verify', config);
+  }
+
+  let battleMonitor: Awaited<ReturnType<typeof monitorInBattle>> = { status: 'ended' };
+  if (battleResult === 'battle_started') {
+    battleMonitor = await monitorInBattle(page, {
+      pollMs,
+      shouldFlee: (state) => jev.shouldFlee(state),
+    });
+  }
   if (battleMonitor.status === 'fled') {
     return combatRoundOutcome(
       `battle:${battleResult}:flee:${battleMonitor.fleeResult}`,
@@ -258,10 +265,12 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
     return combatRoundOutcome(`battle:${battleResult}:huntMore:skipped_cook_gate`, config);
   }
 
-  return combatRoundOutcome(
-    `battle:${battleResult}:huntMore:${await huntMore(page, allowInterrupt)}`,
-    config,
-  );
+  const huntMoreResult = await huntMore(page, allowInterrupt);
+  if (huntMoreResult === 'blocked_verify') {
+    return combatRoundOutcome('blocked:verify', config);
+  }
+
+  return combatRoundOutcome(`battle:${battleResult}:huntMore:${huntMoreResult}`, config);
 }
 
 function combatExecuteResult(

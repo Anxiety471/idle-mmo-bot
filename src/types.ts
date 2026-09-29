@@ -105,6 +105,7 @@ export type CombatStepResult =
   | 'no_action'
   | 'health_too_low'
   | 'heal_failed'
+  | 'blocked_verify'
   | 'failed';
 
 export type QuestStepResult =

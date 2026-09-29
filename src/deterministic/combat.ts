@@ -774,6 +774,17 @@ export function battleTargetsInOrder(enemies: EnemyInfo[]): EnemyInfo[] {
  * Why a Battle control is disabled, using only the disabled attribute and the Alpine
  * bind string. Do not evaluate component state — that can hold account data.
  */
+export function parseBattleBindFlags(bind: string | null): {
+  processing: boolean;
+  restrictive: boolean;
+} {
+  const bindText = (bind ?? '').trim();
+  return {
+    processing: /is_processing/i.test(bindText),
+    restrictive: /is_restrictive/i.test(bindText),
+  };
+}
+
 export function describeBattleControlDisabled(
   disabledAttr: string | null,
   bind: string | null,
@@ -1757,6 +1768,40 @@ async function findBattleFoodButton(page: Page): Promise<Locator | null> {
   return null;
 }
 
+/** FOOD row Add — live UI uses uppercase "Food" in a span, not the literal FOOD xpath. */
+export async function findFoodAddButton(page: Page): Promise<Locator | null> {
+  const alpineAdd = page.locator('button[x-on\\:click*="food-for-battle"]');
+  if ((await alpineAdd.count()) > 0 && (await alpineAdd.first().isVisible().catch(() => false))) {
+    return alpineAdd.first();
+  }
+
+  const entityScope = page.locator('[x-data*="show-battle-entity"]');
+  if ((await entityScope.count()) > 0) {
+    const scoped = entityScope.locator('button[x-on\\:click*="food-for-battle"]');
+    if ((await scoped.count()) > 0 && (await scoped.first().isVisible().catch(() => false))) {
+      return scoped.first();
+    }
+  }
+
+  const caseInsensitiveFoodAdd = page.locator(
+    'xpath=//*[self::span or self::div or self::label][normalize-space(translate(., "abcdefghijklmnopqrstuvwxyz", "ABCDEFGHIJKLMNOPQRSTUVWXYZ"))="FOOD"]/following::button[normalize-space()="Add"][1]',
+  );
+  if (
+    (await caseInsensitiveFoodAdd.count()) > 0 &&
+    (await caseInsensitiveFoodAdd.first().isVisible().catch(() => false))
+  ) {
+    return caseInsensitiveFoodAdd.first();
+  }
+
+  const legacy = page.locator(
+    'xpath=//*[normalize-space()="FOOD"]/following::button[normalize-space()="Add"][1]',
+  );
+  if ((await legacy.count()) > 0 && (await legacy.first().isVisible().catch(() => false))) {
+    return legacy.first();
+  }
+  return null;
+}
+
 async function closeFoodPickerOnly(page: Page): Promise<void> {
   const foodModal = page.locator('[x-data*="food-for-battle"]');
   if ((await foodModal.count()) === 0 || !(await foodModal.first().isVisible().catch(() => false))) {
@@ -1781,16 +1826,14 @@ export async function selectBattleFood(page: Page): Promise<'added' | 'none' | '
       return 'none';
     }
 
-    const addNearFood = page.locator(
-      'xpath=//*[normalize-space()="FOOD"]/following::button[normalize-space()="Add"][1]',
-    );
+    const addNearFood = await findFoodAddButton(page);
 
-    if ((await addNearFood.count()) === 0 || !(await addNearFood.first().isVisible().catch(() => false))) {
+    if (!addNearFood) {
       console.log('[combat] FOOD Add not visible — no food UI');
       return 'none';
     }
 
-    await addNearFood.first().click({ timeout: 5000 });
+    await addNearFood.click({ timeout: 5000 });
     await page.waitForTimeout(800);
 
     const foodItem = await findBattleFoodButton(page);
@@ -2231,10 +2274,12 @@ type BattleClickResult =
   | 'no_action'
   | 'modal_closed'
   | 'health_too_low'
-  | 'heal_failed';
+  | 'heal_failed'
+  | 'verify_blocked';
 
 function battleClickToStep(result: BattleClickResult): CombatStepResult {
   if (result === 'started') return 'battle_started';
+  if (result === 'verify_blocked') return 'blocked_verify';
   if (result === 'health_too_low' || result === 'heal_failed' || result === 'no_action') {
     return result;
   }
@@ -2277,8 +2322,11 @@ async function clickEnabledBattle(
     console.log(`[combat] Battle replace dialog could not be confirmed for ${enemyLabel}`);
     return 'no_fight';
   }
-  // Captcha often replaces the modal in the same turn as the click.
-  await solvePostBattleCaptchaIfPresent(page, FIGHT_CONFIRM_POLL_MS);
+  const captcha = await waitAndSolvePostBattleCaptcha(page, FIGHT_CONFIRM_POLL_MS);
+  if (captcha === 'blocked') {
+    console.log(`[combat] Quick check still present after Battle for ${enemyLabel}`);
+    return 'verify_blocked';
+  }
   const fight = await waitForFightStarted(page, undefined, FIGHT_CONFIRM_POLL_MS, allowInterrupt);
   if (fight === 'started') return 'started';
   if (fight === 'no_action') return 'no_action';
@@ -2440,18 +2488,37 @@ async function readPlayerHpFromUi(page: Page): Promise<number | undefined> {
   return parsePlayerHpPercent(parentText);
 }
 
+/** True when CURRENT ACTION panel shows an active fight (not nav "Battle" + character Health). */
+export async function isCurrentActionBattle(page: Page): Promise<boolean> {
+  if (await isButtonVisible(page, 'Run Away')) return true;
+  const heading = page.getByText(CURRENT_ACTION_MARKER, { exact: true }).first();
+  if ((await heading.count()) === 0) return false;
+  if (!(await heading.isVisible().catch(() => false))) return false;
+  const panel = heading.locator(
+    'xpath=ancestor::*[self::section or self::div][position()<=5]',
+  );
+  if ((await panel.count()) === 0) return false;
+  const panelText = await safeInnerText(panel.first());
+  return /\bRun Away\b/.test(panelText);
+}
+
+/** Pure helper for tests — sidebar Battle + Health is not an active fight. */
+export function isInActiveBattleFromSignals(
+  runAwayVisible: boolean,
+  currentActionBattle: boolean,
+): boolean {
+  return runAwayVisible || currentActionBattle;
+}
+
 /** Read battle screen state if a fight is in progress. */
 export async function readBattleState(page: Page): Promise<BattleState> {
   const runAwayVisible = await isButtonVisible(page, 'Run Away');
-  let playerHpPercent = runAwayVisible ? await readPlayerHpFromUi(page) : undefined;
+  const currentActionBattle = runAwayVisible ? true : await isCurrentActionBattle(page);
+  const inBattle = isInActiveBattleFromSignals(runAwayVisible, currentActionBattle);
+  let playerHpPercent = inBattle ? await readPlayerHpFromUi(page) : undefined;
   const text = await pageText(page);
 
-  const inBattle =
-    runAwayVisible ||
-    text.includes('Run Away') ||
-    (text.includes('Battle') && (text.includes('HP') || text.includes('Health')));
-
-  if (playerHpPercent === undefined) {
+  if (playerHpPercent === undefined && inBattle) {
     playerHpPercent = parsePlayerHpPercent(text);
   }
 
@@ -2485,8 +2552,11 @@ export async function monitorInBattle(
       return { status: 'timed_out', stillInBattle };
     }
 
+    await solvePostBattleCaptchaIfPresent(page, options.pollMs);
     const battleState = await readBattleState(page);
-    if (!battleState.inBattle) return { status: 'ended' };
+    if (!battleState.inBattle && !(await isFightInProgress(page))) {
+      return { status: 'ended' };
+    }
 
     if (await options.shouldFlee(battleState)) {
       const fleeResult = await runAway(page);
@@ -2522,6 +2592,8 @@ const FIGHT_CONFIRM_POLL_MS = 500;
 
 /** Quick check after Battle can take a couple of emoji attempts before Run Away. */
 const POST_BATTLE_CAPTCHA_ATTEMPTS = 3;
+/** Battle click can open Quick check slightly after the button handler runs. */
+const POST_BATTLE_CAPTCHA_APPEAR_MS = 3_000;
 
 /** True when Battle opened the anti-bot Quick check (`modal('gawain-captcha')`). */
 async function isPostBattleHumanCheck(page: Page): Promise<boolean> {
@@ -2544,6 +2616,36 @@ async function solvePostBattleCaptchaIfPresent(page: Page, pollMs: number): Prom
   });
 }
 
+/** Wait for Quick check to render after Battle, then solve. */
+async function waitAndSolvePostBattleCaptcha(
+  page: Page,
+  pollMs: number,
+): Promise<'ok' | 'blocked'> {
+  const deadline = Date.now() + POST_BATTLE_CAPTCHA_APPEAR_MS;
+  while (Date.now() < deadline) {
+    if (await isPostBattleHumanCheck(page)) break;
+    await page.waitForTimeout(100);
+  }
+  if (!(await isPostBattleHumanCheck(page))) return 'ok';
+
+  await solvePostBattleCaptchaIfPresent(page, pollMs);
+  if (await isPostBattleHumanCheck(page)) return 'blocked';
+  return 'ok';
+}
+
+async function logBattleGateState(page: Page, context: string): Promise<void> {
+  const btn = await visibleBattleButton(page);
+  if (!btn) return;
+  const disabled = await btn.getAttribute('disabled').catch(() => null);
+  const bind =
+    (await btn.getAttribute('x-bind:disabled').catch(() => null)) ??
+    (await btn.getAttribute(':disabled').catch(() => null));
+  const flags = parseBattleBindFlags(bind);
+  console.log(
+    `[combat] ${context} — is_processing=${flags.processing} is_restrictive=${flags.restrictive}; ${describeBattleControlDisabled(disabled, bind)}`,
+  );
+}
+
 /**
  * After clicking Battle, wait until the fight UI is actually up (Run Away).
  * A gather-busy click can open "Start a new action?" slightly after the click —
@@ -2564,8 +2666,6 @@ async function waitForFightStarted(
   const deadline = Date.now() + limitMs;
   while (Date.now() < deadline) {
     if (await isFightInProgress(page)) return 'started';
-    const state = await readBattleState(page);
-    if (state.inBattle) return 'started';
     if (await replaceDialogHeading(page).first().isVisible().catch(() => false)) {
       const dialog = await handleReplaceDialog(page, allowInterrupt);
       if (dialog === 'no_action') return 'no_action';
@@ -2573,8 +2673,6 @@ async function waitForFightStarted(
     }
     await solvePostBattleCaptchaIfPresent(page, pollMs);
     if (await isFightInProgress(page)) return 'started';
-    const afterSolve = await readBattleState(page);
-    if (afterSolve.inBattle) return 'started';
     await page.waitForTimeout(pollMs);
   }
   return (await isFightInProgress(page)) ? 'started' : 'timeout';
@@ -2589,6 +2687,8 @@ export async function huntMore(
   page: Page,
   allowInterrupt = false,
 ): Promise<CombatStepResult> {
+  await solvePostBattleCaptchaIfPresent(page, FIGHT_CONFIRM_POLL_MS);
+
   if (
     (await isEnemyDetailPanelOpen(page) || (await isShowBattleEntityModal(page))) &&
     !(await isFightInProgress(page))
@@ -2600,7 +2700,9 @@ export async function huntMore(
       await setMaxEnemies(page, Number.MAX_SAFE_INTEGER);
       const battleBtn = await visibleBattleButton(page);
       if (battleBtn) {
+        await logBattleGateState(page, 'huntMore battle gate');
         const clicked = await clickEnabledBattle(page, 'huntMore', allowInterrupt);
+        if (clicked === 'verify_blocked') return 'blocked_verify';
         if (clicked === 'started') return 'battle_started';
         return battleClickToStep(clicked);
       }
@@ -2613,6 +2715,8 @@ export async function huntMore(
     return 'no_action';
   }
   await huntMoreBtn.first().click();
+  const postClickCaptcha = await waitAndSolvePostBattleCaptcha(page, FIGHT_CONFIRM_POLL_MS);
+  if (postClickCaptcha === 'blocked') return 'blocked_verify';
 
   const dialog = await handleReplaceDialog(page, allowInterrupt);
   if (dialog === 'no_action') return 'no_action';

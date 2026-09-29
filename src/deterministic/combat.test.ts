@@ -11,13 +11,16 @@ import {
   needsCookBeforeHunt,
   battleTargetsInOrder,
   describeBattleControlDisabled,
+  findFoodAddButton,
   healFoodRank,
   hasHuntProgress,
   huntingMetricsSection,
   isActiveHuntPanelText,
   isIdleBattleText,
+  isInActiveBattleFromSignals,
   parseHuntMetrics,
   parsePlayerHpPercent,
+  readBattleState,
   readPageTextBounded,
   pickBattleEnemy,
 } from './combat.js';
@@ -422,6 +425,45 @@ Run Away`;
   it('returns undefined when Health is collapsed or HP digits are absent', () => {
     assert.equal(parsePlayerHpPercent('Health\nRun Away\nBattle'), undefined);
     assert.equal(parsePlayerHpPercent('Run Away\nBattle\nStats'), undefined);
+  });
+});
+
+describe('readBattleState', () => {
+  it('is not in battle when sidebar has Battle and character panel has Health but Run Away is absent', async () => {
+    assert.equal(isInActiveBattleFromSignals(false, false), false);
+
+    const html = `<body>
+      <nav><button>Battle</button></nav>
+      <aside><div>Health</div><div>76%</div></aside>
+      <main><button>Start Hunt</button><div>ENEMIES NEARBY</div></main>
+    </body>`;
+
+    const { chromium } = await import('playwright');
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    await page.setContent(html);
+
+    const state = await readBattleState(page);
+    assert.equal(state.inBattle, false);
+    await browser.close();
+  });
+});
+
+describe('findFoodAddButton', () => {
+  it('matches FOOD Add against live Food label and food-for-battle handler', async () => {
+    const html = `<div x-data="show-battle-entity">
+      <span class="uppercase">Food</span>
+      <button type="button" x-on:click="openFoodForBattle()">Add</button>
+    </div>`;
+
+    const { chromium } = await import('playwright');
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    await page.setContent(html);
+    const add = await findFoodAddButton(page);
+    assert.ok(add);
+    assert.equal(await add!.innerText(), 'Add');
+    await browser.close();
   });
 });
 

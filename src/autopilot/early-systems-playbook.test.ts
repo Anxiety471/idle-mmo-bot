@@ -437,6 +437,36 @@ describe('sticky baitOwned (no repurchase loop)', () => {
     assert.equal(saved.counts?.huntBattles, 1);
   });
 
+  it('notePlaybookOutcome does not credit huntBattles when battle_started appears only in huntMore tail', () => {
+    statePath = join('/tmp', `playbook-hunt-tail-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({ version: 1, stage: 'hunt_battle_batch', counts: emptyPlaybookCounts(), baitOwned: true })}\n`,
+    );
+
+    notePlaybookOutcome('hunt_battle_batch', 'battle:failed:huntMore:battle_started');
+
+    const saved = JSON.parse(readFileSync(statePath, 'utf8')) as { counts?: { huntBattles?: number } };
+    assert.equal(saved.counts?.huntBattles, 0);
+  });
+
+  it('notePlaybookOutcome does not credit huntBattles on hunt_started alone', () => {
+    statePath = join('/tmp', `playbook-hunt-started-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({ version: 1, stage: 'hunt_battle_batch', counts: emptyPlaybookCounts(), baitOwned: true })}\n`,
+    );
+
+    notePlaybookOutcome('hunt_battle_batch', 'hunt_started');
+
+    const saved = JSON.parse(readFileSync(statePath, 'utf8')) as { counts?: { huntBattles?: number } };
+    assert.equal(saved.counts?.huntBattles, 0);
+  });
+
   it('notePlaybookOutcome does not credit huntBattles on battle:failed (no-op Battle)', () => {
     statePath = join('/tmp', `playbook-hunt-failed-${Date.now()}.json`);
     process.env.PLAYBOOK_STATE_PATH = statePath;
