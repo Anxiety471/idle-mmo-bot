@@ -1001,7 +1001,7 @@ const BATTLE_SKIPS_RESTRICTIVE = `<!DOCTYPE html>
     </div>
     <div role="button" data-enemy="Goblin" style="position:absolute;top:120px;left:400px">
       <img alt="Goblin" src="/enemies/goblin.png" style="width:72px;height:72px" />
-      <span>140</span>
+      <span>1</span>
     </div>
     <button type="button" style="position:absolute;top:140px;left:560px">Hunt More</button>
   </div>
@@ -1211,7 +1211,7 @@ function lowHealthBattleHtml(options: {
       const left = 160 + index * 120;
       return `<div role="button" data-enemy="${name}" style="position:absolute;top:120px;left:${left}px">
       <img alt="${name}" src="/enemies/${name.toLowerCase()}.png" style="width:72px;height:72px" />
-      <span>${index + 2}</span>
+      <span>1</span>
     </div>`;
     })
     .join('\n');

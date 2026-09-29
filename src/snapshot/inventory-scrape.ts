@@ -435,32 +435,98 @@ async function readDetailPanelText(page: Page): Promise<string> {
   return page.locator('body').innerText();
 }
 
+const TRACKED_INVENTORY_KEYS = ['Cooked Cod', 'Raw Cod', 'Coal Ore', 'Cheap Bait', 'Cod'] as const;
+
+function envPositiveInt(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function missingTrackedKeys(counts: Record<string, number>): string[] {
+  return TRACKED_INVENTORY_KEYS.filter((key) => (counts[key] ?? 0) <= 0);
+}
+
 async function scrapeFromSlotClicks(page: Page, counts: Record<string, number>): Promise<void> {
+  const deadline = Date.now() + envPositiveInt('INVENTORY_SLOT_CLICK_BUDGET_MS', 5000);
+  const maxClicks = envPositiveInt('INVENTORY_SLOT_CLICK_MAX', 12);
   const buttons = page.getByRole('button');
   const total = await buttons.count();
   let inspected = 0;
-  for (let i = 0; i < total && inspected < 60; i++) {
+  for (let i = 0; i < total && inspected < maxClicks; i++) {
+    if (Date.now() >= deadline) break;
     const btn = buttons.nth(i);
+    if (!(await btn.isVisible().catch(() => false))) continue;
+    if (await btn.isDisabled().catch(() => false)) continue;
     const label = (await btn.innerText().catch(() => '')).trim();
     const aria = (await btn.getAttribute('aria-label').catch(() => '')) ?? '';
     const title = (await btn.getAttribute('title').catch(() => '')) ?? '';
     if (/^Empty$/i.test(label)) continue;
     if (!looksLikeInventorySlot(label, aria, title)) continue;
 
-    await btn.click({ timeout: 1500 }).catch(() => undefined);
-    await page.waitForTimeout(220);
+    await btn.click({ timeout: 300 }).catch(() => undefined);
+    await page.waitForTimeout(120);
     const panelText = await readDetailPanelText(page);
     mergeCounts(counts, extractItemQuantitiesFromText(panelText));
     inspected += 1;
   }
 }
 
-/** Icon-heavy inventory: scrape attrs, image slugs, tooltips, and click-through detail panels. */
-export async function scrapeInventoryFromDom(page: Page): Promise<Record<string, number>> {
+let inventoryDomCache: { counts: Record<string, number>; at: number; cycle: number } | null = null;
+let inventoryScrapeCycle = 0;
+
+/** Drop cached DOM inventory (after cook, battle food pack, sell, etc.). */
+export function invalidateInventoryDomCache(): void {
+  inventoryDomCache = null;
+}
+
+export function getInventoryDomCacheForTest(): typeof inventoryDomCache {
+  return inventoryDomCache;
+}
+
+export function shouldReuseInventoryDomCache(
+  cycle: number,
+  cache: { at: number } | null,
+  now: number,
+  options: { refreshEvery?: number; maxAgeMs?: number } = {},
+): boolean {
+  if (!cache) return false;
+  const refreshEvery = options.refreshEvery ?? envPositiveInt('INVENTORY_SCRAPE_REFRESH_CYCLES', 4);
+  const maxAgeMs = options.maxAgeMs ?? envPositiveInt('INVENTORY_SCRAPE_MAX_AGE_MS', 120_000);
+  if (cycle % refreshEvery === 0) return false;
+  return now - cache.at < maxAgeMs;
+}
+
+/** Icon-heavy inventory: scrape attrs, image slugs, tooltips, and optional click-through detail panels. */
+export async function scrapeInventoryFromDom(
+  page: Page,
+  options: { forceRefresh?: boolean } = {},
+): Promise<Record<string, number>> {
+  inventoryScrapeCycle += 1;
+  const refreshEvery = envPositiveInt('INVENTORY_SCRAPE_REFRESH_CYCLES', 4);
+  const maxAgeMs = envPositiveInt('INVENTORY_SCRAPE_MAX_AGE_MS', 120_000);
+  if (
+    !options.forceRefresh &&
+    shouldReuseInventoryDomCache(inventoryScrapeCycle, inventoryDomCache, Date.now(), {
+      refreshEvery,
+      maxAgeMs,
+    })
+  ) {
+    return { ...inventoryDomCache!.counts };
+  }
+
   const counts: Record<string, number> = {};
   mergeCounts(counts, await scrapeStaticDom(page));
   await scrapeFromTooltips(page, counts).catch(() => undefined);
-  await scrapeFromSlotClicks(page, counts).catch(() => undefined);
+
+  const slotClicksEnabled = process.env.INVENTORY_SLOT_CLICKS === '1';
+  const needsClickScrape = missingTrackedKeys(counts).length > 0;
+  if (slotClicksEnabled || needsClickScrape) {
+    await scrapeFromSlotClicks(page, counts).catch(() => undefined);
+  }
+
+  inventoryDomCache = { counts: { ...counts }, at: Date.now(), cycle: inventoryScrapeCycle };
   return counts;
 }
 

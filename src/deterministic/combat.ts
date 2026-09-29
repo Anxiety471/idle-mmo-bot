@@ -2,7 +2,11 @@ import type { Locator, Page } from 'playwright';
 import type { AppConfig } from '../config.js';
 import type { BattleState, CombatStepResult, EnemyInfo, HuntState, Stance } from '../types.js';
 import { navigateTo } from '../browser.js';
-import { decodeIdleMmoMetaSlug } from '../snapshot/inventory-scrape.js';
+import {
+  decodeIdleMmoMetaSlug,
+  invalidateInventoryDomCache,
+  parseQuantityString,
+} from '../snapshot/inventory-scrape.js';
 import {
   attemptHumanVerify,
   isHumanCheckPresent,
@@ -69,6 +73,16 @@ const ENEMY_SLUG_MAP: Record<string, string> = {
   'crown-goblin': 'Crown Goblin',
   crown_goblin: 'Crown Goblin',
   crown: 'Crown Goblin',
+  /** ULID CDN skins without meta slug (live Goblin / Goblin King tiles). */
+  '01m3hy9hcse5035hg4vw2m1zb3': 'Goblin',
+  '01m3hxyrpgswa31qgrn3e7ek1z': 'Goblin King',
+};
+
+const DEFAULT_HUNT_KILL_TARGETS = ['Rabbit'];
+
+export type PickBattleEnemyOptions = {
+  /** Quest / curriculum kill targets (checked before largest stack). */
+  preferredNames?: string[];
 };
 
 /** Bounded body text read — returns '' on timeout instead of hanging minutes. */
@@ -83,10 +97,15 @@ async function pageText(page: Page): Promise<string> {
   return readPageTextBounded(page);
 }
 
-export function battleMonitorWallClockMs(): number {
+export function battleMonitorWallClockMs(enemyQuantity?: number): number {
   const envMs = Number(process.env.COMBAT_BATTLE_MONITOR_MS);
-  if (Number.isFinite(envMs) && envMs > 0) return envMs;
-  return BATTLE_MONITOR_WALL_CLOCK_MS;
+  const base =
+    Number.isFinite(envMs) && envMs > 0 ? envMs : BATTLE_MONITOR_WALL_CLOCK_MS;
+  const qty = enemyQuantity ?? 1;
+  if (qty <= 1) return base;
+  const perEnemyMs = Number(process.env.COMBAT_BATTLE_MONITOR_PER_ENEMY_MS) || 8_000;
+  const scaled = Math.min(base * 4, 120_000 + qty * perEnemyMs);
+  return Math.max(base, scaled);
 }
 
 async function safeInnerText(locator: Locator, timeoutMs = 3000): Promise<string> {
@@ -209,6 +228,71 @@ function replaceDialogHeading(page: Page): Locator {
   return page.getByText('Start a new action?', { exact: true });
 }
 
+export type StartAnywayClickStrategy = 'normal' | 'force' | 'dispatch';
+
+/** Map attempt index (0-based) to click strategy for Start anyway retries. */
+export function startAnywayStrategyForAttempt(attempt: number): StartAnywayClickStrategy {
+  if (attempt >= 3) return 'dispatch';
+  if (attempt >= 2) return 'force';
+  return 'normal';
+}
+
+async function replaceDialogDismissed(page: Page): Promise<boolean> {
+  const heading = replaceDialogHeading(page).first();
+  if (await heading.isVisible().catch(() => false)) return false;
+  if (await isButtonVisible(page, 'Run Away')) return true;
+  return !(await replaceDialogHeading(page).first().isVisible().catch(() => false));
+}
+
+/**
+ * Robust Start anyway click — waits for modal enter animation, re-queries each attempt.
+ */
+export async function clickStartAnywayRobust(
+  page: Page,
+): Promise<'clicked' | 'gone' | 'failed'> {
+  const heading = replaceDialogHeading(page).first();
+  const visible = await heading
+    .waitFor({ state: 'visible', timeout: 3000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!visible) {
+    return (await replaceDialogDismissed(page)) ? 'gone' : 'failed';
+  }
+
+  await page.waitForTimeout(350);
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (await replaceDialogDismissed(page)) return 'gone';
+
+    const button = page.getByRole('button', { name: 'Start anyway', exact: true }).first();
+    const strategy = startAnywayStrategyForAttempt(attempt);
+    try {
+      if ((await button.count()) === 0) {
+        await page.waitForTimeout(250);
+        continue;
+      }
+      if (!(await button.isVisible().catch(() => false))) {
+        await page.waitForTimeout(250);
+        continue;
+      }
+      if (strategy === 'dispatch') {
+        await button.dispatchEvent('click');
+      } else if (strategy === 'force') {
+        await button.click({ force: true, timeout: 2000 });
+      } else {
+        await button.click({ timeout: 2000 });
+      }
+    } catch {
+      await page.waitForTimeout(250);
+    }
+
+    if (await replaceDialogDismissed(page)) return 'clicked';
+    await page.waitForTimeout(200);
+  }
+
+  return (await replaceDialogDismissed(page)) ? 'clicked' : 'failed';
+}
+
 /** Handle "Start a new action?" after Start Hunt, Hunt More, or Battle. */
 async function handleReplaceDialog(
   page: Page,
@@ -223,23 +307,14 @@ async function handleReplaceDialog(
   const scope = root ?? page;
 
   if (allowInterrupt) {
-    const scopedStart = scope.getByRole('button', { name: 'Start anyway', exact: true });
-    // Start anyway is unique. If the confirm root does not wrap the button
-    // (Alpine teleport), still click the page-level control.
-    const startAnyway =
-      (await scopedStart.count()) > 0
-        ? scopedStart
-        : page.getByRole('button', { name: 'Start anyway', exact: true });
-    if ((await startAnyway.count()) > 0) {
-      await startAnyway.first().click();
-      return 'continued';
-    }
+    const result = await clickStartAnywayRobust(page);
+    if (result === 'clicked' || result === 'gone') return 'continued';
     return 'failed';
   }
 
   const closeButton = scope.getByRole('button', { name: 'Close', exact: true });
   if ((await closeButton.count()) > 0) {
-    await closeButton.first().click();
+    await closeButton.first().click().catch(() => undefined);
     return 'no_action';
   }
 
@@ -528,6 +603,10 @@ async function collectEnemyIconTiles(page: Page): Promise<Locator[]> {
 }
 
 export function enemyNameFromImageSrc(src: string): string | undefined {
+  const srcLower = src.toLowerCase();
+  for (const [slug, name] of Object.entries(ENEMY_SLUG_MAP)) {
+    if (slug.length >= 20 && srcLower.includes(slug)) return name;
+  }
   const decoded = decodeIdleMmoMetaSlug(src);
   const rawSlug = (decoded ?? src.split('/').pop()?.replace(/\..*$/, '') ?? '').toLowerCase();
   const normalized = rawSlug.replace(/[_\s]+/g, '-');
@@ -538,6 +617,27 @@ export function enemyNameFromImageSrc(src: string): string | undefined {
     }
   }
   return undefined;
+}
+
+async function enemyQuantityFromTile(btn: Locator): Promise<number> {
+  const scoped = btn.locator('[x-text*="enemy_block.quantity"]');
+  if ((await scoped.count()) > 0) {
+    const text = (await scoped.first().textContent()) ?? '';
+    const qty = parseQuantityString(text);
+    if (qty > 0) return qty;
+  }
+  const lines = textLines(await safeInnerText(btn));
+  const numeric = lines.find((line) => PURE_NUMERIC_PATTERN.test(line));
+  if (numeric) {
+    const qty = parseQuantityString(numeric);
+    if (qty > 0) return qty;
+  }
+  return 1;
+}
+
+async function enemyRestrictiveFromTile(btn: Locator): Promise<boolean> {
+  const cls = `${(await btn.getAttribute('class')) ?? ''} ${(await btn.getAttribute('x-bind:class')) ?? ''}`;
+  return /error-border/i.test(cls);
 }
 
 async function enemyNameFromTile(btn: Locator): Promise<string> {
@@ -734,7 +834,13 @@ async function sortTilesByPosition(tiles: Locator[]): Promise<Locator[]> {
 async function enemyInfosFromTiles(buttons: Locator[]): Promise<EnemyInfo[]> {
   const enemies: EnemyInfo[] = [];
   for (let i = 0; i < buttons.length; i++) {
-    enemies.push({ name: await enemyNameFromTile(buttons[i]), index: i });
+    const btn = buttons[i];
+    enemies.push({
+      name: await enemyNameFromTile(btn),
+      index: i,
+      quantity: await enemyQuantityFromTile(btn),
+      restrictive: await enemyRestrictiveFromTile(btn),
+    });
   }
   return enemies;
 }
@@ -753,21 +859,51 @@ async function collectEnemyTiles(page: Page): Promise<{ buttons: Locator[]; enem
   return { buttons, enemies: await enemyInfosFromTiles(buttons) };
 }
 
-/**
- * Pick a battle target from a mixed ENEMIES NEARBY list.
- * Prefer Rabbit when present; otherwise first ready enemy — never block on rabbit-only.
- */
-export function pickBattleEnemy(enemies: EnemyInfo[]): EnemyInfo | undefined {
-  if (enemies.length === 0) return undefined;
-  const rabbit = enemies.find((e) => /\brabbit\b/i.test(e.name));
-  return rabbit ?? enemies[0];
+function readyEnemies(enemies: EnemyInfo[]): EnemyInfo[] {
+  return enemies.filter((enemy) => !enemy.restrictive);
 }
 
-/** Rabbit first when present, then the other ready tiles in their existing order. */
-export function battleTargetsInOrder(enemies: EnemyInfo[]): EnemyInfo[] {
-  const preferred = pickBattleEnemy(enemies);
+function enemyStackSize(enemy: EnemyInfo): number {
+  const qty = enemy.quantity;
+  return qty !== undefined && qty > 0 ? qty : 1;
+}
+
+/**
+ * Pick a battle target from ENEMIES NEARBY.
+ * Prefer curriculum kill targets when present, otherwise the largest stack.
+ */
+export function pickBattleEnemy(
+  enemies: EnemyInfo[],
+  options: PickBattleEnemyOptions = {},
+): EnemyInfo | undefined {
+  const ready = readyEnemies(enemies);
+  if (ready.length === 0) return undefined;
+
+  const preferredNames = options.preferredNames ?? DEFAULT_HUNT_KILL_TARGETS;
+  for (const target of preferredNames) {
+    const re = new RegExp(`\\b${target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+    const match = ready.find((enemy) => re.test(enemy.name) && enemyStackSize(enemy) >= 1);
+    if (match) return match;
+  }
+
+  let best = ready[0];
+  for (const enemy of ready) {
+    if (enemyStackSize(enemy) > enemyStackSize(best)) best = enemy;
+  }
+  return best;
+}
+
+/** Preferred target first, then remaining tiles by descending stack size. */
+export function battleTargetsInOrder(
+  enemies: EnemyInfo[],
+  options: PickBattleEnemyOptions = {},
+): EnemyInfo[] {
+  const preferred = pickBattleEnemy(enemies, options);
   if (!preferred) return [];
-  return [preferred, ...enemies.filter((enemy) => enemy.index !== preferred.index)];
+  const rest = enemies
+    .filter((enemy) => enemy.index !== preferred.index)
+    .sort((a, b) => enemyStackSize(b) - enemyStackSize(a));
+  return [preferred, ...rest];
 }
 
 /**
@@ -1644,13 +1780,34 @@ export function cookedCodCount(
  * Cook before hunt when Cooked Cod is empty or still under the cook target.
  * Reaching the target (or more) is enough — do not keep cooking past it.
  */
+export type NeedsCookBeforeHuntOptions = {
+  huntBatchActive?: boolean;
+  huntCookFloor?: number;
+  packedBattleFood?: number;
+};
+
+export function effectiveCookedCodStock(
+  inventory: Record<string, number> | null | undefined,
+  packedBattleFood = 0,
+): number {
+  return cookedCodCount(inventory) + (packedBattleFood > 0 ? packedBattleFood : 0);
+}
+
 export function needsCookBeforeHunt(
   inventory: Record<string, number> | null | undefined,
   threshold: number,
+  options: NeedsCookBeforeHuntOptions = {},
 ): boolean {
-  if (!inventoryCanCookBattleFood(inventory)) return false;
+  const bagCod = cookedCodCount(inventory);
+  const canCookMore = inventoryCanCookBattleFood(inventory);
+  if (!canCookMore && !(options.huntBatchActive && bagCod > 0)) return false;
   const target = Number.isFinite(threshold) && threshold > 0 ? threshold : 1;
-  return cookedCodCount(inventory) < target;
+  const floor =
+    options.huntCookFloor !== undefined && options.huntCookFloor > 0
+      ? options.huntCookFloor
+      : 30;
+  const effectiveThreshold = options.huntBatchActive ? floor : target;
+  return effectiveCookedCodStock(inventory, options.packedBattleFood) < effectiveThreshold;
 }
 
 /**
@@ -1890,6 +2047,7 @@ export async function selectBattleFood(page: Page): Promise<'added' | 'none' | '
       if ((await confirmAdd.count()) > 0 && (await confirmAdd.first().isVisible().catch(() => false))) {
         await confirmAdd.first().click({ timeout: 5000 });
         console.log(`[combat] Packed battle food: ${foodName}`);
+        invalidateInventoryDomCache();
         await page.waitForTimeout(500);
         return 'added';
       }
@@ -1901,6 +2059,7 @@ export async function selectBattleFood(page: Page): Promise<'added' | 'none' | '
 
     // Icon tooltip picker (Cooked Cod) packs on click — no second Add step.
     console.log(`[combat] Packed battle food: ${foodName}`);
+    invalidateInventoryDomCache();
     return 'added';
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -2449,6 +2608,37 @@ export async function configureAndBattle(
  * Parse player HP percent from battle UI text.
  * Live UI uses a Health label plus bare NN%; legacy builds used "% HP" / "HP: N%".
  */
+/** Parse health bar inline style (e.g. `width: 37.5%`). */
+export function parseHealthBarStyle(style: string | null | undefined): number | undefined {
+  if (!style) return undefined;
+  const match = style.match(/width:\s*([\d.]+)%/i);
+  if (!match?.[1]) return undefined;
+  const value = Number.parseFloat(match[1]);
+  if (!Number.isFinite(value) || value < 0 || value > 100) return undefined;
+  return value;
+}
+
+export function parseHealthPercentTextContent(text: string | null | undefined): number | undefined {
+  if (!text) return undefined;
+  const trimmed = text.trim();
+  if (!/^\d{1,3}(\.\d+)?$/.test(trimmed)) return undefined;
+  const value = Number.parseFloat(trimmed);
+  if (!Number.isFinite(value) || value < 0 || value > 100) return undefined;
+  return value;
+}
+
+export function parsePlayerHpFromCurrentMax(
+  currentText: string | null | undefined,
+  maxText: string | null | undefined,
+): number | undefined {
+  const current = Number.parseInt(String(currentText ?? '').replace(/,/g, ''), 10);
+  const max = Number.parseInt(String(maxText ?? '').replace(/,/g, ''), 10);
+  if (!Number.isFinite(current) || !Number.isFinite(max) || max <= 0) return undefined;
+  const pct = Math.round((current / max) * 100);
+  if (pct < 0 || pct > 100) return undefined;
+  return pct;
+}
+
 export function parsePlayerHpPercent(text: string): number | undefined {
   if (!text) return undefined;
 
@@ -2471,21 +2661,54 @@ export function parsePlayerHpPercent(text: string): number | undefined {
 }
 
 async function readPlayerHpFromUi(page: Page): Promise<number | undefined> {
-  const healthLabel = page.getByText(/^Health$/i).first();
-  if ((await healthLabel.count()) === 0) return undefined;
-  if (!(await healthLabel.isVisible().catch(() => false))) return undefined;
+  const bar = page
+    .locator('[\\:style*="health_percentage"], [x-bind\\:style*="health_percentage"]')
+    .first();
+  if ((await bar.count()) > 0) {
+    const fromStyle = parseHealthBarStyle(await bar.getAttribute('style'));
+    if (fromStyle !== undefined) return fromStyle;
+  }
 
-  const container = healthLabel.locator(
-    'xpath=ancestor::*[self::section or self::div][position()<=5]',
-  );
-  if ((await container.count()) > 0) {
-    const sectionText = await safeInnerText(container.first());
-    const parsed = parsePlayerHpPercent(sectionText);
+  const pctNode = page
+    .locator('[x-text*="Math.floor($store.current_character.health_percentage)"]')
+    .first();
+  if ((await pctNode.count()) > 0) {
+    const fromText = parseHealthPercentTextContent(await pctNode.textContent());
+    if (fromText !== undefined) return fromText;
+  }
+
+  const healthPctNode = page.locator('[x-text*="health_percentage"]').first();
+  if ((await healthPctNode.count()) > 0) {
+    const fromBind = parseHealthPercentTextContent(await healthPctNode.textContent());
+    if (fromBind !== undefined) return fromBind;
+  }
+
+  const curNode = page.locator('[x-text*="current_character?.health"]').first();
+  const maxNode = page.locator('[x-text*="current_character.max_health"]').first();
+  if ((await curNode.count()) > 0 && (await maxNode.count()) > 0) {
+    const fromRatio = parsePlayerHpFromCurrentMax(
+      await curNode.textContent(),
+      await maxNode.textContent(),
+    );
+    if (fromRatio !== undefined) return fromRatio;
+  }
+
+  const healthLabel = page.getByText(/^Health$/i).first();
+  if ((await healthLabel.count()) > 0) {
+    const container = healthLabel.locator(
+      'xpath=ancestor::*[self::section or self::div][position()<=5]',
+    );
+    if ((await container.count()) > 0) {
+      const sectionText = await safeInnerText(container.first());
+      const parsed = parsePlayerHpPercent(sectionText);
+      if (parsed !== undefined) return parsed;
+    }
+    const parentText = await safeInnerText(healthLabel.locator('xpath=..'));
+    const parsed = parsePlayerHpPercent(parentText);
     if (parsed !== undefined) return parsed;
   }
 
-  const parentText = await safeInnerText(healthLabel.locator('xpath=..'));
-  return parsePlayerHpPercent(parentText);
+  return undefined;
 }
 
 /** True when CURRENT ACTION panel shows an active fight (not nav "Battle" + character Health). */
@@ -2515,20 +2738,20 @@ export async function readBattleState(page: Page): Promise<BattleState> {
   const runAwayVisible = await isButtonVisible(page, 'Run Away');
   const currentActionBattle = runAwayVisible ? true : await isCurrentActionBattle(page);
   const inBattle = isInActiveBattleFromSignals(runAwayVisible, currentActionBattle);
-  let playerHpPercent = inBattle ? await readPlayerHpFromUi(page) : undefined;
   const text = await pageText(page);
-
-  if (playerHpPercent === undefined && inBattle) {
+  let playerHpPercent = await readPlayerHpFromUi(page);
+  if (playerHpPercent === undefined) {
     playerHpPercent = parsePlayerHpPercent(text);
   }
+  const playerHpStale = inBattle && playerHpPercent !== undefined;
 
-  return { inBattle, playerHpPercent, pageText: text };
+  return { inBattle, playerHpPercent, playerHpStale, pageText: text };
 }
 
 export type InBattleMonitorResult =
   | { status: 'ended' }
   | { status: 'fled'; fleeResult: CombatStepResult }
-  | { status: 'timed_out'; stillInBattle: boolean };
+  | { status: 'timed_out'; stillInBattle: boolean; reason?: 'wall_clock' | 'poll_cap' };
 
 /**
  * Poll in-fight state with iteration and wall-clock caps so Max-stack battles
@@ -2539,17 +2762,19 @@ export async function monitorInBattle(
   options: {
     pollMs: number;
     shouldFlee: (state: BattleState) => Promise<boolean>;
+    wallClockMs?: number;
   },
 ): Promise<InBattleMonitorResult> {
-  const deadline = Date.now() + battleMonitorWallClockMs();
+  const deadline = Date.now() + (options.wallClockMs ?? battleMonitorWallClockMs());
 
   for (let i = 0; i < BATTLE_MONITOR_MAX_POLLS; i++) {
     if (Date.now() >= deadline) {
       const stillInBattle = await isFightInProgress(page);
+      const wallMs = options.wallClockMs ?? battleMonitorWallClockMs();
       console.log(
-        `[combat] battle monitor wall-clock timeout (${battleMonitorWallClockMs()}ms) stillInBattle=${stillInBattle}`,
+        `[combat] battle monitor wall-clock timeout (${wallMs}ms) stillInBattle=${stillInBattle}`,
       );
-      return { status: 'timed_out', stillInBattle };
+      return { status: 'timed_out', stillInBattle, reason: 'wall_clock' };
     }
 
     await solvePostBattleCaptchaIfPresent(page, options.pollMs);
@@ -2570,7 +2795,7 @@ export async function monitorInBattle(
   console.log(
     `[combat] battle monitor poll cap (${BATTLE_MONITOR_MAX_POLLS}) reached stillInBattle=${stillInBattle}`,
   );
-  return { status: 'timed_out', stillInBattle };
+  return { status: 'timed_out', stillInBattle, reason: 'poll_cap' };
 }
 
 /** Click Run Away during an active battle. */

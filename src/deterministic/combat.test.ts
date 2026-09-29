@@ -19,10 +19,15 @@ import {
   isIdleBattleText,
   isInActiveBattleFromSignals,
   parseHuntMetrics,
+  parseHealthBarStyle,
+  parseHealthPercentTextContent,
+  parsePlayerHpFromCurrentMax,
   parsePlayerHpPercent,
   readBattleState,
   readPageTextBounded,
   pickBattleEnemy,
+  startAnywayStrategyForAttempt,
+  effectiveCookedCodStock,
 } from './combat.js';
 import type { EnemyInfo, HuntState } from '../types.js';
 
@@ -237,19 +242,30 @@ Battle`;
 describe('pickBattleEnemy', () => {
   it('prefers Rabbit in a mixed ENEMIES NEARBY list', () => {
     const enemies: EnemyInfo[] = [
-      { name: 'Goblin', index: 0 },
-      { name: 'Rabbit', index: 1 },
-      { name: 'Duck', index: 2 },
+      { name: 'Goblin', index: 0, quantity: 27 },
+      { name: 'Rabbit', index: 1, quantity: 5 },
+      { name: 'Duck', index: 2, quantity: 2 },
     ];
     const picked = pickBattleEnemy(enemies);
     assert.equal(picked?.name, 'Rabbit');
     assert.equal(picked?.index, 1);
   });
 
-  it('falls back to first enemy when Rabbit is absent', () => {
+  it('chooses the largest stack when the hunt target is absent', () => {
     const enemies: EnemyInfo[] = [
-      { name: 'Goblin', index: 0 },
-      { name: 'Duck', index: 1 },
+      { name: 'Duck', index: 0, quantity: 2 },
+      { name: 'stack 27', index: 1, quantity: 27 },
+      { name: 'stack 126', index: 2, quantity: 126 },
+    ];
+    const picked = pickBattleEnemy(enemies);
+    assert.equal(picked?.name, 'stack 126');
+    assert.equal(picked?.index, 2);
+  });
+
+  it('skips restrictive tiles and still picks the largest ready stack', () => {
+    const enemies: EnemyInfo[] = [
+      { name: 'Goblin King', index: 0, quantity: 120, restrictive: true },
+      { name: 'Goblin', index: 1, quantity: 40 },
     ];
     const picked = pickBattleEnemy(enemies);
     assert.equal(picked?.name, 'Goblin');
@@ -261,15 +277,15 @@ describe('pickBattleEnemy', () => {
 });
 
 describe('battleTargetsInOrder', () => {
-  it('puts Rabbit first and then walks the other tiles', () => {
+  it('puts Rabbit first and then walks stacks by descending quantity', () => {
     const order = battleTargetsInOrder([
-      { name: 'Duck', index: 0 },
-      { name: 'Goblin', index: 1 },
-      { name: 'Rabbit', index: 2 },
+      { name: 'Duck', index: 0, quantity: 2 },
+      { name: 'Goblin', index: 1, quantity: 40 },
+      { name: 'Rabbit', index: 2, quantity: 5 },
     ]);
     assert.deepEqual(
       order.map((enemy) => enemy.name),
-      ['Rabbit', 'Duck', 'Goblin'],
+      ['Rabbit', 'Goblin', 'Duck'],
     );
   });
 });
@@ -398,6 +414,21 @@ describe('enemyNameFromImageSrc', () => {
     assert.equal(enemyNameFromImageSrc('/enemies/goblin.png'), 'Goblin');
     assert.equal(enemyNameFromImageSrc('/enemies/unknown.png'), undefined);
   });
+
+  it('maps ULID CDN skins without meta slug', () => {
+    assert.equal(
+      enemyNameFromImageSrc(
+        '/uploaded/skins/01M3HY9HCSE5035HG4VW2M1ZB3.png',
+      ),
+      'Goblin',
+    );
+    assert.equal(
+      enemyNameFromImageSrc(
+        '/uploaded/skins/01M3HXYRPGSWA31QGRN3E7EK1Z.png',
+      ),
+      'Goblin King',
+    );
+  });
 });
 
 describe('parsePlayerHpPercent', () => {
@@ -425,6 +456,71 @@ Run Away`;
   it('returns undefined when Health is collapsed or HP digits are absent', () => {
     assert.equal(parsePlayerHpPercent('Health\nRun Away\nBattle'), undefined);
     assert.equal(parsePlayerHpPercent('Run Away\nBattle\nStats'), undefined);
+  });
+});
+
+describe('parseHealthBarStyle', () => {
+  it('reads width percent from inline bar style', () => {
+    assert.equal(parseHealthBarStyle('width: 100%'), 100);
+    assert.equal(parseHealthBarStyle('width: 37.5%'), 37.5);
+    assert.equal(parseHealthBarStyle('width:undefined%'), undefined);
+  });
+});
+
+describe('parseHealthPercentTextContent', () => {
+  it('parses numeric x-text percent nodes', () => {
+    assert.equal(parseHealthPercentTextContent('100'), 100);
+    assert.equal(parseHealthPercentTextContent('42'), 42);
+    assert.equal(parseHealthPercentTextContent('n/a'), undefined);
+  });
+});
+
+describe('parsePlayerHpFromCurrentMax', () => {
+  it('derives percent from current and max HP text', () => {
+    assert.equal(parsePlayerHpFromCurrentMax('595', '595'), 100);
+    assert.equal(parsePlayerHpFromCurrentMax('119', '595'), 20);
+  });
+});
+
+describe('startAnywayStrategyForAttempt', () => {
+  it('escalates click strategy across retries', () => {
+    assert.equal(startAnywayStrategyForAttempt(0), 'normal');
+    assert.equal(startAnywayStrategyForAttempt(1), 'normal');
+    assert.equal(startAnywayStrategyForAttempt(2), 'force');
+    assert.equal(startAnywayStrategyForAttempt(3), 'dispatch');
+  });
+});
+
+describe('needsCookBeforeHunt hunt floor', () => {
+  it('uses huntCookFloor while hunt batch is active', () => {
+    const inv = { 'Cooked Cod': 80, 'Raw Cod': 5, 'Coal Ore': 5 };
+    assert.equal(needsCookBeforeHunt(inv, 100), true);
+    assert.equal(
+      needsCookBeforeHunt(inv, 100, { huntBatchActive: true, huntCookFloor: 30 }),
+      false,
+    );
+    assert.equal(
+      needsCookBeforeHunt({ 'Cooked Cod': 25 }, 100, {
+        huntBatchActive: true,
+        huntCookFloor: 30,
+      }),
+      true,
+    );
+  });
+
+  it('counts packed battle food toward the hunt floor', () => {
+    assert.equal(
+      effectiveCookedCodStock({ 'Cooked Cod': 20 }, 15),
+      35,
+    );
+    assert.equal(
+      needsCookBeforeHunt({ 'Cooked Cod': 20 }, 100, {
+        huntBatchActive: true,
+        huntCookFloor: 30,
+        packedBattleFood: 15,
+      }),
+      false,
+    );
   });
 });
 

@@ -52,6 +52,7 @@ function playbook(overrides: Partial<PlaybookProgress> = {}): PlaybookProgress {
       codMin: 100,
       codMax: 100,
       cookMin: 100,
+      huntCookFloor: 30,
       huntMin: 120,
     },
     curriculumHint: 'cook',

@@ -2,7 +2,9 @@ import type { Page } from 'playwright';
 import type { AppConfig } from '../config.js';
 import type { HuntState } from '../types.js';
 import { readHuntState } from '../deterministic/combat.js';
-import { huntFoundCap } from '../deterministic/hunt-cap.js';
+import { enemyBacklogTotal, huntFoundCap, shouldSkipHuntMore } from '../deterministic/hunt-cap.js';
+
+export { enemyBacklogTotal, shouldSkipHuntMore } from '../deterministic/hunt-cap.js';
 import { effectivePollMs } from '../deterministic/poll-interval.js';
 import type { JevAdvisor } from './types.js';
 

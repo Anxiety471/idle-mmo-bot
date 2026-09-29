@@ -43,6 +43,10 @@ export interface EnemyInfo {
   name: string;
   /** Index among visible enemy cards on the hunt screen. */
   index: number;
+  /** Stack size on the tile when known (icon-grid quantity badge). */
+  quantity?: number;
+  /** Tile marked restrictive (error-border) — skip for battle selection. */
+  restrictive?: boolean;
 }
 
 export interface HuntState {
@@ -64,6 +68,8 @@ export interface BattleState {
   inBattle: boolean;
   /** Player HP percentage 0–100 if detectable from UI. */
   playerHpPercent?: number;
+  /** True when HP was read during an active fight (bar may lag until battle ends). */
+  playerHpStale?: boolean;
   /** Enemy name if detectable. */
   enemyName?: string;
   pageText: string;

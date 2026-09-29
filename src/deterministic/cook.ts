@@ -4,6 +4,7 @@ import type { GatherRestartResult } from '../types.js';
 import { navigateTo } from '../browser.js';
 import { getSkillConfig } from './skills.js';
 import { solveHumanCaptchaIfPresent } from './human-check.js';
+import { invalidateInventoryDomCache } from '../snapshot/inventory-scrape.js';
 
 /**
  * While something else is running, only start a cook when the caller allows
@@ -374,7 +375,10 @@ async function attemptCookCodStart(
     }
   }
 
-  if (isActiveCookedCodAction(finalText)) return 'restarted';
+  if (isActiveCookedCodAction(finalText)) {
+    invalidateInventoryDomCache();
+    return 'restarted';
+  }
 
   console.log('[cook] Start clicked but Cooked Cod is not the current action');
   return 'failed';
