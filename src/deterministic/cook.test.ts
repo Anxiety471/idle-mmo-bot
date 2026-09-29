@@ -53,7 +53,25 @@ describe('cookBatchQuantity', () => {
         target: 100,
         rawAvailable: 80,
       }),
-      10,
+      16,
+    );
+    // Clamped to the raw available (snapshot) when it is a positive read.
+    assert.equal(
+      cookBatchQuantity('You can perform this action 80 times', {
+        cooked: 22,
+        target: 100,
+        rawAvailable: 12,
+      }),
+      12,
+    );
+    // A zero snapshot read is a scrape miss; the panel still clamps.
+    assert.equal(
+      cookBatchQuantity('You can perform this action 40 times', {
+        cooked: 22,
+        target: 100,
+        rawAvailable: 0,
+      }),
+      40,
     );
     assert.equal(
       cookBatchQuantity('You can perform this action 5 times', {

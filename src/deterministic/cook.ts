@@ -175,10 +175,18 @@ export function cookBatchQuantity(pageText: string, opts?: CookBatchOptions | nu
   if (typeof opts === 'object' && opts?.target !== undefined && opts?.cooked !== undefined) {
     const minBatch = opts.minBatch ?? COOK_MIN_BATCH;
     const maxBatch = opts.maxBatch ?? cookMaxBatch();
+    // max(minBatch, min(target - cooked, maxBatch)): a short tail batch would end
+    // before the next idle cycle and cause cook/idle ping-pong.
     const want = Math.max(1, opts.target - opts.cooked);
-    let qty = want <= minBatch ? want : Math.min(want, maxBatch);
-    if (opts.rawAvailable !== undefined && Number.isFinite(opts.rawAvailable)) {
-      qty = Math.min(qty, Math.max(0, Math.floor(opts.rawAvailable)));
+    let qty = Math.max(minBatch, Math.min(want, maxBatch));
+    // Clamp to raw available: the panel's "perform N times" is authoritative;
+    // the snapshot count only clamps when it is a positive read (0 = scrape miss).
+    if (
+      opts.rawAvailable !== undefined &&
+      Number.isFinite(opts.rawAvailable) &&
+      opts.rawAvailable > 0
+    ) {
+      qty = Math.min(qty, Math.floor(opts.rawAvailable));
     }
     if (panelAvailable !== undefined && Number.isFinite(panelAvailable) && panelAvailable > 0) {
       qty = Math.min(qty, panelAvailable);
@@ -200,7 +208,14 @@ async function setCookQuantityBatch(
   const qty = page.locator('input[name="quantity"]');
   if ((await qty.count()) === 0) return;
   const pageText = await page.locator('body').innerText().catch(() => '');
-  await setCookQuantity(page, String(cookBatchQuantity(pageText, opts)));
+  const batch = cookBatchQuantity(pageText, opts);
+  console.log(
+    `[cook] batch quantity ${batch}` +
+      (opts?.target !== undefined
+        ? ` (cooked ${opts.cooked ?? '?'} / target ${opts.target}, raw ${opts.rawAvailable ?? '?'})`
+        : ' (legacy)'),
+  );
+  await setCookQuantity(page, String(batch));
 }
 
 type StartReadiness = 'ready' | 'missing' | 'disabled';
