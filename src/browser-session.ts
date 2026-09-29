@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import type { Browser } from 'playwright';
 import type { BrowserSession } from './browser.js';
@@ -40,15 +41,66 @@ export async function readProcessRssBytes(pid: number): Promise<number | undefin
   }
 }
 
-/** Count child processes of the browser root (renderer / utility processes). */
-export async function countChildProcesses(pid: number): Promise<number> {
+/** Direct children of a PID (own tree only — never matches by process name). */
+async function childPids(pid: number): Promise<number[]> {
+  if (!pid) return [];
   try {
     const { stdout } = await execFileAsync('pgrep', ['-P', String(pid)], { encoding: 'utf8' });
-    const lines = stdout.trim().split('\n').filter(Boolean);
-    return lines.length;
+    return stdout
+      .trim()
+      .split('\n')
+      .map((line) => Number.parseInt(line, 10))
+      .filter((n) => Number.isFinite(n) && n > 0);
   } catch {
-    return 0;
+    return [];
   }
+}
+
+/**
+ * All descendants of the browser root. Chromium renderers hang off a zygote,
+ * so direct children alone miss them.
+ */
+export async function descendantPids(pid: number, depth = 0): Promise<number[]> {
+  if (!pid || depth > 6) return [];
+  const out: number[] = [];
+  for (const child of await childPids(pid)) {
+    out.push(child, ...(await descendantPids(child, depth + 1)));
+  }
+  return out;
+}
+
+async function isRendererProcess(pid: number): Promise<boolean> {
+  try {
+    const cmdline = await readFile(`/proc/${pid}/cmdline`, 'utf8');
+    return cmdline.includes('--type=renderer');
+  } catch {
+    return false;
+  }
+}
+
+/** Count renderer processes in the browser's own process tree. */
+export async function countChildProcesses(pid: number): Promise<number> {
+  const pids = await descendantPids(pid);
+  let renderers = 0;
+  for (const p of pids) {
+    if (await isRendererProcess(p)) renderers++;
+  }
+  return renderers;
+}
+
+/** RSS summed over the browser root and its descendants. */
+async function readTreeRssBytes(pid: number): Promise<number | undefined> {
+  const pids = [pid, ...(await descendantPids(pid))];
+  let total = 0;
+  let any = false;
+  for (const p of pids) {
+    const rss = await readProcessRssBytes(p);
+    if (rss !== undefined) {
+      total += rss;
+      any = true;
+    }
+  }
+  return any ? total : undefined;
 }
 
 export interface BrowserRecycleProbe {
@@ -67,14 +119,14 @@ export async function shouldProactivelyRecycleBrowser(
   const pid = browserProcess(probe.browser)?.pid;
   if (!pid) return { recycle: false };
 
-  const rss = await readProcessRssBytes(pid);
+  const rss = await readTreeRssBytes(pid);
   if (rss !== undefined && rss >= BROWSER_RECYCLE_MAX_RSS_BYTES) {
     return { recycle: true, reason: `rss ${Math.round(rss / (1024 * 1024))}MB` };
   }
 
   const children = await countChildProcesses(pid);
   if (children >= BROWSER_RECYCLE_MAX_RENDERERS) {
-    return { recycle: true, reason: `child processes ${children}` };
+    return { recycle: true, reason: `renderer processes ${children}` };
   }
 
   return { recycle: false };
@@ -86,19 +138,23 @@ function sleep(ms: number): Promise<void> {
 
 async function forceKillBrowserProcess(browser: Browser): Promise<void> {
   const proc = browserProcess(browser);
-  if (!proc || proc.killed) return;
-  try {
-    proc.kill('SIGKILL');
-  } catch {
-    // Process may already be gone.
-  }
-  try {
-    const children = await countChildProcesses(proc.pid ?? 0);
-    if (proc.pid && children > 0) {
-      await execFileAsync('pkill', ['-9', '-P', String(proc.pid)]).catch(() => undefined);
+  if (!proc?.pid) return;
+  // Snapshot this browser's own tree BEFORE killing the root: once the root dies,
+  // its children reparent and `pgrep -P root` can no longer find them.
+  const tree = await descendantPids(proc.pid).catch(() => [] as number[]);
+  if (!proc.killed) {
+    try {
+      proc.kill('SIGKILL');
+    } catch {
+      // Process may already be gone.
     }
-  } catch {
-    // Best-effort child cleanup.
+  }
+  for (const pid of tree) {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      // Already exited.
+    }
   }
 }
 

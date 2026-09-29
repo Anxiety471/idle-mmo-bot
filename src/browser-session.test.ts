@@ -56,3 +56,40 @@ describe('closeBrowserSessionWithTimeout', () => {
     assert.ok(elapsed < SESSION_CLOSE_TIMEOUT_MS);
   });
 });
+
+describe('closeBrowserSessionWithTimeout process tree', () => {
+  it('kills the browser root and its own descendants (snapshot before root kill)', async () => {
+    const { spawn } = await import('node:child_process');
+    const { descendantPids } = await import('./browser-session.js');
+    // root sh -> child sh -> grandchild sleep (mimics browser -> zygote -> renderer)
+    const root = spawn('sh', ['-c', 'sh -c "sleep 60 & wait" & wait'], { stdio: 'ignore' });
+    await new Promise((r) => setTimeout(r, 300));
+    const tree = await descendantPids(root.pid!);
+    assert.ok(tree.length >= 2, `expected grandchildren, got ${tree.length}`);
+
+    const browser = {
+      process: () => ({
+        pid: root.pid!,
+        killed: false,
+        kill: (signal: string) => root.kill(signal as NodeJS.Signals),
+      }),
+    } as unknown as Browser;
+    const session: BrowserSession = {
+      browser,
+      context: {} as BrowserSession['context'],
+      page: {} as BrowserSession['page'],
+      close: () => new Promise(() => undefined),
+    };
+    await closeBrowserSessionWithTimeout(session, 50);
+    await new Promise((r) => setTimeout(r, 200));
+    for (const pid of tree) {
+      let alive = true;
+      try {
+        process.kill(pid, 0);
+      } catch {
+        alive = false;
+      }
+      assert.equal(alive, false, `descendant ${pid} survived`);
+    }
+  });
+});
