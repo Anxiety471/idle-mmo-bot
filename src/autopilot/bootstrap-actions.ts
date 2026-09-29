@@ -228,6 +228,16 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
   const maxEnemies = DETERMINISTIC_MAX_ENEMIES;
   const stance = deterministicStance(enemy.name);
   console.log(`[combat] deterministic battle config max=full-stack stance=${stance} (no Jev)`);
+  console.log(
+    `[combat] enemy pick ${enemy.name} qty=${enemy.quantity ?? '?'} idx=${enemy.index} of [` +
+      huntState.enemies
+        .map((e) => `${e.name}:${e.quantity ?? '?'}${e.restrictive ? '(restrictive)' : ''}`)
+        .join(', ') +
+      ']',
+  );
+  // Run Away already on screen before Battle means an older fight is running —
+  // it must not be credited again as this round's fight.
+  const fightActiveBeforeBattle = await isFightInProgress(page).catch(() => false);
   const battleResult = await configureAndBattle(
     page,
     enemy.index,
@@ -240,8 +250,9 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
     return combatRoundOutcome('blocked:verify', config);
   }
 
-  let fightConfirmed =
-    battleResult === 'battle_started' || (await isFightInProgress(page));
+  const fightConfirmed =
+    battleResult === 'battle_started' ||
+    (!fightActiveBeforeBattle && (await isFightInProgress(page).catch(() => false)));
   if (fightConfirmed && battleResult !== 'battle_started') {
     console.log(
       `[combat] fight active after configureAndBattle=${battleResult} — treating as battle_started for outcome`,
@@ -263,13 +274,8 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
     );
   }
   if (battleMonitor.status === 'timed_out' && battleMonitor.stillInBattle) {
-    if (battleMonitor.reason === 'wall_clock') {
-      console.log('[combat] battle monitor wall-clock elapsed — leaving fight running');
-      return combatRoundOutcome(
-        formatHuntBattleRoundOutcome(fightConfirmed, battleResult, 'timeout_still_fighting'),
-        config,
-      );
-    }
+    // Hard upper bound: wall-clock or poll cap both end in Run Away.
+    console.log(`[combat] battle monitor ${battleMonitor.reason ?? 'timeout'} — running away`);
     const fleeResult = await runAway(page);
     return combatRoundOutcome(
       formatHuntBattleRoundOutcome(fightConfirmed, battleResult, `timeout_flee:${fleeResult}`),

@@ -500,11 +500,19 @@ describe('needsCookBeforeHunt hunt floor', () => {
       false,
     );
     assert.equal(
-      needsCookBeforeHunt({ 'Cooked Cod': 25 }, 100, {
+      needsCookBeforeHunt({ 'Cooked Cod': 25, 'Raw Cod': 5, 'Coal Ore': 5 }, 100, {
         huntBatchActive: true,
         huntCookFloor: 30,
       }),
       true,
+    );
+    // No Cod/Coal: cooking is impossible, so the floor must not block the hunt.
+    assert.equal(
+      needsCookBeforeHunt({ 'Cooked Cod': 25 }, 100, {
+        huntBatchActive: true,
+        huntCookFloor: 30,
+      }),
+      false,
     );
   });
 
@@ -514,7 +522,7 @@ describe('needsCookBeforeHunt hunt floor', () => {
       35,
     );
     assert.equal(
-      needsCookBeforeHunt({ 'Cooked Cod': 20 }, 100, {
+      needsCookBeforeHunt({ 'Cooked Cod': 20, 'Raw Cod': 5, 'Coal Ore': 5 }, 100, {
         huntBatchActive: true,
         huntCookFloor: 30,
         packedBattleFood: 15,

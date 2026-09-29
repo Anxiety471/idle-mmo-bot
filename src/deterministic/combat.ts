@@ -250,6 +250,18 @@ async function replaceDialogDismissed(page: Page): Promise<boolean> {
 export async function clickStartAnywayRobust(
   page: Page,
 ): Promise<'clicked' | 'gone' | 'failed'> {
+  try {
+    return await clickStartAnywayRobustInner(page);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.log(`[combat] Start anyway helper error (swallowed): ${message}`);
+    return 'failed';
+  }
+}
+
+async function clickStartAnywayRobustInner(
+  page: Page,
+): Promise<'clicked' | 'gone' | 'failed'> {
   const heading = replaceDialogHeading(page).first();
   const visible = await heading
     .waitFor({ state: 'visible', timeout: 3000 })
@@ -1798,9 +1810,9 @@ export function needsCookBeforeHunt(
   threshold: number,
   options: NeedsCookBeforeHuntOptions = {},
 ): boolean {
-  const bagCod = cookedCodCount(inventory);
   const canCookMore = inventoryCanCookBattleFood(inventory);
-  if (!canCookMore && !(options.huntBatchActive && bagCod > 0)) return false;
+  // Without Cod + Coal the cook cannot run — gating hunt on it would stall combat.
+  if (!canCookMore) return false;
   const target = Number.isFinite(threshold) && threshold > 0 ? threshold : 1;
   const floor =
     options.huntCookFloor !== undefined && options.huntCookFloor > 0
@@ -2809,7 +2821,7 @@ export async function runAway(page: Page): Promise<CombatStepResult> {
 }
 
 export async function isFightInProgress(page: Page): Promise<boolean> {
-  return isButtonVisible(page, 'Run Away');
+  return isButtonVisible(page, 'Run Away').catch(() => false);
 }
 
 /** Default gap between fight-start probes. Solver clamps its own sleep to >= 2s. */
