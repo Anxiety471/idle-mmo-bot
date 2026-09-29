@@ -884,6 +884,35 @@ describe('ensureHuntActive enemy selection vs Hunt More', () => {
       );
     });
   });
+
+  it('returns hunt_active_wait on no_controls when API says a hunt is in progress', async () => {
+    const NO_CONTROLS_HUNT_BUSY = `<!DOCTYPE html>
+<html><body>
+  <div>Battle</div>
+  <div>Character</div>
+  <p>Panel still loading — no hunt buttons rendered.</p>
+</body></html>`;
+    await withServedCombatPage(NO_CONTROLS_HUNT_BUSY, async (page, config, logs) => {
+      const withoutApi = await ensureHuntActive(page, config, false);
+      assert.equal(withoutApi, 'failed');
+      assert.ok(logs.some((line) => line.includes('ensureHuntActive failed (no_controls)')));
+
+      logs.length = 0;
+      const withApi = await ensureHuntActive(page, config, false, undefined, {
+        currentAction: { busy: true, type: 'HUNTING', label: 'Hunting' },
+        combatPhase: 'none',
+      });
+      assert.equal(withApi, 'hunt_active_wait');
+      assert.ok(
+        logs.some((line) => line.includes('no_controls but hunt in progress')),
+        `expected wait log, got: ${logs.join(' | ')}`,
+      );
+      assert.equal(
+        logs.some((line) => line.includes('ensureHuntActive failed (no_controls)')),
+        false,
+      );
+    });
+  });
 });
 
 /**

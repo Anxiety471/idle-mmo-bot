@@ -174,11 +174,17 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
     );
   }
 
-  const huntResult = await ensureHuntActive(page, config, allowInterrupt, verifyBudget);
+  const huntResult = await ensureHuntActive(page, config, allowInterrupt, verifyBudget, {
+    currentAction: ctx.snapshot.currentAction,
+    combatPhase: ctx.snapshot.combatPhase,
+  });
 
   if (huntResult === 'no_action') {
     await sleep(huntBackoffMs);
     return combatRoundOutcome(`blocked:${huntResult}`, config);
+  }
+  if (huntResult === 'hunt_active_wait') {
+    return combatRoundOutcome('hunt_active:wait', config);
   }
   if (huntResult === 'failed') {
     if (await isHumanCheckPresent(page)) {

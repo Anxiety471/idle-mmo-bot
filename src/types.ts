@@ -113,6 +113,7 @@ export type CombatStepResult =
   | 'heal_failed'
   | 'blocked_verify'
   | 'pending_verify'
+  | 'hunt_active_wait'
   | 'failed';
 
 export type QuestStepResult =

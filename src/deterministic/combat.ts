@@ -1,6 +1,14 @@
 import type { Locator, Page } from 'playwright';
 import type { AppConfig } from '../config.js';
-import type { BattleState, CombatStepResult, EnemyInfo, HuntState, Stance } from '../types.js';
+import type {
+  BattleState,
+  CombatPhase,
+  CombatStepResult,
+  CurrentActionInfo,
+  EnemyInfo,
+  HuntState,
+  Stance,
+} from '../types.js';
 import { navigateTo } from '../browser.js';
 import {
   decodeIdleMmoMetaSlug,
@@ -1364,6 +1372,24 @@ async function isEnemySelectPreferable(page: Page): Promise<boolean> {
 }
 
 /** Button/state probe for a bare ensureHuntActive failure. No page text or secrets. */
+export interface EnsureHuntActiveOptions {
+  currentAction?: CurrentActionInfo | null;
+  combatPhase?: CombatPhase;
+}
+
+/** True when the Public API / snapshot current action indicates an active hunt. */
+export function isHuntInProgressFromSnapshot(
+  snapshot: Pick<EnsureHuntActiveOptions, 'currentAction' | 'combatPhase'>,
+): boolean {
+  if (snapshot.combatPhase === 'hunt') return true;
+  const action = snapshot.currentAction;
+  if (!action?.busy) return false;
+  const type = (action.type ?? '').trim();
+  if (/^HUNT(ING)?$/i.test(type)) return true;
+  const haystack = `${action.label ?? ''} ${action.resource ?? ''}`.toLowerCase();
+  return /\bhunt(?:ing)?\b/.test(haystack);
+}
+
 async function logEnsureHuntActiveFailed(page: Page, reason: string): Promise<void> {
   try {
     const startHunt = await isButtonVisible(page, 'Start Hunt');
@@ -1391,6 +1417,7 @@ export async function ensureHuntActive(
   config: AppConfig,
   allowInterrupt = false,
   verifyBudget?: VerifyBudget,
+  options?: EnsureHuntActiveOptions,
 ): Promise<CombatStepResult> {
   const pollMs = effectivePollMs(config.pollMs);
   await navigateTo(page, config, COMBAT_PATH);
@@ -1436,6 +1463,13 @@ export async function ensureHuntActive(
       await logEnsureHuntActiveFailed(page, 'hunt_more');
     }
     return huntMoreResult;
+  }
+
+  if (isHuntInProgressFromSnapshot(options ?? {})) {
+    console.log(
+      '[combat] ensureHuntActive no_controls but hunt in progress (API/current action) — waiting',
+    );
+    return 'hunt_active_wait';
   }
 
   await logEnsureHuntActiveFailed(page, 'no_controls');
