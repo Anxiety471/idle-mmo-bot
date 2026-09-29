@@ -6,6 +6,7 @@ import type { AppConfig } from '../config.js';
 import {
   configureAndBattle,
   ensureHuntActive,
+  resetHuntActiveWaitStreak,
   huntMore,
   takeCookedCodSpentOnHeal,
   pickBattleEnemy,
@@ -911,6 +912,21 @@ describe('ensureHuntActive enemy selection vs Hunt More', () => {
         logs.some((line) => line.includes('ensureHuntActive failed (no_controls)')),
         false,
       );
+    
+      // Bounded: after HUNT_ACTIVE_WAIT_MAX (4) consecutive waits the stall fails.
+      const apiOpts = {
+        currentAction: { busy: true, type: 'HUNTING', label: 'Hunting' },
+        combatPhase: 'none' as const,
+      };
+      for (let i = 2; i <= 4; i++) {
+        assert.equal(await ensureHuntActive(page, config, false, undefined, apiOpts), 'hunt_active_wait');
+      }
+      logs.length = 0;
+      assert.equal(await ensureHuntActive(page, config, false, undefined, apiOpts), 'failed');
+      assert.ok(logs.some((line) => line.includes('treating as stall')));
+      // Streak resets after the failure.
+      assert.equal(await ensureHuntActive(page, config, false, undefined, apiOpts), 'hunt_active_wait');
+      resetHuntActiveWaitStreak();
     });
   });
 });

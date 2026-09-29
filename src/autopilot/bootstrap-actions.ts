@@ -70,6 +70,7 @@ import {
   isHumanCheckPresent,
 } from '../deterministic/human-check.js';
 import { shouldRefreshCookGateAfterFight } from '../deterministic/battle-confirm.js';
+import { battleGuard } from './battle-guard.js';
 import {
   invalidateInventoryDomCache,
   scrapeInventoryFromDom,
@@ -165,7 +166,17 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
   if (!mustBattle && needsCookBeforeHunt(ctx.snapshot.inventory, cookTarget, cookGateOptions)) {
     const cooked = ctx.snapshot.inventory['Cooked Cod'] ?? 0;
     console.log(`[combat] Cooked Cod ${cooked}/${cookTarget} — cooking before hunt`);
-    const cookResult = await tryCookCod(page, config, true);
+    if (battleGuard(ctx.snapshot) === 'battle') {
+      return combatRoundOutcome('cook_before_hunt:already_busy', config);
+    }
+    const cookResult = await tryCookCod(page, config, true, {
+      cooked,
+      target: cookTarget,
+      rawAvailable: Math.max(
+        ctx.snapshot.inventory['Cod'] ?? 0,
+        ctx.snapshot.inventory['Raw Cod'] ?? 0,
+      ),
+    });
     return combatRoundOutcome(`cook_before_hunt:${cookResult}`, config);
   }
   if (mustBattle && needsCookBeforeHunt(ctx.snapshot.inventory, cookTarget, cookGateOptions)) {
@@ -251,6 +262,13 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
   // Run Away already on screen before Battle means an older fight is running —
   // it must not be credited again as this round's fight.
   const fightActiveBeforeBattle = await isFightInProgress(page).catch(() => false);
+  if (!fightActiveBeforeBattle && battleGuard(ctx.snapshot) === 'battle') {
+    // API says a battle is running but this page never rendered it (stale store).
+    // A second Battle click is queued without a confirm dialog — do not click.
+    console.log('[combat] API current action is BATTLE — not clicking Battle; reloading and waiting');
+    await navigateTo(page, config, '/combat/battle').catch(() => undefined);
+    return combatRoundOutcome('battle:battle_in_progress:wait', config);
+  }
   const battleResult = await configureAndBattle(
     page,
     enemy.index,
@@ -259,7 +277,6 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
     allowInterrupt,
     {
       config,
-      apiActionType: ctx.snapshot.currentAction?.type ?? null,
       bagCooked: cookedCodCount(ctx.snapshot.inventory),
     },
   );
@@ -268,10 +285,20 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
     return combatRoundOutcome('blocked:verify', config);
   }
 
+  if (battleResult === 'pending_verify') {
+    // Stuck request / unverified accept: never credited. Reload resets is_processing;
+    // the next cycle sees Run Away (monitored, not credited) or a clean screen.
+    console.log('[combat] Battle unverified (pending) — reloading, no hunt credit');
+    takePackedBattleFood();
+    await navigateTo(page, config, '/combat/battle').catch(() => undefined);
+    return combatRoundOutcome('battle:pending_verify:reload', config);
+  }
+
   const fightConfirmed =
     battleResult === 'battle_started' ||
-    battleResult === 'pending_verify' ||
-    (!fightActiveBeforeBattle && (await isFightInProgress(page).catch(() => false)));
+    (!fightActiveBeforeBattle &&
+      battleResult !== 'battle_in_progress' &&
+      (await isFightInProgress(page).catch(() => false)));
   if (fightConfirmed && battleResult !== 'battle_started') {
     console.log(
       `[combat] fight active after configureAndBattle=${battleResult} — treating as battle_started for outcome`,
@@ -522,6 +549,7 @@ function gatherAction(
       return (
         ctx.snapshot.flags.sessionValid &&
         idleOrInterrupt &&
+        battleGuard(ctx.snapshot) !== 'battle' &&
         baitOk &&
         (extraAllowed?.(ctx) ?? true)
       );
@@ -755,9 +783,7 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
       const cookTarget = playbook?.targets.cookMin ?? 100;
       const cooked = inv['Cooked Cod'] ?? 0;
       const needsFood = cooked < cookTarget;
-      const actionType = ctx.snapshot.currentAction?.type ?? '';
-      const battleRunning =
-        ctx.snapshot.flags.inBattle || /^battle$/i.test(actionType);
+      const battleRunning = battleGuard(ctx.snapshot) === 'battle';
       return (
         ctx.snapshot.flags.sessionValid &&
         gatherIdle(ctx) &&
@@ -768,15 +794,17 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
       );
     },
     execute: async (ctx) => {
-      const actionType = ctx.snapshot.currentAction?.type ?? '';
-      if (ctx.snapshot.flags.inBattle || /^battle$/i.test(actionType)) {
+      const guard = battleGuard(ctx.snapshot);
+      if (guard === 'battle') {
+        console.log('[cook] battle running (API/page) — not interrupting it with Start anyway');
         return { action: 'cook_cod', outcome: 'already_busy' as const };
       }
+      if (guard === 'stale') {
+        console.log('[cook] battle signal stale (expired or over BATTLE_GUARD_MAX_MS) — allowing cook');
+      }
       const gatherState = await readGatherState(ctx.page, ctx.config);
-      const snapshotBattle = /^battle$/i.test(actionType);
       const allowInterrupt =
-        !snapshotBattle &&
-        (ctx.forceInterrupt || (await ctx.jev.shouldInterruptGather(gatherState)));
+        ctx.forceInterrupt || (await ctx.jev.shouldInterruptGather(gatherState));
       const playbook = getPlaybookFromSnapshot(ctx.snapshot);
       const cookTarget = playbook?.targets.cookMin ?? 100;
       const cooked = ctx.snapshot.inventory['Cooked Cod'] ?? 0;

@@ -1412,7 +1412,7 @@ async function logEnsureHuntActiveFailed(page: Page, reason: string): Promise<vo
  * When ENEMIES NEARBY tiles are already on screen, battle them instead of Hunt More.
  * Hunt More on that screen does not start a hunt and loops failed:failed.
  */
-export async function ensureHuntActive(
+async function ensureHuntActiveOnce(
   page: Page,
   config: AppConfig,
   allowInterrupt = false,
@@ -1466,14 +1466,48 @@ export async function ensureHuntActive(
   }
 
   if (isHuntInProgressFromSnapshot(options ?? {})) {
+    if (huntActiveWaitStreak < huntActiveWaitMax()) {
+      huntActiveWaitStreak += 1;
+      console.log(
+        `[combat] ensureHuntActive no_controls but hunt in progress (API/current action) — waiting (${huntActiveWaitStreak}/${huntActiveWaitMax()})`,
+      );
+      return 'hunt_active_wait';
+    }
     console.log(
-      '[combat] ensureHuntActive no_controls but hunt in progress (API/current action) — waiting',
+      `[combat] ensureHuntActive no_controls for ${huntActiveWaitStreak} waits while API says hunting — treating as stall`,
     );
-    return 'hunt_active_wait';
   }
 
   await logEnsureHuntActiveFailed(page, 'no_controls');
   return 'failed';
+}
+
+/** Consecutive no_controls-while-hunting waits; bounded so a real stall still fails. */
+let huntActiveWaitStreak = 0;
+
+export function huntActiveWaitMax(): number {
+  const env = Number(process.env.HUNT_ACTIVE_WAIT_MAX);
+  return Number.isFinite(env) && env >= 0 ? Math.floor(env) : 4;
+}
+
+export function resetHuntActiveWaitStreak(): void {
+  huntActiveWaitStreak = 0;
+}
+
+/**
+ * Ensure combat is in a hunt-ready state (see ensureHuntActiveOnce). Resets the
+ * hunt_active_wait streak on any other result, and after the bound trips.
+ */
+export async function ensureHuntActive(
+  page: Page,
+  config: AppConfig,
+  allowInterrupt = false,
+  verifyBudget?: VerifyBudget,
+  options?: EnsureHuntActiveOptions,
+): Promise<CombatStepResult> {
+  const result = await ensureHuntActiveOnce(page, config, allowInterrupt, verifyBudget, options);
+  if (result !== 'hunt_active_wait') huntActiveWaitStreak = 0;
+  return result;
 }
 
 /** @deprecated Use ensureHuntActive — kept for compatibility. */
@@ -1920,17 +1954,17 @@ function notePackedBattleFood(qty: number): void {
 export async function packedFoodQuantity(page: Page): Promise<number> {
   const modal = page.locator('[x-data*="show-battle-entity"]').filter({ visible: true }).first();
   if ((await modal.count()) === 0 || !(await modal.isVisible().catch(() => false))) return 0;
-  const badges = modal.locator('button').filter({ hasText: /\d+\s*x/i });
+  // Only the selected-food row (removeFoodItem buttons); drop lists also show "Nx".
+  const badges = modal.locator('button[x-on\\:click*="removeFoodItem"]');
   const count = await badges.count();
+  let total = 0;
   for (let i = 0; i < count; i++) {
     const btn = badges.nth(i);
     if (!(await btn.isVisible().catch(() => false))) continue;
     const text = await safeInnerText(btn);
-    const qty = parsePackedFoodQuantityFromModalText(text);
-    if (qty > 0) return qty;
+    total += parsePackedFoodQuantityFromModalText(text);
   }
-  const modalText = await safeInnerText(modal);
-  return parsePackedFoodQuantityFromModalText(modalText);
+  return total;
 }
 
 async function isBattleFoodAddDisabled(page: Page): Promise<boolean> {
@@ -2135,7 +2169,7 @@ export async function selectBattleFood(
     const qtyOpen =
       (await qtyInput.count()) > 0 && (await qtyInput.first().isVisible().catch(() => false));
     if (qtyOpen) {
-      let scrapedBag = bagCooked ?? 0;
+      let scrapedBag = Math.max(0, (bagCooked ?? 0) - cookedCodSpentOnHeal);
       if (!scrapedBag) {
         const canPerform = body.match(/you can perform this action\s+(\d+)\s+times/i);
         if (canPerform?.[1]) scrapedBag = Number.parseInt(canPerform[1], 10);
@@ -2549,11 +2583,13 @@ type BattleClickResult =
   | 'health_too_low'
   | 'heal_failed'
   | 'verify_blocked'
-  | 'pending_verify';
+  | 'pending_verify'
+  | 'battle_in_progress';
 
 function battleClickToStep(result: BattleClickResult): CombatStepResult {
   if (result === 'started') return 'battle_started';
   if (result === 'pending_verify') return 'pending_verify';
+  if (result === 'battle_in_progress') return 'battle_in_progress';
   if (result === 'verify_blocked') return 'blocked_verify';
   if (result === 'health_too_low' || result === 'heal_failed' || result === 'no_action') {
     return result;
@@ -2562,8 +2598,9 @@ function battleClickToStep(result: BattleClickResult): CombatStepResult {
 }
 
 function confirmOutcomeToBattleClick(outcome: BattleConfirmOutcome): BattleClickResult {
-  if (outcome === 'started' || outcome === 'accepted_unrendered') return 'started';
-  if (outcome === 'pending') return 'pending_verify';
+  if (outcome === 'started') return 'started';
+  // Modal closed by the game but no Run Away / tile drop after reload: unverified.
+  if (outcome === 'pending' || outcome === 'accepted_unrendered') return 'pending_verify';
   return 'no_fight';
 }
 
@@ -2617,7 +2654,6 @@ async function clickEnabledBattle(
     tileName: enemyLabel,
     qtyBefore: confirmOptions?.qtyBefore,
     pollMs: FIGHT_CONFIRM_POLL_MS,
-    apiActionType: confirmOptions?.apiActionType,
     config: confirmOptions?.config,
     readEnemies: async () => (await readHuntState(page)).enemies,
   });
@@ -2658,8 +2694,9 @@ async function prepareAndBattleOpenModal(
 
   if (options?.packFood !== false) {
     if (await isFightInProgress(page)) {
+      // Pre-existing fight: never credited as this round's Battle click.
       console.log('[combat] fight already in progress — skipping food pack and Battle click');
-      return 'started';
+      return 'battle_in_progress';
     }
     await selectBattleFood(page, options?.bagCooked);
   }
@@ -2754,6 +2791,10 @@ export async function configureAndBattle(
         : 'missing';
     }
     if (result === 'started') return 'battle_started';
+    if (result === 'battle_in_progress') {
+      await closeBattleEntityModal(page);
+      return 'battle_in_progress';
+    }
     if (result === 'pending_verify') {
       console.log('[combat] battle pending — not walking other enemy tiles');
       await closeBattleEntityModal(page);
@@ -2990,24 +3031,39 @@ export async function runAway(page: Page): Promise<CombatStepResult> {
     return 'no_action';
   }
   await fleeBtn.first().click();
-  const confirmModal = page.locator('[x-data*="run-away-from-battle"]').filter({ visible: true });
-  await confirmModal
-    .first()
+  // The visible Run Away only opens the confirm modal; the real flee is scoped inside it.
+  const confirmBtn = page
+    .locator('[x-data*="run-away-from-battle"]')
+    .getByRole('button', { name: 'Run Away', exact: true })
+    .filter({ visible: true })
+    .first();
+  const opened = await confirmBtn
     .waitFor({ state: 'visible', timeout: 5000 })
-    .catch(() => undefined);
-  const confirmBtn = confirmModal.getByRole('button', { name: 'Run Away', exact: true });
-  if ((await confirmBtn.count()) > 0 && (await confirmBtn.first().isVisible().catch(() => false))) {
-    await confirmBtn.first().click({ timeout: 5000 });
-  } else {
+    .then(() => true)
+    .catch(() => false);
+  if (!opened) {
+    console.log('[combat] Run Away confirm modal did not open');
     return 'failed';
   }
-  await page.waitForTimeout(400);
-  const stillFighting = await isFightInProgress(page);
-  return stillFighting ? 'failed' : 'fled';
+  await confirmBtn.click({ timeout: 5000 });
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    await page.waitForTimeout(500);
+    if (!(await isFightInProgress(page))) {
+      console.log('[combat] Run Away confirmed — fight ended');
+      return 'fled';
+    }
+  }
+  console.log('[combat] Run Away confirmed but fight still shows');
+  return 'failed';
 }
 
 export async function isFightInProgress(page: Page): Promise<boolean> {
-  return isButtonVisible(page, 'Run Away').catch(() => false);
+  // Exclude the hidden run-away-from-battle confirm button (always in the DOM).
+  const btn = page
+    .getByRole('button', { name: 'Run Away', exact: true })
+    .filter({ visible: true });
+  return (await btn.count().catch(() => 0)) > 0;
 }
 
 /** Default gap between fight-start probes. Solver clamps its own sleep to >= 2s. */

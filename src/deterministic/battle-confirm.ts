@@ -153,6 +153,10 @@ export interface ConfirmBattleStartedOptions {
   qtyBefore?: number;
   pollMs?: number;
   timeoutMs?: number;
+  /**
+   * Ignored for confirmation: a snapshot API type was read before the click, so it can
+   * only describe a fight that was already running. Kept for call-site compatibility.
+   */
   apiActionType?: string | null;
   readEnemies?: () => Promise<EnemyInfo[]>;
   config?: AppConfig;
@@ -161,7 +165,50 @@ export interface ConfirmBattleStartedOptions {
 }
 
 /**
- * Poll after a Battle click for fight-accepted signals (Run Away, tile drop, toast, API).
+ * Tile-drop signal tied to THIS click: the fought tile (qtyBefore captured right before
+ * the Battle click) is gone or smaller. An empty/failed read never counts.
+ * With duplicate names, confirmed only when no same-name tile still has >= qtyBefore.
+ */
+export function tileDropConfirmed(
+  enemies: EnemyInfo[],
+  tileName: string,
+  qtyBefore: number | undefined,
+): boolean {
+  if (qtyBefore === undefined || !Number.isFinite(qtyBefore) || qtyBefore <= 0) return false;
+  if (enemies.length === 0) return false;
+  const needle = tileName.trim().toLowerCase();
+  const same = enemies.filter((e) => e.name.trim().toLowerCase() === needle);
+  if (same.length === 0) return true;
+  if (same.some((e) => e.quantity === undefined)) return false;
+  return same.every((e) => (e.quantity as number) < qtyBefore);
+}
+
+/** Visible Run Away only (the confirm-modal copy is hidden). */
+async function runAwayVisible(page: Page): Promise<boolean> {
+  const btn = page.getByRole('button', { name: 'Run Away', exact: true }).filter({ visible: true });
+  return (await btn.count().catch(() => 0)) > 0;
+}
+
+async function tileDropAfterClick(
+  options: ConfirmBattleStartedOptions,
+): Promise<boolean> {
+  if (!options.readEnemies || options.qtyBefore === undefined) return false;
+  let enemies: EnemyInfo[];
+  try {
+    enemies = await options.readEnemies();
+  } catch {
+    return false;
+  }
+  return tileDropConfirmed(enemies, options.tileName, options.qtyBefore);
+}
+
+/**
+ * Poll after a Battle click. Only two signals count as `started`, both tied to this click
+ * (callers skip the click when a fight was already on screen):
+ *  - a visible Run Away button (not page text), or
+ *  - the fought tile dropping/vanishing versus qtyBefore read just before the click.
+ * The game closing the modal / a toast is only a hint: it triggers a reload verify and,
+ * if neither signal shows, returns `accepted_unrendered` (never credited).
  */
 export async function confirmBattleStarted(
   page: Page,
@@ -174,63 +221,44 @@ export async function confirmBattleStarted(
   const pollMs = options.pollMs ?? 500;
   const deadline = Date.now() + limitMs;
   const modalOpenAtClick = await isEnemyModalVisible(page);
-  let sawToast = false;
+  let acceptHint = false;
+  let captchaRounds = 0;
 
   while (Date.now() < deadline) {
-    const body = await page.locator('body').innerText().catch(() => '');
-    if (isFightAcceptedFromPageText(body, { apiActionType: options.apiActionType })) {
-      return 'started';
-    }
-
-    if (await newSonnerToastVisible(page)) {
-      sawToast = true;
-    }
+    if (await runAwayVisible(page)) return 'started';
 
     const modalNow = await isEnemyModalVisible(page);
-    if (modalOpenAtClick && !modalNow && !sawToast) {
-      // Game closes modal on on_success — fight accepted even if store is late.
-      sawToast = true;
-    }
-    if (sawToast && !modalNow) {
-      return 'accepted_unrendered';
-    }
-
-    if (options.readEnemies && options.qtyBefore !== undefined) {
-      const enemies = await options.readEnemies().catch(() => [] as EnemyInfo[]);
-      const afterQty = enemyTileQuantity(enemies, options.tileName);
-      const listed = enemies.some(
-        (e) => e.name.trim().toLowerCase() === options.tileName.trim().toLowerCase(),
-      );
-      if (enemyTileReducedOrGone(options.qtyBefore, afterQty, listed)) {
-        return 'started';
+    if (modalOpenAtClick && !modalNow) {
+      // Game closes show-battle-entity in on_success — verify below, do not credit yet.
+      acceptHint = true;
+      // Give the store a moment to hydrate Run Away before reloading.
+      const hydrateUntil = Math.min(deadline, Date.now() + 5_000);
+      while (Date.now() < hydrateUntil) {
+        await page.waitForTimeout(pollMs);
+        if (await runAwayVisible(page)) return 'started';
+        if (await tileDropAfterClick(options)) return 'started';
       }
+      break;
     }
 
-    if (await isPostBattleHumanCheckExtended(page)) {
+    if (modalNow && (await tileDropAfterClick(options))) return 'started';
+
+    if (captchaRounds < 3 && (await isPostBattleHumanCheckExtended(page))) {
+      captchaRounds += 1;
       await clickCaptchaToastAction(page);
       await solveHumanCaptchaIfPresent(page, { pollMs, maxAttempts: 5 });
-      if (isFightAcceptedFromPageText(await page.locator('body').innerText().catch(() => ''), {
-        apiActionType: options.apiActionType,
-      })) {
-        return 'started';
-      }
       continue;
     }
 
-    const modalOpen = await isEnemyModalVisible(page);
     const processing =
-      (modalOpen && (await battleButtonProcessingDisabled(page))) ||
+      (modalNow && (await battleButtonProcessingDisabled(page))) ||
       (await huntMoreProcessingDisabled(page));
-    if (modalOpen && processing) {
+    if (modalNow && processing) {
       await page.waitForTimeout(pollMs);
       continue;
     }
 
-    if (
-      modalOpen &&
-      !(await battleButtonProcessingDisabled(page)) &&
-      !isFightAcceptedFromPageText(body, { apiActionType: options.apiActionType })
-    ) {
+    if (modalNow && !(await battleButtonProcessingDisabled(page))) {
       const battleBtn = page
         .locator('[x-data*="show-battle-entity"]')
         .getByRole('button', { name: 'Battle', exact: true })
@@ -238,46 +266,30 @@ export async function confirmBattleStarted(
         .first();
       const enabled =
         (await battleBtn.count()) > 0 && (await battleBtn.isEnabled().catch(() => false));
-      if (enabled) return 'rejected';
+      if (enabled && !(await newSonnerToastVisible(page))) return 'rejected';
     }
 
     await page.waitForTimeout(pollMs);
   }
 
-  const body = await page.locator('body').innerText().catch(() => '');
-  if (isFightAcceptedFromPageText(body, { apiActionType: options.apiActionType })) {
-    return 'started';
-  }
+  if (await runAwayVisible(page)) return 'started';
 
-  if (
-    options.allowReloadVerify !== false &&
-    options.config &&
-    (await isEnemyModalVisible(page)) === false
-  ) {
+  const modalOpen = await isEnemyModalVisible(page);
+  if (options.allowReloadVerify !== false && options.config && !modalOpen) {
     await navigateTo(page, options.config, COMBAT_PATH);
     await page
       .getByText(CURRENT_ACTION_MARKER)
       .first()
       .waitFor({ state: 'visible', timeout: 10_000 })
       .catch(() => undefined);
-    const afterReload = await page.locator('body').innerText().catch(() => '');
-    if (isFightAcceptedFromPageText(afterReload, { apiActionType: options.apiActionType })) {
-      return 'started';
-    }
-    if (options.readEnemies && options.qtyBefore !== undefined) {
-      const enemies = await options.readEnemies().catch(() => [] as EnemyInfo[]);
-      const afterQty = enemyTileQuantity(enemies, options.tileName);
-      const listed = enemies.some(
-        (e) => e.name.trim().toLowerCase() === options.tileName.trim().toLowerCase(),
-      );
-      if (enemyTileReducedOrGone(options.qtyBefore, afterQty, listed)) {
-        return 'started';
-      }
-    }
+    if (await runAwayVisible(page)) return 'started';
+    if (await tileDropAfterClick(options)) return 'started';
   }
 
+  if (acceptHint) return 'accepted_unrendered';
+
   if (
-    (await isEnemyModalVisible(page)) &&
+    modalOpen &&
     ((await battleButtonProcessingDisabled(page)) || (await huntMoreProcessingDisabled(page)))
   ) {
     return 'pending';

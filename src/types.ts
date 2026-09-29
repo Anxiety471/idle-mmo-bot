@@ -114,6 +114,7 @@ export type CombatStepResult =
   | 'blocked_verify'
   | 'pending_verify'
   | 'hunt_active_wait'
+  | 'battle_in_progress'
   | 'failed';
 
 export type QuestStepResult =

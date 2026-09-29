@@ -8,8 +8,50 @@ import {
   isPreBattleClickFailure,
   parsePackedFoodQuantityFromModalText,
   shouldRefreshCookGateAfterFight,
+  tileDropConfirmed,
   worstCaseCookedCodAfterFight,
 } from './battle-confirm.js';
+import { battleGuard, resetBattleGuard } from '../autopilot/battle-guard.js';
+
+describe('tileDropConfirmed', () => {
+  const t = (name: string, quantity?: number, index = 0) => ({ name, quantity, index });
+  it('confirms a drop or vanish of the fought tile only', () => {
+    assert.equal(tileDropConfirmed([t('Goblin', 35), t('Duck', 7)], 'Goblin', 40), true);
+    assert.equal(tileDropConfirmed([t('Duck', 7)], 'Goblin', 40), true);
+    assert.equal(tileDropConfirmed([t('Goblin', 40), t('Duck', 7)], 'Goblin', 40), false);
+  });
+  it('never confirms on an empty/failed read or unknown qtyBefore', () => {
+    assert.equal(tileDropConfirmed([], 'Goblin', 40), false);
+    assert.equal(tileDropConfirmed([t('Duck', 7)], 'Goblin', undefined), false);
+  });
+  it('handles duplicate names without a false positive', () => {
+    // Fought Goblin 7 while another Goblin 40 is listed: nothing changed.
+    assert.equal(tileDropConfirmed([t('Goblin', 40), t('Goblin', 7)], 'Goblin', 7), false);
+    // Fought Goblin 40, Goblin 7 still listed: the 40 stack is gone.
+    assert.equal(tileDropConfirmed([t('Goblin', 7)], 'Goblin', 40), true);
+  });
+});
+
+describe('battleGuard', () => {
+  const snap = (type?: string, expiresAt?: string, inBattle = false) =>
+    ({ currentAction: type ? { busy: true, type, expiresAt } : { busy: false }, flags: { inBattle } }) as never;
+  it('blocks while the API says BATTLE, then bounds the wait', () => {
+    resetBattleGuard();
+    const t0 = Date.parse('2026-09-30T00:00:00Z');
+    const future = new Date(t0 + 120_000).toISOString();
+    assert.equal(battleGuard(snap('BATTLE', future), t0), 'battle');
+    assert.equal(battleGuard(snap('BATTLE', future), t0 + 60_000), 'battle');
+    // expires_at well in the past: stale, not a live battle.
+    assert.equal(battleGuard(snap('BATTLE', future), t0 + 400_000), 'stale');
+    // No expiry: bounded by BATTLE_GUARD_MAX_MS (15 min default).
+    resetBattleGuard();
+    assert.equal(battleGuard(snap('BATTLE'), t0), 'battle');
+    assert.equal(battleGuard(snap('BATTLE'), t0 + 16 * 60_000), 'stale');
+    assert.equal(battleGuard(snap('COOKING'), t0 + 17 * 60_000), 'none');
+    assert.equal(battleGuard(snap('BATTLE'), t0 + 18 * 60_000), 'battle');
+    resetBattleGuard();
+  });
+});
 
 describe('battleFoodPackQuantity', () => {
   it('caps packed food per fight', () => {
