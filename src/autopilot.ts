@@ -24,6 +24,10 @@ import { getLogDir } from './logging/jsonl-writer.js';
 import { setLogContext } from './logging/log-context.js';
 import { readGameSnapshot } from './snapshot/read-snapshot.js';
 import {
+  actionInvalidatesInventoryCache,
+  invalidateInventoryDomCache,
+} from './snapshot/inventory-scrape.js';
+import {
   attachPlaybookToSnapshot,
   evaluatePlaybook,
   formatPlaybookLogLine,
@@ -251,6 +255,9 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
         }
 
         console.log(`[autopilot] result: ${result.outcome}`);
+        if (actionInvalidatesInventoryCache(action, result.outcome)) {
+          invalidateInventoryDomCache();
+        }
         notePlaybookOutcome(action, result.outcome);
         try {
           await logDecision(snapshot, context, allowed, action, result);

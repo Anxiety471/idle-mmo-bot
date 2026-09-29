@@ -481,6 +481,30 @@ export function invalidateInventoryDomCache(): void {
   inventoryDomCache = null;
 }
 
+/**
+ * Actions that may have changed the bag (cook, sell, buy, gather start/stop, battle, quests)
+ * must force a fresh scrape next cycle. Only idle/continue/blocked outcomes keep the cache.
+ */
+export function actionInvalidatesInventoryCache(action: string, outcome: string): boolean {
+  if (action === 'continue_current' || action === 'idle' || action === 'wait') return false;
+  if (/^(blocked|no_action|skipped|error)\b/i.test(outcome)) return false;
+  return true;
+}
+
+let lastBusySkillForCache: string | null | undefined;
+
+/**
+ * Track the current busy skill (API). A change — including a gather finishing
+ * (busy → idle) — drops the cache so gates see the real post-gather counts.
+ */
+export function noteBusySkillForInventoryCache(skill: string | null | undefined): boolean {
+  const normalized = skill ?? null;
+  const changed = lastBusySkillForCache !== undefined && lastBusySkillForCache !== normalized;
+  lastBusySkillForCache = normalized;
+  if (changed) inventoryDomCache = null;
+  return changed;
+}
+
 export function getInventoryDomCacheForTest(): typeof inventoryDomCache {
   return inventoryDomCache;
 }

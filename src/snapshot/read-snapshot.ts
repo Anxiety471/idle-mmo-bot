@@ -18,6 +18,7 @@ import {
 import { parseHuntMetrics } from '../deterministic/combat.js';
 import { applyPublicApiToSnapshot } from './merge-public-api.js';
 import { loadIdleMmoApiConfig, readPublicApi } from '../api/idle-mmo-api.js';
+import { noteBusySkillForInventoryCache } from './inventory-scrape.js';
 
 const SKILL_IDS: SkillId[] = [
   'woodcutting',
@@ -134,6 +135,9 @@ export async function readGameSnapshot(page: Page, config: AppConfig): Promise<G
       const apiRead = await readPublicApi();
       if (apiRead.enabled && apiRead.read.patch.currentAction?.busy) {
         apiBusySkill = apiRead.read.patch.currentAction.skill;
+      }
+      if (apiRead.enabled && noteBusySkillForInventoryCache(apiBusySkill ?? null)) {
+        console.log(`[snapshot] busy skill changed → ${apiBusySkill ?? 'idle'}; inventory cache dropped`);
       }
     } catch {
       // Best-effort — DOM scrape continues.
