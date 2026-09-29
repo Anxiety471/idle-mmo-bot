@@ -2808,7 +2808,7 @@ export async function runAway(page: Page): Promise<CombatStepResult> {
   return 'fled';
 }
 
-async function isFightInProgress(page: Page): Promise<boolean> {
+export async function isFightInProgress(page: Page): Promise<boolean> {
   return isButtonVisible(page, 'Run Away');
 }
 

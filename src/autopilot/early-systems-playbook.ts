@@ -627,6 +627,24 @@ export function huntTargetMet(counts: PlaybookCounts): boolean {
   return huntBattleCount(counts) >= HUNT_MIN;
 }
 
+/** Primary battle segment for hunt round outcomes — credit only when a fight actually ran. */
+export function huntBattleOutcomePrimarySegment(
+  fightConfirmed: boolean,
+  battleResult: string,
+): string {
+  return fightConfirmed ? 'battle_started' : battleResult;
+}
+
+/** Build `battle:<primary>:<tail>` so notePlaybookOutcome can credit confirmed fights. */
+export function formatHuntBattleRoundOutcome(
+  fightConfirmed: boolean,
+  battleResult: string,
+  tail: string,
+): string {
+  const primary = huntBattleOutcomePrimarySegment(fightConfirmed, battleResult);
+  return `battle:${primary}:${tail}`;
+}
+
 /**
  * Playbook hunt credit only when configureAndBattle confirmed a real fight
  * (primary segment battle_started), not incidental battle_started substrings.

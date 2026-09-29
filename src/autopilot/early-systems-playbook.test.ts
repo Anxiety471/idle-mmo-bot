@@ -15,6 +15,9 @@ import {
   huntTargetMet,
   normalizeEarlyStageId,
   notePlaybookOutcome,
+  formatHuntBattleRoundOutcome,
+  isConfirmedHuntBattleOutcome,
+  huntBattleOutcomePrimarySegment,
   QUEST_TALK_NO_ACTION_COOLDOWN,
   recentBaitPurchase,
   resolvePlaybookStatePath,
@@ -443,6 +446,34 @@ describe('sticky baitOwned (no repurchase loop)', () => {
 
     const saved = JSON.parse(readFileSync(statePath, 'utf8')) as { counts?: { huntBattles?: number } };
     assert.equal(saved.counts?.huntBattles, 1);
+  });
+
+  it('notePlaybookOutcome credits hunt when Hunt More skipped for backlog cap', () => {
+    statePath = join('/tmp', `playbook-hunt-skipped-backlog-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({ version: 1, stage: 'hunt_battle_batch', counts: emptyPlaybookCounts(), baitOwned: true })}\n`,
+    );
+
+    const outcome = formatHuntBattleRoundOutcome(
+      true,
+      'failed',
+      'huntMore:skipped_backlog_cap',
+    );
+    assert.equal(isConfirmedHuntBattleOutcome(outcome), true);
+    notePlaybookOutcome('hunt_battle_batch', outcome);
+
+    const saved = JSON.parse(readFileSync(statePath, 'utf8')) as { counts?: { huntBattles?: number } };
+    assert.equal(saved.counts?.huntBattles, 1);
+  });
+
+  it('formatHuntBattleRoundOutcome normalizes confirmed fights to battle_started for huntMore:no_action', () => {
+    const outcome = formatHuntBattleRoundOutcome(true, 'failed', 'huntMore:no_action');
+    assert.equal(outcome, 'battle:battle_started:huntMore:no_action');
+    assert.equal(isConfirmedHuntBattleOutcome(outcome), true);
+    assert.equal(huntBattleOutcomePrimarySegment(false, 'failed'), 'failed');
   });
 
   it('notePlaybookOutcome does not credit huntBattles when battle_started appears only in huntMore tail', () => {
