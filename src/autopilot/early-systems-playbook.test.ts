@@ -1956,6 +1956,33 @@ describe('stale rawCod cook_cod recovery', () => {
     assert.equal(saved.counts?.rawCod, 0);
   });
 
+  it('lowers stale soft rawCod when the bag dropped by more than half (cooking)', () => {
+    statePath = join('/tmp', `playbook-rawcod-cook-sync-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        version: 1,
+        stage: 'cook_cod',
+        counts: {
+          ...coalMetCounts({ sells: 2 }),
+          rawCod: 286,
+          cookedCod: 22,
+        },
+        baitOwned: true,
+      })}\n`,
+    );
+
+    const progress = evaluatePlaybook(
+      minimalSnapshot({
+        inventory: { 'Coal Ore': 3800, Cod: 174, 'Cooked Cod': 22 },
+        gold: 50,
+      }),
+    );
+    assert.equal(progress.counts.rawCod, 174);
+  });
+
   it('preserves soft rawCod while actively fishing Cod with empty bag scrape', () => {
     statePath = join('/tmp', `playbook-rawcod-fishing-${Date.now()}.json`);
     process.env.PLAYBOOK_STATE_PATH = statePath;

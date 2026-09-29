@@ -112,6 +112,7 @@ export type CombatStepResult =
   | 'health_too_low'
   | 'heal_failed'
   | 'blocked_verify'
+  | 'pending_verify'
   | 'failed';
 
 export type QuestStepResult =

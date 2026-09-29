@@ -13,10 +13,14 @@ import { invalidateInventoryDomCache } from '../snapshot/inventory-scrape.js';
 export function cookInterruptDecision(
   pageText: string,
   allowInterrupt: boolean,
+  apiActionType?: string | null,
 ): 'proceed' | 'already_busy' {
+  if (apiActionType && /^battle$/i.test(apiActionType)) return 'already_busy';
   const idx = pageText.indexOf('CURRENT ACTION');
   if (idx < 0) return 'proceed';
   const slice = pageText.slice(idx, idx + 500);
+  if (/\bRun Away\b/.test(slice)) return 'already_busy';
+  if (/type\s*[=:]\s*['"]battle['"]/i.test(slice)) return 'already_busy';
   if (/cook/i.test(slice)) return 'already_busy';
   if (!allowInterrupt) return 'already_busy';
   return 'proceed';
@@ -29,12 +33,23 @@ const COOK_UI_SETTLE_MS = 10_000;
 const COOK_PANEL_READY_MS = 4_000;
 /** Transient CDN / overlay misses — same budget as mining's Start retry. */
 const COOK_START_ATTEMPTS = 3;
-/**
- * One Cooked Cod is ~8s. A batch keeps CURRENT ACTION up across the next
- * autopilot tick so a healthy cook is left alone instead of re-hitting Start.
- * Capped (no Max) so a full Cod stack is not dumped into one action.
- */
-const COOK_QUANTITY_BATCH = 8;
+const COOK_QUANTITY_BATCH_LEGACY = 8;
+const COOK_MIN_BATCH = 16;
+const COOK_MAX_BATCH_DEFAULT = 60;
+
+export interface CookBatchOptions {
+  cooked?: number;
+  target?: number;
+  minBatch?: number;
+  maxBatch?: number;
+  rawAvailable?: number;
+}
+
+function cookMaxBatch(): number {
+  const env = Number(process.env.COOK_MAX_BATCH);
+  if (Number.isFinite(env) && env > 0) return Math.floor(env);
+  return COOK_MAX_BATCH_DEFAULT;
+}
 
 /**
  * Recipe cards are named "Cooked Cod Lv. 1 2 EXP …", not the bare label.
@@ -148,22 +163,44 @@ async function setCookQuantity(page: Page, value: string): Promise<void> {
 }
 
 /**
- * How many Cooked Cod to queue. Default batch is 8; never above what the
- * panel says we can perform, and never Max (that would cook the whole stack).
+ * How many Cooked Cod to queue. When cooked/target are provided, uses
+ * min(target - cooked, maxBatch) with a minimum batch floor; never Max.
  */
-export function cookBatchQuantity(pageText: string, batch = COOK_QUANTITY_BATCH): number {
+export function cookBatchQuantity(pageText: string, opts?: CookBatchOptions | number): number {
+  const legacyBatch =
+    typeof opts === 'number' ? opts : COOK_QUANTITY_BATCH_LEGACY;
   const match = pageText.match(/you can perform this action\s+(\d+)\s+times/i);
+  const panelAvailable = match ? Number(match[1]) : undefined;
+
+  if (typeof opts === 'object' && opts?.target !== undefined && opts?.cooked !== undefined) {
+    const minBatch = opts.minBatch ?? COOK_MIN_BATCH;
+    const maxBatch = opts.maxBatch ?? cookMaxBatch();
+    const want = Math.max(1, opts.target - opts.cooked);
+    let qty = want <= minBatch ? want : Math.min(want, maxBatch);
+    if (opts.rawAvailable !== undefined && Number.isFinite(opts.rawAvailable)) {
+      qty = Math.min(qty, Math.max(0, Math.floor(opts.rawAvailable)));
+    }
+    if (panelAvailable !== undefined && Number.isFinite(panelAvailable) && panelAvailable > 0) {
+      qty = Math.min(qty, panelAvailable);
+    }
+    return Math.max(1, qty);
+  }
+
+  const batch = legacyBatch;
   if (!match) return batch;
   const available = Number(match[1]);
   if (!Number.isFinite(available) || available <= 0) return 1;
   return Math.max(1, Math.min(batch, available));
 }
 
-async function setCookQuantityBatch(page: Page, batch = COOK_QUANTITY_BATCH): Promise<void> {
+async function setCookQuantityBatch(
+  page: Page,
+  opts?: CookBatchOptions,
+): Promise<void> {
   const qty = page.locator('input[name="quantity"]');
   if ((await qty.count()) === 0) return;
   const pageText = await page.locator('body').innerText().catch(() => '');
-  await setCookQuantity(page, String(cookBatchQuantity(pageText, batch)));
+  await setCookQuantity(page, String(cookBatchQuantity(pageText, opts)));
 }
 
 type StartReadiness = 'ready' | 'missing' | 'disabled';
@@ -249,6 +286,14 @@ async function confirmReplaceDialog(
   if (!(await dialog.isVisible({ timeout: 2000 }).catch(() => false))) {
     return 'ok';
   }
+  const body = await readBody(page);
+  if (cookInterruptDecision(body, allowInterrupt) === 'already_busy') {
+    const closeButton = page.getByRole('button', { name: 'Close', exact: true });
+    if ((await closeButton.count()) > 0) {
+      await closeButton.first().click({ force: true }).catch(() => undefined);
+    }
+    return 'kept';
+  }
   if (!allowInterrupt) {
     const closeButton = page.getByRole('button', { name: 'Close', exact: true });
     if ((await closeButton.count()) > 0) {
@@ -281,6 +326,7 @@ export async function tryCookCod(
   page: Page,
   config: AppConfig,
   allowInterrupt = false,
+  batchOpts?: CookBatchOptions,
 ): Promise<GatherRestartResult> {
   const skill = getSkillConfig('cooking');
   let last: GatherRestartResult = 'failed';
@@ -297,7 +343,7 @@ export async function tryCookCod(
       return 'already_busy';
     }
 
-    last = await attemptCookCodStart(page, allowInterrupt);
+    last = await attemptCookCodStart(page, allowInterrupt, batchOpts);
     if (last !== 'failed') return last;
   }
 
@@ -307,6 +353,7 @@ export async function tryCookCod(
 async function attemptCookCodStart(
   page: Page,
   allowInterrupt: boolean,
+  batchOpts?: CookBatchOptions,
 ): Promise<GatherRestartResult> {
   await dismissBlockingOverlays(page);
   await solveHumanCaptchaIfPresent(page);
@@ -317,7 +364,7 @@ async function attemptCookCodStart(
   }
 
   await waitForCookPanelReady(page);
-  await setCookQuantityBatch(page);
+  await setCookQuantityBatch(page, batchOpts);
 
   let readiness = await readStartReadiness(page);
   if (readiness === 'disabled') {

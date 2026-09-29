@@ -58,6 +58,12 @@ export async function isHumanCheckPresent(page: Page): Promise<boolean> {
   for (const probe of probes) {
     if (await probe.first().isVisible().catch(() => false)) return true;
   }
+  const toast = page.locator('.gawain-captcha-toast, .gawain-captcha-toast-action');
+  if ((await toast.filter({ visible: true }).count()) > 0) return true;
+  const loading = page.getByText(/Loading your quick check/i);
+  if ((await loading.count()) > 0 && (await loading.first().isVisible().catch(() => false))) {
+    return true;
+  }
   return false;
 }
 

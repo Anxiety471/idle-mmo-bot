@@ -13,6 +13,14 @@ import {
   solveHumanCaptchaIfPresent,
 } from './human-check.js';
 import { effectivePollMs, type VerifyBudget } from './poll-interval.js';
+import {
+  battleFoodPackQuantity,
+  battleFoodPerFightCap,
+  confirmBattleStarted,
+  isPostBattleHumanCheckExtended,
+  parsePackedFoodQuantityFromModalText,
+  type BattleConfirmOutcome,
+} from './battle-confirm.js';
 
 /**
  * Deterministic combat click-path helpers.
@@ -1860,6 +1868,43 @@ export function takeCookedCodSpentOnHeal(): number {
   return spent;
 }
 
+/** Cooked Cod packed into the enemy modal for the current configureAndBattle round. */
+let packedBattleFoodQty = 0;
+
+export function takePackedBattleFood(): number {
+  const packed = packedBattleFoodQty;
+  packedBattleFoodQty = 0;
+  return packed;
+}
+
+function notePackedBattleFood(qty: number): void {
+  if (!Number.isFinite(qty) || qty <= 0) return;
+  packedBattleFoodQty = Math.floor(qty);
+}
+
+/** Read packed food quantity from the open show-battle-entity modal (0 when none). */
+export async function packedFoodQuantity(page: Page): Promise<number> {
+  const modal = page.locator('[x-data*="show-battle-entity"]').filter({ visible: true }).first();
+  if ((await modal.count()) === 0 || !(await modal.isVisible().catch(() => false))) return 0;
+  const badges = modal.locator('button').filter({ hasText: /\d+\s*x/i });
+  const count = await badges.count();
+  for (let i = 0; i < count; i++) {
+    const btn = badges.nth(i);
+    if (!(await btn.isVisible().catch(() => false))) continue;
+    const text = await safeInnerText(btn);
+    const qty = parsePackedFoodQuantityFromModalText(text);
+    if (qty > 0) return qty;
+  }
+  const modalText = await safeInnerText(modal);
+  return parsePackedFoodQuantityFromModalText(modalText);
+}
+
+async function isBattleFoodAddDisabled(page: Page): Promise<boolean> {
+  const add = await findFoodAddButton(page);
+  if (!add) return false;
+  return add.isDisabled().catch(() => false);
+}
+
 function noteCookedCodSpent(amount: number): void {
   if (!Number.isFinite(amount) || amount <= 0) return;
   cookedCodSpentOnHeal += Math.floor(amount);
@@ -1988,11 +2033,25 @@ async function closeFoodPickerOnly(page: Page): Promise<void> {
  * Idle MMO heals via food packed BEFORE Battle (effective HP), not mid-fight clicks.
  * Flow: FOOD → Add → food picker (Nx badge or Cooked Cod icon) → quantity Max → Add.
  */
-export async function selectBattleFood(page: Page): Promise<'added' | 'none' | 'failed'> {
+export async function selectBattleFood(
+  page: Page,
+  bagCooked?: number,
+): Promise<'added' | 'already_packed' | 'skipped_busy' | 'none' | 'failed'> {
   try {
     const foodHeading = page.getByText(/^FOOD$/i).first();
     if (!(await foodHeading.isVisible({ timeout: 2000 }).catch(() => false))) {
       return 'none';
+    }
+
+    const already = await packedFoodQuantity(page);
+    if (already > 0) {
+      notePackedBattleFood(already);
+      return 'already_packed';
+    }
+
+    if (await isBattleFoodAddDisabled(page)) {
+      console.log('[combat] FOOD Add disabled — battle already running');
+      return 'skipped_busy';
     }
 
     const addNearFood = await findFoodAddButton(page);
@@ -2000,6 +2059,11 @@ export async function selectBattleFood(page: Page): Promise<'added' | 'none' | '
     if (!addNearFood) {
       console.log('[combat] FOOD Add not visible — no food UI');
       return 'none';
+    }
+
+    if (await addNearFood.isDisabled().catch(() => false)) {
+      console.log('[combat] FOOD Add disabled — battle already running');
+      return 'skipped_busy';
     }
 
     await addNearFood.click({ timeout: 5000 });
@@ -2037,16 +2101,16 @@ export async function selectBattleFood(page: Page): Promise<'added' | 'none' | '
     const qtyOpen =
       (await qtyInput.count()) > 0 && (await qtyInput.first().isVisible().catch(() => false));
     if (qtyOpen) {
-      const maxNearQty = qtyModal
-        .getByRole('button', { name: 'Max', exact: true })
-        .or(
-          page.locator(
-            'xpath=//*[@id="quantity" or @name="quantity"]/following::button[normalize-space()="Max"][1]',
-          ),
-        );
-      if ((await maxNearQty.count()) > 0) {
-        await maxNearQty.first().click().catch(() => undefined);
+      let scrapedBag = bagCooked ?? 0;
+      if (!scrapedBag) {
+        const canPerform = body.match(/you can perform this action\s+(\d+)\s+times/i);
+        if (canPerform?.[1]) scrapedBag = Number.parseInt(canPerform[1], 10);
       }
+      if (!scrapedBag) scrapedBag = 1;
+      const packQty = battleFoodPackQuantity(scrapedBag, battleFoodPerFightCap());
+      await qtyInput.first().fill(String(Math.max(1, packQty))).catch(() => undefined);
+      await qtyInput.first().dispatchEvent('input').catch(() => undefined);
+      await qtyInput.first().dispatchEvent('change').catch(() => undefined);
       await page.waitForTimeout(300);
 
       const modalAdd = qtyModal.getByRole('button', { name: 'Add', exact: true });
@@ -2058,7 +2122,9 @@ export async function selectBattleFood(page: Page): Promise<'added' | 'none' | '
             );
       if ((await confirmAdd.count()) > 0 && (await confirmAdd.first().isVisible().catch(() => false))) {
         await confirmAdd.first().click({ timeout: 5000 });
-        console.log(`[combat] Packed battle food: ${foodName}`);
+        const packed = (await packedFoodQuantity(page)) || packQty;
+        notePackedBattleFood(packed);
+        console.log(`[combat] Packed battle food: ${foodName} (${packed})`);
         invalidateInventoryDomCache();
         await page.waitForTimeout(500);
         return 'added';
@@ -2070,7 +2136,9 @@ export async function selectBattleFood(page: Page): Promise<'added' | 'none' | '
     }
 
     // Icon tooltip picker (Cooked Cod) packs on click — no second Add step.
-    console.log(`[combat] Packed battle food: ${foodName}`);
+    const packed = await packedFoodQuantity(page);
+    if (packed > 0) notePackedBattleFood(packed);
+    console.log(`[combat] Packed battle food: ${foodName}${packed > 0 ? ` (${packed})` : ''}`);
     invalidateInventoryDomCache();
     return 'added';
   } catch (error) {
@@ -2446,10 +2514,12 @@ type BattleClickResult =
   | 'modal_closed'
   | 'health_too_low'
   | 'heal_failed'
-  | 'verify_blocked';
+  | 'verify_blocked'
+  | 'pending_verify';
 
 function battleClickToStep(result: BattleClickResult): CombatStepResult {
   if (result === 'started') return 'battle_started';
+  if (result === 'pending_verify') return 'pending_verify';
   if (result === 'verify_blocked') return 'blocked_verify';
   if (result === 'health_too_low' || result === 'heal_failed' || result === 'no_action') {
     return result;
@@ -2457,10 +2527,21 @@ function battleClickToStep(result: BattleClickResult): CombatStepResult {
   return 'failed';
 }
 
+function confirmOutcomeToBattleClick(outcome: BattleConfirmOutcome): BattleClickResult {
+  if (outcome === 'started' || outcome === 'accepted_unrendered') return 'started';
+  if (outcome === 'pending') return 'pending_verify';
+  return 'no_fight';
+}
+
 async function clickEnabledBattle(
   page: Page,
   enemyLabel: string,
   allowInterrupt = false,
+  confirmOptions?: {
+    qtyBefore?: number;
+    config?: AppConfig;
+    apiActionType?: string | null;
+  },
 ): Promise<BattleClickResult> {
   const waited = await waitForEnabledBattleButton(page);
   if (!waited.button) {
@@ -2498,10 +2579,24 @@ async function clickEnabledBattle(
     console.log(`[combat] Quick check still present after Battle for ${enemyLabel}`);
     return 'verify_blocked';
   }
-  const fight = await waitForFightStarted(page, undefined, FIGHT_CONFIRM_POLL_MS, allowInterrupt);
-  if (fight === 'started') return 'started';
-  if (fight === 'no_action') return 'no_action';
-  console.log(`[combat] Battle click did not start a fight for ${enemyLabel} (no Run Away)`);
+  const confirm = await confirmBattleStarted(page, {
+    tileName: enemyLabel,
+    qtyBefore: confirmOptions?.qtyBefore,
+    pollMs: FIGHT_CONFIRM_POLL_MS,
+    apiActionType: confirmOptions?.apiActionType,
+    config: confirmOptions?.config,
+    readEnemies: async () => (await readHuntState(page)).enemies,
+  });
+  const mapped = confirmOutcomeToBattleClick(confirm);
+  if (mapped === 'started') return 'started';
+  if (mapped === 'pending_verify') {
+    console.log(`[combat] Battle for ${enemyLabel} pending verification (stuck request or captcha)`);
+    return 'pending_verify';
+  }
+  if (mapped === 'no_fight') {
+    console.log(`[combat] Battle click did not start a fight for ${enemyLabel}`);
+    return 'no_fight';
+  }
   return 'no_fight';
 }
 
@@ -2511,6 +2606,13 @@ async function prepareAndBattleOpenModal(
   maxEnemies: number,
   stance: Stance,
   allowInterrupt = false,
+  options?: {
+    bagCooked?: number;
+    qtyBefore?: number;
+    config?: AppConfig;
+    apiActionType?: string | null;
+    packFood?: boolean;
+  },
 ): Promise<BattleClickResult> {
   // Low HP blocks every enemy tile. Feed from Heal before food/Max/stance.
   const heal = await healBeforeBattleIfNeeded(page);
@@ -2520,12 +2622,20 @@ async function prepareAndBattleOpenModal(
     return 'modal_closed';
   }
 
-  // Live order: food, then Max on the ENEMIES row, then wait until Battle is enabled.
-  // An empty picker does not abort the fight — cooking is decided before the hunt.
-  await selectBattleFood(page);
+  if (options?.packFood !== false) {
+    if (await isFightInProgress(page)) {
+      console.log('[combat] fight already in progress — skipping food pack and Battle click');
+      return 'started';
+    }
+    await selectBattleFood(page, options?.bagCooked);
+  }
   await setMaxEnemies(page, maxEnemies);
   await setStance(page, stance);
-  return clickEnabledBattle(page, enemyLabel, allowInterrupt);
+  return clickEnabledBattle(page, enemyLabel, allowInterrupt, {
+    qtyBefore: options?.qtyBefore,
+    config: options?.config,
+    apiActionType: options?.apiActionType,
+  });
 }
 
 /**
@@ -2543,13 +2653,22 @@ export async function configureAndBattle(
   maxEnemies: number,
   stance: Stance,
   allowInterrupt = false,
+  options?: { config?: AppConfig; apiActionType?: string | null; bagCooked?: number },
 ): Promise<CombatStepResult> {
   cookedCodSpentOnHeal = 0;
+  packedBattleFoodQty = 0;
   const tiles = await collectEnemyTiles(page);
   let ordered = battleTargetsInOrder(tiles.enemies);
   if (ordered.length === 0 && tiles.buttons.length > enemyIndex) {
     ordered = [{ name: 'Enemy', index: enemyIndex }];
   }
+
+  const battleOpts = {
+    config: options?.config,
+    apiActionType: options?.apiActionType,
+    bagCooked: options?.bagCooked,
+    qtyBefore: undefined as number | undefined,
+  };
 
   if (ordered.length === 0 && (await isEnemyDetailPanelOpen(page))) {
     const name = (await readEnemyNameFromDetailPanel(page)) ?? 'Enemy';
@@ -2559,6 +2678,7 @@ export async function configureAndBattle(
       maxEnemies,
       stance,
       allowInterrupt,
+      battleOpts,
     );
     return battleClickToStep(only);
   }
@@ -2582,21 +2702,29 @@ export async function configureAndBattle(
       continue;
     }
 
+    battleOpts.qtyBefore = target.quantity;
+
     let result = await prepareAndBattleOpenModal(
       page,
       target.name,
       maxEnemies,
       stance,
       allowInterrupt,
+      battleOpts,
     );
     if (result === 'modal_closed') {
       console.log(`[combat] re-opening enemy tile after heal: ${target.name}`);
       await clickEnemyTile(page, tile);
       result = (await isEnemyDetailPanelOpen(page))
-        ? await prepareAndBattleOpenModal(page, target.name, maxEnemies, stance, allowInterrupt)
+        ? await prepareAndBattleOpenModal(page, target.name, maxEnemies, stance, allowInterrupt, battleOpts)
         : 'missing';
     }
     if (result === 'started') return 'battle_started';
+    if (result === 'pending_verify') {
+      console.log('[combat] battle pending — not walking other enemy tiles');
+      await closeBattleEntityModal(page);
+      return 'pending_verify';
+    }
     if (result === 'health_too_low' || result === 'heal_failed' || result === 'no_action') {
       if (result === 'no_action') {
         console.log('[combat] replace dialog closed — not walking other enemy tiles');
@@ -2605,6 +2733,15 @@ export async function configureAndBattle(
       }
       await closeBattleEntityModal(page);
       return result;
+    }
+    if (
+      result !== 'disabled' &&
+      result !== 'missing' &&
+      result !== 'modal_closed'
+    ) {
+      console.log('[combat] Battle was clicked — not walking other enemy tiles');
+      await closeBattleEntityModal(page);
+      return battleClickToStep(result);
     }
     if (i < ordered.length - 1) {
       console.log(`[combat] trying next enemy tile: ${ordered[i + 1].name}`);
@@ -2810,14 +2947,29 @@ export async function monitorInBattle(
   return { status: 'timed_out', stillInBattle, reason: 'poll_cap' };
 }
 
-/** Click Run Away during an active battle. */
+/** Click Run Away during an active battle (confirm modal + verify fight ended). */
 export async function runAway(page: Page): Promise<CombatStepResult> {
-  const fleeBtn = page.getByRole('button', { name: 'Run Away', exact: true });
-  if (await fleeBtn.count() === 0) {
+  const fleeBtn = page.getByRole('button', { name: 'Run Away', exact: true }).filter({
+    visible: true,
+  });
+  if ((await fleeBtn.count()) === 0) {
     return 'no_action';
   }
-  await fleeBtn.click();
-  return 'fled';
+  await fleeBtn.first().click();
+  const confirmModal = page.locator('[x-data*="run-away-from-battle"]').filter({ visible: true });
+  await confirmModal
+    .first()
+    .waitFor({ state: 'visible', timeout: 5000 })
+    .catch(() => undefined);
+  const confirmBtn = confirmModal.getByRole('button', { name: 'Run Away', exact: true });
+  if ((await confirmBtn.count()) > 0 && (await confirmBtn.first().isVisible().catch(() => false))) {
+    await confirmBtn.first().click({ timeout: 5000 });
+  } else {
+    return 'failed';
+  }
+  await page.waitForTimeout(400);
+  const stillFighting = await isFightInProgress(page);
+  return stillFighting ? 'failed' : 'fled';
 }
 
 export async function isFightInProgress(page: Page): Promise<boolean> {
@@ -2832,12 +2984,9 @@ const POST_BATTLE_CAPTCHA_ATTEMPTS = 3;
 /** Battle click can open Quick check slightly after the button handler runs. */
 const POST_BATTLE_CAPTCHA_APPEAR_MS = 3_000;
 
-/** True when Battle opened the anti-bot Quick check (`modal('gawain-captcha')`). */
+/** True when Battle opened the anti-bot Quick check (modal, toast, or loading state). */
 async function isPostBattleHumanCheck(page: Page): Promise<boolean> {
-  if (await isHumanCheckPresent(page)) return true;
-  const gawain = page.locator('[x-data*="gawain-captcha"]');
-  if ((await gawain.count()) === 0) return false;
-  return gawain.first().isVisible().catch(() => false);
+  return isPostBattleHumanCheckExtended(page);
 }
 
 /**

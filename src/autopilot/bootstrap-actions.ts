@@ -15,6 +15,8 @@ import {
   inventoryAfterCookedCodSpend,
   needsCookBeforeHunt,
   takeCookedCodSpentOnHeal,
+  takePackedBattleFood,
+  packedFoodQuantity,
   isHuntActivelyRunning,
   pickBattleEnemy,
   prepareEnemyBattleSelection,
@@ -67,6 +69,11 @@ import {
   attemptHumanVerify,
   isHumanCheckPresent,
 } from '../deterministic/human-check.js';
+import { shouldRefreshCookGateAfterFight } from '../deterministic/battle-confirm.js';
+import {
+  invalidateInventoryDomCache,
+  scrapeInventoryFromDom,
+} from '../snapshot/inventory-scrape.js';
 import {
   createVerifyBudget,
   effectivePollMs,
@@ -244,6 +251,11 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
     maxEnemies,
     stance,
     allowInterrupt,
+    {
+      config,
+      apiActionType: ctx.snapshot.currentAction?.type ?? null,
+      bagCooked: cookedCodCount(ctx.snapshot.inventory),
+    },
   );
 
   if (battleResult === 'blocked_verify') {
@@ -252,6 +264,7 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
 
   const fightConfirmed =
     battleResult === 'battle_started' ||
+    battleResult === 'pending_verify' ||
     (!fightActiveBeforeBattle && (await isFightInProgress(page).catch(() => false)));
   if (fightConfirmed && battleResult !== 'battle_started') {
     console.log(
@@ -287,7 +300,26 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
   // hunting while the supervisor leaves combat to cook. Heal → Use spends Cooked
   // Cod after the snapshot was taken, so apply that spend before the same check.
   const cookedSpent = takeCookedCodSpentOnHeal();
-  const inventoryForCookGate = inventoryAfterCookedCodSpend(ctx.snapshot.inventory, cookedSpent);
+  const packedFood = takePackedBattleFood();
+  const snapshotCooked = cookedCodCount(ctx.snapshot.inventory);
+  const worstCaseCooked = Math.max(
+    0,
+    snapshotCooked - cookedSpent - packedFood,
+  );
+  let inventoryForCookGate = inventoryAfterCookedCodSpend(ctx.snapshot.inventory, cookedSpent);
+  if (shouldRefreshCookGateAfterFight(worstCaseCooked, huntCookFloor)) {
+    invalidateInventoryDomCache();
+    const freshInventory = await scrapeInventoryFromDom(page).catch(() => null);
+    if (freshInventory) {
+      inventoryForCookGate = inventoryAfterCookedCodSpend(freshInventory, cookedSpent);
+    } else {
+      inventoryForCookGate = { ...inventoryForCookGate, 'Cooked Cod': worstCaseCooked };
+    }
+    const freshCooked = cookedCodCount(inventoryForCookGate);
+    console.log(
+      `[combat] post-fight Cooked Cod bag≈${freshCooked} (snapshot ${snapshotCooked}, packed ${packedFood}, heal ${cookedSpent})`,
+    );
+  }
   if (needsCookBeforeHunt(inventoryForCookGate, cookTarget, cookGateOptions)) {
     console.log('[combat] skipping Hunt More — Cooked Cod below cook target');
     if (cookedSpent > 0) {
@@ -717,21 +749,42 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
       const cookTarget = playbook?.targets.cookMin ?? 100;
       const cooked = inv['Cooked Cod'] ?? 0;
       const needsFood = cooked < cookTarget;
+      const actionType = ctx.snapshot.currentAction?.type ?? '';
+      const battleRunning =
+        ctx.snapshot.flags.inBattle || /^battle$/i.test(actionType);
       return (
         ctx.snapshot.flags.sessionValid &&
         gatherIdle(ctx) &&
+        !battleRunning &&
         hasCod &&
         hasCoal &&
         needsFood
       );
     },
     execute: async (ctx) => {
+      const actionType = ctx.snapshot.currentAction?.type ?? '';
+      if (ctx.snapshot.flags.inBattle || /^battle$/i.test(actionType)) {
+        return { action: 'cook_cod', outcome: 'already_busy' as const };
+      }
       const gatherState = await readGatherState(ctx.page, ctx.config);
+      const snapshotBattle = /^battle$/i.test(actionType);
       const allowInterrupt =
-        ctx.forceInterrupt || (await ctx.jev.shouldInterruptGather(gatherState));
+        !snapshotBattle &&
+        (ctx.forceInterrupt || (await ctx.jev.shouldInterruptGather(gatherState)));
+      const playbook = getPlaybookFromSnapshot(ctx.snapshot);
+      const cookTarget = playbook?.targets.cookMin ?? 100;
+      const cooked = ctx.snapshot.inventory['Cooked Cod'] ?? 0;
+      const rawAvailable = Math.max(
+        ctx.snapshot.inventory['Cod'] ?? 0,
+        ctx.snapshot.inventory['Raw Cod'] ?? 0,
+      );
       return {
         action: 'cook_cod',
-        outcome: await tryCookCod(ctx.page, ctx.config, allowInterrupt),
+        outcome: await tryCookCod(ctx.page, ctx.config, allowInterrupt, {
+          cooked,
+          target: cookTarget,
+          rawAvailable,
+        }),
       };
     },
   },

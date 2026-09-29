@@ -579,12 +579,27 @@ function syncRawCodCount(
     snapshot.currentAction?.skill === 'fishing' &&
     Boolean(snapshot.currentAction?.busy || snapshot.flags.gatherBusy);
   if (bagRawCod > 0) {
-    next.rawCod = Math.max(next.rawCod, bagRawCod);
+    if (fishingCod) {
+      next.rawCod = Math.max(next.rawCod, bagRawCod);
+    } else if (
+      next.rawCod > bagRawCod &&
+      bagRawCod >= 30 &&
+      bagRawCod > next.rawCod * 0.5
+    ) {
+      // Large downward moves track cooking consumption; ignore small/icon under-counts.
+      next.rawCod = bagRawCod;
+    } else {
+      next.rawCod = Math.max(next.rawCod, bagRawCod);
+    }
     return;
   }
+  const cookingBusy = cookingProducedCount(snapshot) > 0;
   // Bag empty while soft still high — raw cod was cooked/sold. Skip while fishing
-  // (icon scrape under-reports) and when hunt batch is complete (counts reset next).
+  // (icon scrape under-reports). Ignore a one-off empty scrape while cooking.
   if (!fishingCod && next.rawCod > bagRawCod) {
+    if (bagRawCod === 0 && cookingBusy && next.rawCod > 16) {
+      return;
+    }
     next.rawCod = bagRawCod;
   }
 }
