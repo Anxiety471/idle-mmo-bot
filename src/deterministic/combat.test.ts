@@ -28,6 +28,7 @@ import {
   pickBattleEnemy,
   startAnywayStrategyForAttempt,
   effectiveCookedCodStock,
+  isHuntInProgressFromSnapshot,
 } from './combat.js';
 import type { EnemyInfo, HuntState } from '../types.js';
 
@@ -599,5 +600,29 @@ describe('readPageTextBounded', () => {
 
     const text = await readPageTextBounded(page, 500);
     assert.equal(text, 'Run Away\nHealth\n55%');
+  });
+});
+
+describe('isHuntInProgressFromSnapshot', () => {
+  it('detects HUNTING current action and combatPhase hunt', () => {
+    assert.equal(
+      isHuntInProgressFromSnapshot({
+        currentAction: { busy: true, type: 'HUNTING', label: 'Windy' },
+      }),
+      true,
+    );
+    assert.equal(isHuntInProgressFromSnapshot({ combatPhase: 'hunt' }), true);
+    assert.equal(
+      isHuntInProgressFromSnapshot({
+        currentAction: { busy: true, type: 'MINING', label: 'Coal Ore' },
+      }),
+      false,
+    );
+    assert.equal(
+      isHuntInProgressFromSnapshot({
+        currentAction: { busy: false, type: 'HUNTING' },
+      }),
+      false,
+    );
   });
 });

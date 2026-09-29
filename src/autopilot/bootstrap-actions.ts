@@ -15,6 +15,8 @@ import {
   inventoryAfterCookedCodSpend,
   needsCookBeforeHunt,
   takeCookedCodSpentOnHeal,
+  takePackedBattleFood,
+  packedFoodQuantity,
   isHuntActivelyRunning,
   pickBattleEnemy,
   prepareEnemyBattleSelection,
@@ -67,6 +69,12 @@ import {
   attemptHumanVerify,
   isHumanCheckPresent,
 } from '../deterministic/human-check.js';
+import { shouldRefreshCookGateAfterFight } from '../deterministic/battle-confirm.js';
+import { battleGuard } from './battle-guard.js';
+import {
+  invalidateInventoryDomCache,
+  scrapeInventoryFromDom,
+} from '../snapshot/inventory-scrape.js';
 import {
   createVerifyBudget,
   effectivePollMs,
@@ -158,7 +166,17 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
   if (!mustBattle && needsCookBeforeHunt(ctx.snapshot.inventory, cookTarget, cookGateOptions)) {
     const cooked = ctx.snapshot.inventory['Cooked Cod'] ?? 0;
     console.log(`[combat] Cooked Cod ${cooked}/${cookTarget} — cooking before hunt`);
-    const cookResult = await tryCookCod(page, config, true);
+    if (battleGuard(ctx.snapshot) === 'battle') {
+      return combatRoundOutcome('cook_before_hunt:already_busy', config);
+    }
+    const cookResult = await tryCookCod(page, config, true, {
+      cooked,
+      target: cookTarget,
+      rawAvailable: Math.max(
+        ctx.snapshot.inventory['Cod'] ?? 0,
+        ctx.snapshot.inventory['Raw Cod'] ?? 0,
+      ),
+    });
     return combatRoundOutcome(`cook_before_hunt:${cookResult}`, config);
   }
   if (mustBattle && needsCookBeforeHunt(ctx.snapshot.inventory, cookTarget, cookGateOptions)) {
@@ -167,11 +185,17 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
     );
   }
 
-  const huntResult = await ensureHuntActive(page, config, allowInterrupt, verifyBudget);
+  const huntResult = await ensureHuntActive(page, config, allowInterrupt, verifyBudget, {
+    currentAction: ctx.snapshot.currentAction,
+    combatPhase: ctx.snapshot.combatPhase,
+  });
 
   if (huntResult === 'no_action') {
     await sleep(huntBackoffMs);
     return combatRoundOutcome(`blocked:${huntResult}`, config);
+  }
+  if (huntResult === 'hunt_active_wait') {
+    return combatRoundOutcome('hunt_active:wait', config);
   }
   if (huntResult === 'failed') {
     if (await isHumanCheckPresent(page)) {
@@ -238,21 +262,43 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
   // Run Away already on screen before Battle means an older fight is running —
   // it must not be credited again as this round's fight.
   const fightActiveBeforeBattle = await isFightInProgress(page).catch(() => false);
+  if (!fightActiveBeforeBattle && battleGuard(ctx.snapshot) === 'battle') {
+    // API says a battle is running but this page never rendered it (stale store).
+    // A second Battle click is queued without a confirm dialog — do not click.
+    console.log('[combat] API current action is BATTLE — not clicking Battle; reloading and waiting');
+    await navigateTo(page, config, '/combat/battle').catch(() => undefined);
+    return combatRoundOutcome('battle:battle_in_progress:wait', config);
+  }
   const battleResult = await configureAndBattle(
     page,
     enemy.index,
     maxEnemies,
     stance,
     allowInterrupt,
+    {
+      config,
+      bagCooked: cookedCodCount(ctx.snapshot.inventory),
+    },
   );
 
   if (battleResult === 'blocked_verify') {
     return combatRoundOutcome('blocked:verify', config);
   }
 
+  if (battleResult === 'pending_verify') {
+    // Stuck request / unverified accept: never credited. Reload resets is_processing;
+    // the next cycle sees Run Away (monitored, not credited) or a clean screen.
+    console.log('[combat] Battle unverified (pending) — reloading, no hunt credit');
+    takePackedBattleFood();
+    await navigateTo(page, config, '/combat/battle').catch(() => undefined);
+    return combatRoundOutcome('battle:pending_verify:reload', config);
+  }
+
   const fightConfirmed =
     battleResult === 'battle_started' ||
-    (!fightActiveBeforeBattle && (await isFightInProgress(page).catch(() => false)));
+    (!fightActiveBeforeBattle &&
+      battleResult !== 'battle_in_progress' &&
+      (await isFightInProgress(page).catch(() => false)));
   if (fightConfirmed && battleResult !== 'battle_started') {
     console.log(
       `[combat] fight active after configureAndBattle=${battleResult} — treating as battle_started for outcome`,
@@ -287,7 +333,26 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
   // hunting while the supervisor leaves combat to cook. Heal → Use spends Cooked
   // Cod after the snapshot was taken, so apply that spend before the same check.
   const cookedSpent = takeCookedCodSpentOnHeal();
-  const inventoryForCookGate = inventoryAfterCookedCodSpend(ctx.snapshot.inventory, cookedSpent);
+  const packedFood = takePackedBattleFood();
+  const snapshotCooked = cookedCodCount(ctx.snapshot.inventory);
+  const worstCaseCooked = Math.max(
+    0,
+    snapshotCooked - cookedSpent - packedFood,
+  );
+  let inventoryForCookGate = inventoryAfterCookedCodSpend(ctx.snapshot.inventory, cookedSpent);
+  if (shouldRefreshCookGateAfterFight(worstCaseCooked, huntCookFloor)) {
+    invalidateInventoryDomCache();
+    const freshInventory = await scrapeInventoryFromDom(page).catch(() => null);
+    if (freshInventory) {
+      inventoryForCookGate = inventoryAfterCookedCodSpend(freshInventory, cookedSpent);
+    } else {
+      inventoryForCookGate = { ...inventoryForCookGate, 'Cooked Cod': worstCaseCooked };
+    }
+    const freshCooked = cookedCodCount(inventoryForCookGate);
+    console.log(
+      `[combat] post-fight Cooked Cod bag≈${freshCooked} (snapshot ${snapshotCooked}, packed ${packedFood}, heal ${cookedSpent})`,
+    );
+  }
   if (needsCookBeforeHunt(inventoryForCookGate, cookTarget, cookGateOptions)) {
     console.log('[combat] skipping Hunt More — Cooked Cod below cook target');
     if (cookedSpent > 0) {
@@ -484,6 +549,7 @@ function gatherAction(
       return (
         ctx.snapshot.flags.sessionValid &&
         idleOrInterrupt &&
+        battleGuard(ctx.snapshot) !== 'battle' &&
         baitOk &&
         (extraAllowed?.(ctx) ?? true)
       );
@@ -717,21 +783,42 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
       const cookTarget = playbook?.targets.cookMin ?? 100;
       const cooked = inv['Cooked Cod'] ?? 0;
       const needsFood = cooked < cookTarget;
+      const battleRunning = battleGuard(ctx.snapshot) === 'battle';
       return (
         ctx.snapshot.flags.sessionValid &&
         gatherIdle(ctx) &&
+        !battleRunning &&
         hasCod &&
         hasCoal &&
         needsFood
       );
     },
     execute: async (ctx) => {
+      const guard = battleGuard(ctx.snapshot);
+      if (guard === 'battle') {
+        console.log('[cook] battle running (API/page) — not interrupting it with Start anyway');
+        return { action: 'cook_cod', outcome: 'already_busy' as const };
+      }
+      if (guard === 'stale') {
+        console.log('[cook] battle signal stale (expired or over BATTLE_GUARD_MAX_MS) — allowing cook');
+      }
       const gatherState = await readGatherState(ctx.page, ctx.config);
       const allowInterrupt =
         ctx.forceInterrupt || (await ctx.jev.shouldInterruptGather(gatherState));
+      const playbook = getPlaybookFromSnapshot(ctx.snapshot);
+      const cookTarget = playbook?.targets.cookMin ?? 100;
+      const cooked = ctx.snapshot.inventory['Cooked Cod'] ?? 0;
+      const rawAvailable = Math.max(
+        ctx.snapshot.inventory['Cod'] ?? 0,
+        ctx.snapshot.inventory['Raw Cod'] ?? 0,
+      );
       return {
         action: 'cook_cod',
-        outcome: await tryCookCod(ctx.page, ctx.config, allowInterrupt),
+        outcome: await tryCookCod(ctx.page, ctx.config, allowInterrupt, {
+          cooked,
+          target: cookTarget,
+          rawAvailable,
+        }),
       };
     },
   },

@@ -131,6 +131,8 @@ export {
   needsCookBeforeHunt,
   inventoryAfterCookedCodSpend,
   takeCookedCodSpentOnHeal,
+  takePackedBattleFood,
+  packedFoodQuantity,
 } from './combat.js';
 export { tryCookCod, cookInterruptDecision } from './cook.js';
 export { equipPet, maintainPets, managePets } from './pets.js';

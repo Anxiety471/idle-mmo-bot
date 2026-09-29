@@ -6,6 +6,7 @@ import type { AppConfig } from '../config.js';
 import {
   configureAndBattle,
   ensureHuntActive,
+  resetHuntActiveWaitStreak,
   huntMore,
   takeCookedCodSpentOnHeal,
   pickBattleEnemy,
@@ -882,6 +883,50 @@ describe('ensureHuntActive enemy selection vs Hunt More', () => {
         ),
         `expected fallback log, got: ${logs.join(' | ')}`,
       );
+    });
+  });
+
+  it('returns hunt_active_wait on no_controls when API says a hunt is in progress', async () => {
+    const NO_CONTROLS_HUNT_BUSY = `<!DOCTYPE html>
+<html><body>
+  <div>Battle</div>
+  <div>Character</div>
+  <p>Panel still loading — no hunt buttons rendered.</p>
+</body></html>`;
+    await withServedCombatPage(NO_CONTROLS_HUNT_BUSY, async (page, config, logs) => {
+      const withoutApi = await ensureHuntActive(page, config, false);
+      assert.equal(withoutApi, 'failed');
+      assert.ok(logs.some((line) => line.includes('ensureHuntActive failed (no_controls)')));
+
+      logs.length = 0;
+      const withApi = await ensureHuntActive(page, config, false, undefined, {
+        currentAction: { busy: true, type: 'HUNTING', label: 'Hunting' },
+        combatPhase: 'none',
+      });
+      assert.equal(withApi, 'hunt_active_wait');
+      assert.ok(
+        logs.some((line) => line.includes('no_controls but hunt in progress')),
+        `expected wait log, got: ${logs.join(' | ')}`,
+      );
+      assert.equal(
+        logs.some((line) => line.includes('ensureHuntActive failed (no_controls)')),
+        false,
+      );
+    
+      // Bounded: after HUNT_ACTIVE_WAIT_MAX (4) consecutive waits the stall fails.
+      const apiOpts = {
+        currentAction: { busy: true, type: 'HUNTING', label: 'Hunting' },
+        combatPhase: 'none' as const,
+      };
+      for (let i = 2; i <= 4; i++) {
+        assert.equal(await ensureHuntActive(page, config, false, undefined, apiOpts), 'hunt_active_wait');
+      }
+      logs.length = 0;
+      assert.equal(await ensureHuntActive(page, config, false, undefined, apiOpts), 'failed');
+      assert.ok(logs.some((line) => line.includes('treating as stall')));
+      // Streak resets after the failure.
+      assert.equal(await ensureHuntActive(page, config, false, undefined, apiOpts), 'hunt_active_wait');
+      resetHuntActiveWaitStreak();
     });
   });
 });
