@@ -9,7 +9,9 @@ import type {
   HuntState,
   Stance,
 } from '../types.js';
+import { join } from 'node:path';
 import { navigateTo } from '../browser.js';
+import { getLogDir } from '../logging/jsonl-writer.js';
 import {
   decodeIdleMmoMetaSlug,
   invalidateInventoryDomCache,
@@ -1018,6 +1020,55 @@ export function pickBattleEnemy(
 }
 
 /** Preferred target first, then remaining tiles by descending stack size. */
+/**
+ * Enemies whose Battle click ended pending_verify recently. They go to the back of the
+ * target order for a few rounds so one stuck stack (e.g. Max on Goblin King) cannot
+ * eat every combat cycle.
+ */
+const pendingBattleBackoff = new Map<string, number>();
+export const PENDING_BATTLE_BACKOFF_ROUNDS = 2;
+
+export function noteBattlePendingFor(name: string): void {
+  pendingBattleBackoff.set(name.toLowerCase(), PENDING_BATTLE_BACKOFF_ROUNDS);
+}
+
+/** Called once per configureAndBattle; returns names still in backoff. */
+export function tickPendingBattleBackoff(): Set<string> {
+  const active = new Set<string>();
+  for (const [name, rounds] of [...pendingBattleBackoff.entries()]) {
+    if (rounds > 0) active.add(name);
+    if (rounds - 1 <= 0) pendingBattleBackoff.delete(name);
+    else pendingBattleBackoff.set(name, rounds - 1);
+  }
+  return active;
+}
+
+export function resetPendingBattleBackoffForTest(): void {
+  pendingBattleBackoff.clear();
+}
+
+/** Stable reorder: backed-off enemy names move to the end (never dropped). */
+export function deprioritizeBackedOffTargets(ordered: EnemyInfo[], backedOff: Set<string>): EnemyInfo[] {
+  if (backedOff.size === 0) return ordered;
+  const fresh = ordered.filter((e) => !backedOff.has(e.name.toLowerCase()));
+  const later = ordered.filter((e) => backedOff.has(e.name.toLowerCase()));
+  return [...fresh, ...later];
+}
+
+/**
+ * A battle is already running/queued for this character: the sidebar battle widget
+ * ("Next enemy in 0:03") or the queued-battle enemy modal copy. Tile clicks then open a
+ * queue-variant modal that the normal detail-panel check does not recognise.
+ */
+export async function isQueuedBattleIndicatorVisible(page: Page): Promise<boolean> {
+  const markers = [/Next enemy in\s*\d/i, /Food cannot be added to queued battles/i];
+  for (const marker of markers) {
+    const loc = page.getByText(marker).filter({ visible: true }).first();
+    if ((await loc.count().catch(() => 0)) > 0) return true;
+  }
+  return false;
+}
+
 export function battleTargetsInOrder(
   enemies: EnemyInfo[],
   options: PickBattleEnemyOptions = {},
@@ -2847,8 +2898,18 @@ export async function configureAndBattle(
 ): Promise<CombatStepResult> {
   cookedCodSpentOnHeal = 0;
   packedBattleFoodQty = 0;
+  const backedOff = tickPendingBattleBackoff();
+  if ((await isFightInProgress(page)) || (await isQueuedBattleIndicatorVisible(page))) {
+    // A fight is already running: tiles would open the queue-variant modal and look
+    // "not opened". Wait for it instead of walking every tile into battle:failed.
+    console.log('[combat] battle already running (Run Away / queued-battle widget) — not opening enemy tiles');
+    return 'battle_in_progress';
+  }
   const tiles = await collectEnemyTiles(page);
-  let ordered = battleTargetsInOrder(tiles.enemies);
+  let ordered = deprioritizeBackedOffTargets(battleTargetsInOrder(tiles.enemies), backedOff);
+  if (backedOff.size > 0) {
+    console.log(`[combat] pending-verify backoff: ${[...backedOff].join(', ')} moved to the back`);
+  }
   if (ordered.length === 0 && tiles.buttons.length > enemyIndex) {
     ordered = [{ name: 'Enemy', index: enemyIndex }];
   }
@@ -2890,7 +2951,14 @@ export async function configureAndBattle(
       console.log(
         `[combat] enemy tile did not open battle modal: ${target.name} box=${JSON.stringify(box)} outerHTML=${outerHtml.slice(0, 400)}`,
       );
-      await page.screenshot({ path: `logs/enemy-tile-fail-${Date.now()}.png`, fullPage: true }).catch(() => undefined);
+      await page
+        .screenshot({ path: join(getLogDir(), `enemy-tile-fail-${Date.now()}.png`), fullPage: true })
+        .catch(() => undefined);
+      if (await isQueuedBattleIndicatorVisible(page)) {
+        console.log('[combat] queued-battle modal/widget visible — a battle is already running; waiting');
+        await closeBattleEntityModal(page);
+        return 'battle_in_progress';
+      }
       if (i < ordered.length - 1) {
         console.log(`[combat] trying next enemy tile: ${ordered[i + 1].name}`);
       }
@@ -2920,6 +2988,7 @@ export async function configureAndBattle(
       return 'battle_in_progress';
     }
     if (result === 'pending_verify') {
+      noteBattlePendingFor(target.name);
       console.log('[combat] battle pending — not walking other enemy tiles');
       await closeBattleEntityModal(page);
       return 'pending_verify';

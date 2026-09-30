@@ -289,6 +289,13 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
     return combatRoundOutcome('blocked:verify', config);
   }
 
+  if (battleResult === 'battle_in_progress') {
+    // Existing/queued fight (Run Away or sidebar "Next enemy in"): no tile walk, no
+    // Hunt More, no credit — the next cycle picks up once it ends.
+    takePackedBattleFood();
+    return combatRoundOutcome('battle:battle_in_progress:wait', config);
+  }
+
   if (battleResult === 'pending_verify') {
     // Stuck request / unverified accept: never credited. Reload resets is_processing;
     // the next cycle sees Run Away (monitored, not credited) or a clean screen.
@@ -300,9 +307,7 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
 
   const fightConfirmed =
     battleResult === 'battle_started' ||
-    (!fightActiveBeforeBattle &&
-      battleResult !== 'battle_in_progress' &&
-      (await isFightInProgress(page).catch(() => false)));
+    (!fightActiveBeforeBattle && (await isFightInProgress(page).catch(() => false)));
   if (fightConfirmed && battleResult !== 'battle_started') {
     console.log(
       `[combat] fight active after configureAndBattle=${battleResult} — treating as battle_started for outcome`,
