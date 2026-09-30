@@ -123,6 +123,8 @@ export interface PlaybookProgress {
    * Armed by notePlaybookOutcome; decremented each evaluatePlaybook tick.
    */
   questTalkNoActionCycles?: number;
+  /** Cycles left to drop quest_turnin from allowed after turnin_failed (prevents a turn-in loop). */
+  questTurninFailCycles?: number;
   /** Per-tick quest difficulty/importance scoring for HttpJev + filters. */
   questCurriculum?: QuestCurriculum;
 }
@@ -149,6 +151,8 @@ interface PersistedPlaybook {
   staleCoalBusyCycles?: number;
   /** Remaining cycles to demote quest_talk_accept after talk:no_action. */
   questTalkNoActionCycles?: number;
+  /** Cycles left to drop quest_turnin after turnin_failed. */
+  questTurninFailCycles?: number;
   /** Per-quest cycles to skip talk after repeated talk:no_action. */
   questTalkSkipCycles?: Record<string, number>;
   /** Consecutive talk:no_action per quest title (normalized key). */
@@ -226,6 +230,8 @@ export const PETS_ASYNC_EVERY_N_CYCLES = envInt('PLAYBOOK_PETS_EVERY_N_CYCLES', 
  * behind stage work for this many evaluate ticks so hunt/cook can run.
  */
 export const QUEST_TALK_NO_ACTION_COOLDOWN = 4;
+/** Cycles quest_turnin stays out of allowed after a turnin_failed outcome. */
+export const QUEST_TURNIN_FAIL_COOLDOWN = 4;
 
 /** Resolved at call time so AUTOPILOT_LOG_DIR is honored after env load. */
 export function resolvePlaybookStatePath(): string {
@@ -317,6 +323,7 @@ function loadPersisted(): PersistedPlaybook {
       lastCoalProgressSeen: parsed.lastCoalProgressSeen,
       staleCoalBusyCycles: parsed.staleCoalBusyCycles ?? 0,
       questTalkNoActionCycles: parsed.questTalkNoActionCycles ?? 0,
+      questTurninFailCycles: parsed.questTurninFailCycles ?? 0,
       questTalkSkipCycles: parsed.questTalkSkipCycles ?? {},
       questTalkNoActionByTitle: parsed.questTalkNoActionByTitle ?? {},
     };
@@ -1347,6 +1354,8 @@ export function evaluatePlaybook(
   }
   const questTalkNoActionCyclesNext =
     questTalkNoActionCycles > 0 ? questTalkNoActionCycles - 1 : 0;
+  const questTurninFailCycles = persisted.questTurninFailCycles ?? 0;
+  const questTurninFailCyclesNext = questTurninFailCycles > 0 ? questTurninFailCycles - 1 : 0;
 
   savePersisted({
     version: 1,
@@ -1363,6 +1372,7 @@ export function evaluatePlaybook(
     lastCoalProgressSeen: staleTrack.lastCoalProgressSeen,
     staleCoalBusyCycles: staleTrack.staleCoalBusyCycles,
     questTalkNoActionCycles: questTalkNoActionCyclesNext,
+    questTurninFailCycles: questTurninFailCyclesNext,
     questTalkSkipCycles,
     questTalkNoActionByTitle: persisted.questTalkNoActionByTitle ?? {},
   });
@@ -1398,6 +1408,7 @@ export function evaluatePlaybook(
     staleCoalGather,
     staleCoalBusyCycles: staleTrack.staleCoalBusyCycles,
     questTalkNoActionCycles,
+    questTurninFailCycles,
     questCurriculum,
   };
 }
@@ -1496,6 +1507,10 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
   let lastCoalProgressSeen = persisted.lastCoalProgressSeen;
   let staleCoalBusyCycles = persisted.staleCoalBusyCycles ?? 0;
   let questTalkNoActionCycles = persisted.questTalkNoActionCycles ?? 0;
+  let questTurninFailCycles = persisted.questTurninFailCycles ?? 0;
+  if (action === 'quest_turnin') {
+    questTurninFailCycles = /turnin_failed|no_action/i.test(outcome) ? QUEST_TURNIN_FAIL_COOLDOWN : 0;
+  }
   let questTalkSkipCycles = { ...(persisted.questTalkSkipCycles ?? {}) };
   let questTalkNoActionByTitle = { ...(persisted.questTalkNoActionByTitle ?? {}) };
   if (action === 'quest_talk_accept') {
@@ -1548,6 +1563,7 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
     lastCoalProgressSeen,
     staleCoalBusyCycles,
     questTalkNoActionCycles,
+    questTurninFailCycles,
     questTalkSkipCycles,
     questTalkNoActionByTitle,
   });
@@ -1586,12 +1602,23 @@ export function mustFinishActiveHunt(snapshot: GameSnapshot): boolean {
  * Shapes the choice set. Action pick and gather interrupt are deterministic in
  * HttpJev while the playbook is enabled and incomplete.
  */
+/** After turnin_failed, keep quest_turnin out of allowed for QUEST_TURNIN_FAIL_COOLDOWN cycles. */
+export function dropQuestTurninDuringCooldown<T extends string>(
+  allowed: T[],
+  playbook: Pick<PlaybookProgress, 'questTurninFailCycles'>,
+): T[] {
+  if ((playbook.questTurninFailCycles ?? 0) <= 0) return allowed;
+  return allowed.filter((action) => action !== 'quest_turnin');
+}
+
 export function filterAllowedByPlaybook(
   allowed: AutopilotAction[],
   snapshot: GameSnapshot,
   playbook: PlaybookProgress,
 ): AutopilotAction[] {
   if (!playbook.enabled || playbook.complete) return allowed;
+
+  allowed = dropQuestTurninDuringCooldown(allowed, playbook);
 
   if (snapshot.flags.snapshotDegraded) {
     const spendBlocked = new Set<AutopilotAction>([
