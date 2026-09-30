@@ -6,6 +6,7 @@ import {
   baitCountLooksLikePresenceFallback,
   emptySnapshotHealthState,
   inventoryReadLooksCollapsed,
+  MAX_CONSECUTIVE_DEGRADED,
   rawCodZeroConfirmed,
   recordRawCodBagRead,
 } from './snapshot-health.js';
@@ -69,5 +70,53 @@ describe('baitCountLooksLikePresenceFallback', () => {
       baitCountLooksLikePresenceFallback({ 'Cheap Bait': 2 }, true),
       false,
     );
+  });
+});
+
+describe('snapshot-health degraded is bounded', () => {
+  const full = {
+    'Raw Cod': 200,
+    'Coal Ore': 50,
+    'Cooked Cod': 80,
+    'Cheap Bait': 8,
+    'Oak Log': 100,
+    'Yew Log': 1,
+  };
+
+  it('accepts a persistent collapsed read after MAX_CONSECUTIVE_DEGRADED cycles', () => {
+    let state = { ...emptySnapshotHealthState(), lastInventory: { ...full } };
+    const flags: boolean[] = [];
+    for (let i = 0; i < MAX_CONSECUTIVE_DEGRADED + 2; i++) {
+      const r = applyInventorySanity(state, { 'Cheap Bait': 1 });
+      flags.push(r.degraded);
+      state = r.state;
+    }
+    assert.deepEqual(flags.slice(0, MAX_CONSECUTIVE_DEGRADED), Array(MAX_CONSECUTIVE_DEGRADED).fill(true));
+    assert.equal(flags[MAX_CONSECUTIVE_DEGRADED], false);
+    assert.equal(flags[MAX_CONSECUTIVE_DEGRADED + 1], false);
+    assert.deepEqual(state.lastInventory, { 'Cheap Bait': 1 });
+  });
+
+  it('good read resets the inventory streak', () => {
+    let state = { ...emptySnapshotHealthState(), lastInventory: { ...full } };
+    state = applyInventorySanity(state, { 'Cheap Bait': 1 }).state;
+    state = applyInventorySanity(state, full).state;
+    assert.equal(state.inventoryDegradedStreak, 0);
+    assert.equal(applyInventorySanity(state, { 'Cheap Bait': 1 }).degraded, true);
+  });
+
+  it('missing combat level stops degrading after MAX_CONSECUTIVE_DEGRADED cycles', () => {
+    let state = emptySnapshotHealthState();
+    const flags: boolean[] = [];
+    for (let i = 0; i < MAX_CONSECUTIVE_DEGRADED + 2; i++) {
+      const r = applyCombatLevelSanity(state, undefined);
+      flags.push(r.degraded);
+      state = r.state;
+    }
+    assert.equal(flags[MAX_CONSECUTIVE_DEGRADED], false);
+    assert.equal(flags[MAX_CONSECUTIVE_DEGRADED + 1], false);
+    const good = applyCombatLevelSanity(state, 7);
+    assert.equal(good.degraded, false);
+    assert.equal(good.state.combatMissStreak, 0);
   });
 });

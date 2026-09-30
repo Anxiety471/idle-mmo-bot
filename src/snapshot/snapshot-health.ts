@@ -5,7 +5,18 @@ export interface SnapshotHealthState {
   lastItemTypeCount: number;
   lastCombatLevel?: number;
   rawCodBagReads: number[];
+  /** Consecutive inventory reads held back as collapsed (bounded by MAX_CONSECUTIVE_DEGRADED). */
+  inventoryDegradedStreak?: number;
+  /** Consecutive profile reads with no combat level (bounded by MAX_CONSECUTIVE_DEGRADED). */
+  combatMissStreak?: number;
 }
+
+/**
+ * A collapsed/missing read may be held back at most this many cycles in a row.
+ * The next read is then trusted, so a legitimately changed page (sold stock,
+ * missing combat line) can never freeze the playbook in degraded mode.
+ */
+export const MAX_CONSECUTIVE_DEGRADED = 2;
 
 export function emptySnapshotHealthState(): SnapshotHealthState {
   return {
@@ -48,22 +59,29 @@ export function applyInventorySanity(
   state: SnapshotHealthState,
   fresh: Record<string, number>,
 ): InventorySanityResult {
+  const streak = state.inventoryDegradedStreak ?? 0;
   const collapsed =
     inventoryItemTypeCount(state.lastInventory) > 0 &&
     inventoryReadLooksCollapsed(state.lastInventory, fresh);
-  if (collapsed) {
+  if (collapsed && streak < MAX_CONSECUTIVE_DEGRADED) {
     return {
       inventory: { ...state.lastInventory },
       degraded: true,
-      state: { ...state, rawCodBagReads: [...state.rawCodBagReads] },
+      state: {
+        ...state,
+        rawCodBagReads: [...state.rawCodBagReads],
+        inventoryDegradedStreak: streak + 1,
+      },
     };
   }
 
   const nextState: SnapshotHealthState = {
+    ...state,
     lastInventory: { ...fresh },
     lastItemTypeCount: inventoryItemTypeCount(fresh),
     lastCombatLevel: state.lastCombatLevel,
     rawCodBagReads: [...state.rawCodBagReads],
+    inventoryDegradedStreak: 0,
   };
   return { inventory: fresh, degraded: false, state: nextState };
 }
@@ -93,13 +111,15 @@ export function applyCombatLevelSanity(
     return {
       combatLevel: parsed,
       degraded: false,
-      state: { ...state, lastCombatLevel: parsed },
+      state: { ...state, lastCombatLevel: parsed, combatMissStreak: 0 },
     };
   }
-  if (state.lastCombatLevel !== undefined) {
-    return { combatLevel: state.lastCombatLevel, degraded: true, state };
-  }
-  return { combatLevel: undefined, degraded: true, state };
+  const misses = (state.combatMissStreak ?? 0) + 1;
+  // Bounded: after MAX_CONSECUTIVE_DEGRADED misses the level is treated as
+  // legitimately absent (keep last known value) and no longer degrades the cycle.
+  const degraded = misses <= MAX_CONSECUTIVE_DEGRADED;
+  const nextState = { ...state, combatMissStreak: misses };
+  return { combatLevel: state.lastCombatLevel, degraded, state: nextState };
 }
 
 export function baitCountLooksLikePresenceFallback(
@@ -123,9 +143,10 @@ export function resetSnapshotHealthStateForTest(): void {
 
 export function noteSnapshotHealthFromSnapshot(snapshot: GameSnapshot): void {
   moduleHealthState = {
+    ...moduleHealthState,
     lastInventory: { ...snapshot.inventory },
     lastItemTypeCount: inventoryItemTypeCount(snapshot.inventory),
-    lastCombatLevel: snapshot.combatLevel,
+    lastCombatLevel: snapshot.combatLevel ?? moduleHealthState.lastCombatLevel,
     rawCodBagReads: moduleHealthState.rawCodBagReads,
   };
 }
