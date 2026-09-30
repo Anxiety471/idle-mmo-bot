@@ -85,40 +85,109 @@ const QUEST_TITLE_SKIP = new Set(
   ].map((s) => normalizeQuestTitleKey(s)),
 );
 
+const QUEST_PROGRESS_LINE = /^(\d[\d,]*)\s*\/\s*(\d[\d,]*)$/;
+const QUEST_REWARD_LINE = /^[\d,]+(?:\.\d+)?[KkMm]?$/;
+const QUEST_SECTION_END = /^(Statistics|Pending Quests|Accepted Quests|Completed Quests)$/i;
+
+interface ParsedQuestObjective {
+  name?: string;
+  current: number;
+  total: number;
+}
+
+function toInt(value: string): number {
+  return Number.parseInt(value.replace(/,/g, ''), 10);
+}
+
+/**
+ * Line-based parse of the quest list:
+ *   Title / Objective / "x / y" [/ Objective / "x / y" ...] / reward
+ * Multi-objective quests (e.g. Fuel for the Forge: Coal 100/100 + Tin 0/100)
+ * are one quest whose progress is the least-complete objective, so a single
+ * met objective never marks the quest ready to turn in.
+ */
+export function parseQuestListLines(text: string, tab: SnapshotQuest['tab']): SnapshotQuest[] {
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+  let startIdx = lines.findIndex((l) => /^You are viewing quests/i.test(l));
+  if (startIdx === -1) {
+    startIdx = lines.findIndex((l) => /^Completed(\s+\d+)?$/i.test(l));
+  }
+  if (startIdx === -1) return [];
+
+  type Draft = { title: string; objectives: ParsedQuestObjective[]; pendingName?: string; closed: boolean };
+  const drafts: Draft[] = [];
+  let current: Draft | undefined;
+
+  for (let i = startIdx + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (QUEST_SECTION_END.test(line)) break;
+    const prog = line.match(QUEST_PROGRESS_LINE);
+    if (prog) {
+      if (current && !current.closed) {
+        current.objectives.push({ name: current.pendingName, current: toInt(prog[1]), total: toInt(prog[2]) });
+        current.pendingName = undefined;
+      }
+      continue;
+    }
+    if (QUEST_REWARD_LINE.test(line)) {
+      if (current && current.objectives.length > 0) current.closed = true;
+      continue;
+    }
+    if (!current || current.closed) {
+      current = { title: line, objectives: [], closed: false };
+      drafts.push(current);
+      continue;
+    }
+    if (current.pendingName !== undefined && current.objectives.length > 0) {
+      // Text, text with no progress between after a finished objective: new card without reward line.
+      current.closed = true;
+      current = { title: current.pendingName, objectives: [], pendingName: line, closed: false };
+      drafts.push(current);
+      continue;
+    }
+    if (current.pendingName !== undefined && current.objectives.length === 0) {
+      // Title followed by two text lines — the first was not a quest title.
+      current.title = current.pendingName;
+    }
+    current.pendingName = line;
+  }
+
+  const quests: SnapshotQuest[] = [];
+  const seen = new Set<string>();
+  for (const d of drafts) {
+    if (d.objectives.length === 0) continue;
+    const title = d.title.trim();
+    const key = normalizeQuestTitleKey(title);
+    if (!title || QUEST_TITLE_SKIP.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    const worst = d.objectives.reduce((a, b) =>
+      b.current / Math.max(1, b.total) < a.current / Math.max(1, a.total) ? b : a,
+    );
+    const allMet = d.objectives.every((o) => o.total > 0 && o.current >= o.total);
+    const progress = `${worst.current} / ${worst.total}`;
+    quests.push({ title, progress, canTurnIn: tab === 'accepted' && allMet, tab });
+  }
+  return quests;
+}
+
 function parseQuestCards(text: string, tab: SnapshotQuest['tab']): SnapshotQuest[] {
+  const lineParsed = parseQuestListLines(text, tab);
+  if (lineParsed.length > 0) return lineParsed;
+
   const quests: SnapshotQuest[] = [];
   const seen = new Set<string>();
 
+  // Fallback: single-line title (no newlines inside) followed by progress.
   const cardPattern =
-    /([A-Z][A-Za-z'’\s]{2,48})\s*(?:\(([\d,]+)\))?\s*[\n\r]+\s*((?:[A-Za-z][\w' -]{1,30}\s+)?\d+\s*\/\s*\d+)/g;
+    /^[ \t]*([A-Z][A-Za-z'’ ]{2,48})[ \t]*(?:\(([\d,]+)\))?[ \t]*[\n\r]+\s*((?:[A-Za-z][\w' -]{1,30}\s+)?\d+\s*\/\s*\d+)/gm;
   for (const match of text.matchAll(cardPattern)) {
     const title = match[1].trim();
     const key = normalizeQuestTitleKey(title);
     if (QUEST_TITLE_SKIP.has(key) || seen.has(key)) continue;
     seen.add(key);
     const progress = match[3]?.trim();
-    const canTurnIn =
-      (/Turn In/i.test(text) && text.includes(title)) ||
-      (tab === 'accepted' && isQuestProgressMet(progress));
+    const canTurnIn = tab === 'accepted' && isQuestProgressMet(progress);
     quests.push({ title, progress, canTurnIn, tab });
-  }
-
-  // Fallback: title immediately followed by progress on one line.
-  const inlinePattern = /([A-Z][A-Za-z'’\s]{2,48})\s+((?:[A-Za-z][\w' -]{1,30}\s+)?\d+\s*\/\s*\d+)/g;
-  for (const match of text.matchAll(inlinePattern)) {
-    const title = match[1].trim();
-    const key = normalizeQuestTitleKey(title);
-    if (QUEST_TITLE_SKIP.has(key) || seen.has(key)) continue;
-    seen.add(key);
-    const progress = match[2]?.trim();
-    quests.push({
-      title,
-      progress,
-      canTurnIn:
-        (/Turn In/i.test(text) && text.includes(title)) ||
-        (tab === 'accepted' && isQuestProgressMet(progress)),
-      tab,
-    });
   }
 
   return quests;
