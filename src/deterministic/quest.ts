@@ -315,7 +315,47 @@ export async function navigateToQuestsInterrupting(
 const KNOWN_ACCEPT_DIALOGUES = [
   "Right. I'll fetch the logs.",
   "I'll help with the hearth.",
+  "Fine. I'll find your rabbit feet.",
 ] as const;
+
+const GENERIC_ACCEPT_REPLY_PATTERN =
+  /^(Fine|Right|Sure|Okay|OK|I'll|I will|Alright|Yes|Deal|Consider it done)\b/i;
+
+/** Replies that decline, abandon, or defer a quest — never auto-clicked. */
+const DECLINE_REPLY_PATTERN =
+  /\b(no|not|nope|decline|abandon|refuse|reject|pass|later|leave|nevermind|never mind|forget|won'?t|can'?t|cannot|cancel|quit|give up|goodbye|bye|another time|busy|think about|maybe|drop)\b/i;
+
+const NON_REPLY_BUTTON_PATTERN =
+  /^(Talk|Overview|Turn In|Complete|Accept|Close|Cancel|Dismiss|Leave|Back|Abandon(?: Quest)?|Search|Character|Map)$/i;
+
+/**
+ * Pure picker over visible button labels: only an affirmative accept line that
+ * does not contain decline/abandon wording. No positional fallback — an
+ * unrecognised dialogue returns undefined (caller reports talk:no_action).
+ */
+export function chooseGenericQuestReply(labels: string[]): string | undefined {
+  for (const raw of labels) {
+    const label = raw.trim();
+    if (!label || label.length > 120 || NON_REPLY_BUTTON_PATTERN.test(label)) continue;
+    if (label.endsWith('?')) continue;
+    if (DECLINE_REPLY_PATTERN.test(label)) continue;
+    if (GENERIC_ACCEPT_REPLY_PATTERN.test(label)) return label;
+  }
+  return undefined;
+}
+
+/** Pick the best accept/turn-in dialogue line from visible reply buttons. */
+export async function pickGenericQuestReply(page: Page): Promise<string | undefined> {
+  const buttons = page.getByRole('button');
+  const count = Math.min(await buttons.count(), 80);
+  const labels: string[] = [];
+  for (let i = 0; i < count; i++) {
+    labels.push((await buttons.nth(i).innerText().catch(() => '')).trim());
+  }
+  const picked = chooseGenericQuestReply(labels);
+  if (picked) console.log(`[quest] generic accept reply: ${picked}`);
+  return picked;
+}
 
 async function clickDialogueLine(page: Page, line: string): Promise<boolean> {
   const option = page
@@ -353,6 +393,11 @@ export async function talkQuest(
     if (await clickDialogueLine(page, line)) {
       return 'talked';
     }
+  }
+
+  const generic = await pickGenericQuestReply(page);
+  if (generic && await clickDialogueLine(page, generic)) {
+    return 'talked';
   }
 
   const talkStillVisible = await page.getByRole('button', { name: 'Talk', exact: true }).count();

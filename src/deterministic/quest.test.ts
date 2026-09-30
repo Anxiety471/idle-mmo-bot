@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { Page } from 'playwright';
-import { talkQuest, questTitlePattern } from './quest.js';
+import { talkQuest, questTitlePattern, pickGenericQuestReply, chooseGenericQuestReply } from './quest.js';
 import { GOBLIN_QUEST } from './quest-accept.js';
 
 type MockButton = {
@@ -43,10 +43,24 @@ function createMockPage(options: {
   const page = {
     getByRole: (_role: string, opts?: { name?: string | RegExp; exact?: boolean }) => {
       const name = opts?.name;
-      const matching = typeof name === 'string'
-        ? buttons.filter((btn) => btn.name === name)
-        : [];
-      return createLocator([async () => matching.length], async () => undefined);
+      const matching =
+        name === undefined
+          ? buttons
+          : typeof name === 'string'
+            ? buttons.filter((btn) => btn.name === name)
+            : [];
+      const locator = createLocator([async () => matching.length], async () => undefined);
+      return {
+        ...locator,
+        nth: (index: number) => ({
+          innerText: async () => matching[index]?.name ?? '',
+          click: async () => undefined,
+        }),
+        count: locator.count,
+        click: locator.click,
+        first: locator.first,
+        or: locator.or,
+      };
     },
     getByText: (text: string) =>
       createLocator([async () => (texts.has(text) ? 1 : 0)], async () => undefined),
@@ -84,5 +98,54 @@ describe('talkQuest', () => {
       texts: ["Right. I'll fetch the logs."],
     });
     assert.equal(await talkQuest(page), 'talked');
+  });
+
+  it('clicks generic accept line for rabbit fortune quest', async () => {
+    const page = createMockPage({
+      buttons: [{ name: 'Talk' }, { name: "Fine. I'll find your rabbit feet." }],
+      texts: ["Fine. I'll find your rabbit feet."],
+    });
+    assert.equal(await talkQuest(page), 'talked');
+  });
+});
+
+describe('pickGenericQuestReply', () => {
+  it('prefers accept-pattern replies', async () => {
+    const page = createMockPage({
+      buttons: [
+        { name: 'What happened to your last lucky charm?' },
+        { name: "Fine. I'll find your rabbit feet." },
+      ],
+    });
+    const line = await pickGenericQuestReply(page);
+    assert.equal(line, "Fine. I'll find your rabbit feet.");
+  });
+});
+
+describe('chooseGenericQuestReply safety', () => {
+  it('never picks decline/abandon/defer lines', () => {
+    assert.equal(chooseGenericQuestReply(['Abandon Quest', "I'll pass.", 'No thanks.']), undefined);
+    assert.equal(chooseGenericQuestReply(["Fine, I won't help.", "I'll think about it."]), undefined);
+    assert.equal(chooseGenericQuestReply(["Sure, maybe later."]), undefined);
+  });
+
+  it('has no positional fallback for unknown dialogue', () => {
+    assert.equal(
+      chooseGenericQuestReply(['Forty rabbit feet won\'t fix bad luck.', 'What happened to your last lucky charm?']),
+      undefined,
+    );
+  });
+
+  it('picks the affirmative line among rabbit replies', () => {
+    assert.equal(
+      chooseGenericQuestReply([
+        'Search',
+        "Forty rabbit feet won't fix bad luck.",
+        'What happened to your last lucky charm?',
+        "Fine. I'll find your rabbit feet.",
+        'Abandon',
+      ]),
+      "Fine. I'll find your rabbit feet.",
+    );
   });
 });

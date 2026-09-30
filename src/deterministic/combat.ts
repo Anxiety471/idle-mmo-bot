@@ -669,18 +669,17 @@ export function enemyNameFromImageSrc(src: string): string | undefined {
   return undefined;
 }
 
-async function enemyQuantityFromTile(btn: Locator): Promise<number> {
+export async function enemyQuantityFromTile(btn: Locator): Promise<number> {
   const scoped = btn.locator('[x-text*="enemy_block.quantity"]');
   if ((await scoped.count()) > 0) {
     const text = (await scoped.first().textContent()) ?? '';
     const qty = parseQuantityString(text);
-    if (qty > 0) return qty;
+    return qty;
   }
   const lines = textLines(await safeInnerText(btn));
   const numeric = lines.find((line) => PURE_NUMERIC_PATTERN.test(line));
   if (numeric) {
-    const qty = parseQuantityString(numeric);
-    if (qty > 0) return qty;
+    return parseQuantityString(numeric);
   }
   return 1;
 }
@@ -835,9 +834,39 @@ async function collectEnemyCountBadges(page: Page): Promise<Locator[]> {
  * Active hunts show one zone-pool count under ENEMIES NEARBY. Those are not tiles.
  * Post-stop screens show Hunt More plus the stack badges, with Stop gone.
  */
+async function enemyImagesLoadedNear(page: Page): Promise<boolean> {
+  const root = await getEnemiesNearbyRoot(page);
+  if (!root) return false;
+  const imgs = root.locator('img');
+  const count = await imgs.count();
+  if (count === 0) return true;
+  let sawImg = false;
+  for (let i = 0; i < Math.min(count, 12); i++) {
+    sawImg = true;
+    const loaded = await imgs
+      .nth(i)
+      .evaluate((img) => {
+        const el = img as {
+          naturalWidth?: number;
+          naturalHeight?: number;
+          complete?: boolean;
+          getAttribute?: (name: string) => string | null;
+        };
+        if ((el.naturalWidth ?? 0) > 0 && (el.naturalHeight ?? 0) > 0) return true;
+        const src = el.getAttribute?.('src') ?? '';
+        return src.length > 0 && el.complete !== false;
+      })
+      .catch(() => false);
+    if (loaded) return true;
+  }
+  return !sawImg;
+}
+
 async function shouldCollectCountBadges(page: Page): Promise<boolean> {
   if (await isHuntStopVisible(page)) return false;
-  if (await isButtonVisible(page, 'Hunt More')) return true;
+  if (await isButtonVisible(page, 'Hunt More')) {
+    return enemyImagesLoadedNear(page);
+  }
   const metrics = page.getByText('Total Enemies Found', { exact: true }).first();
   const metricsVisible =
     (await metrics.count()) > 0 && (await metrics.isVisible().catch(() => false));
@@ -895,8 +924,26 @@ async function enemyInfosFromTiles(buttons: Locator[]): Promise<EnemyInfo[]> {
   return enemies;
 }
 
+function enemyTilesLookPartial(enemies: EnemyInfo[]): boolean {
+  if (enemies.length === 0) return false;
+  const allZero = enemies.every((enemy) => enemyStackSize(enemy) <= 0);
+  const unnamedStacks = enemies.every((enemy) => /^stack\s+0$/i.test(enemy.name));
+  return allZero || unnamedStacks;
+}
+
+async function waitForCombatEnemyTiles(page: Page, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const { enemies } = await collectEnemyTilesOnce(page);
+    if (enemies.some((enemy) => enemyStackSize(enemy) >= 1)) return;
+    await page.waitForTimeout(200);
+  }
+}
+
 /** Text cards, icon tiles, or count badges from ENEMIES NEARBY (mixed enemy types). */
-async function collectEnemyTiles(page: Page): Promise<{ buttons: Locator[]; enemies: EnemyInfo[] }> {
+async function collectEnemyTilesOnce(
+  page: Page,
+): Promise<{ buttons: Locator[]; enemies: EnemyInfo[] }> {
   const textCards = await collectEnemyCardButtons(page);
   const textEnemies = await enemyInfosFromButtons(textCards);
   if (textEnemies.length > 0) {
@@ -906,16 +953,43 @@ async function collectEnemyTiles(page: Page): Promise<{ buttons: Locator[]; enem
   const iconTiles = await collectEnemyIconTiles(page);
   const badges = await withoutOverlappingTiles(await collectEnemyCountBadges(page), iconTiles);
   const buttons = await sortTilesByPosition([...iconTiles, ...badges]);
-  return { buttons, enemies: await enemyInfosFromTiles(buttons) };
+  const enemies = await enemyInfosFromTiles(buttons);
+  return { buttons, enemies };
 }
 
-function readyEnemies(enemies: EnemyInfo[]): EnemyInfo[] {
-  return enemies.filter((enemy) => !enemy.restrictive);
+async function collectEnemyTiles(page: Page): Promise<{ buttons: Locator[]; enemies: EnemyInfo[] }> {
+  let result = await collectEnemyTilesOnce(page);
+  if (enemyTilesLookPartial(result.enemies)) {
+    const huntMoreVisible = await isButtonVisible(page, 'Hunt More');
+    const imagesLoaded = huntMoreVisible && (await enemyImagesLoadedNear(page));
+    const pageUrl = page.url();
+    const canReload =
+      !pageUrl.startsWith('about:') && !pageUrl.startsWith('data:') && pageUrl.includes('/combat');
+    if ((!huntMoreVisible || !imagesLoaded) && canReload) {
+      await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => undefined);
+      await waitForCombatEnemyTiles(page);
+      result = await collectEnemyTilesOnce(page);
+    }
+  }
+  const filteredButtons: Locator[] = [];
+  const filteredEnemies: EnemyInfo[] = [];
+  for (let i = 0; i < result.enemies.length; i++) {
+    const enemy = result.enemies[i];
+    if (enemyStackSize(enemy) < 1) continue;
+    filteredButtons.push(result.buttons[i]);
+    filteredEnemies.push(enemy);
+  }
+  return { buttons: filteredButtons, enemies: filteredEnemies };
 }
 
 function enemyStackSize(enemy: EnemyInfo): number {
   const qty = enemy.quantity;
+  if (qty === 0) return 0;
   return qty !== undefined && qty > 0 ? qty : 1;
+}
+
+function readyEnemies(enemies: EnemyInfo[]): EnemyInfo[] {
+  return enemies.filter((enemy) => !enemy.restrictive && enemyStackSize(enemy) >= 1);
 }
 
 /**
@@ -2811,7 +2885,12 @@ export async function configureAndBattle(
     console.log(`[combat] opening enemy tile: ${target.name}`);
     await clickEnemyTile(page, tile);
     if (!(await isEnemyDetailPanelOpen(page))) {
-      console.log(`[combat] enemy tile did not open battle modal: ${target.name}`);
+      const outerHtml = await tile.evaluate((el) => el.outerHTML).catch(() => '');
+      const box = await tile.boundingBox().catch(() => null);
+      console.log(
+        `[combat] enemy tile did not open battle modal: ${target.name} box=${JSON.stringify(box)} outerHTML=${outerHtml.slice(0, 400)}`,
+      );
+      await page.screenshot({ path: `logs/enemy-tile-fail-${Date.now()}.png`, fullPage: true }).catch(() => undefined);
       if (i < ordered.length - 1) {
         console.log(`[combat] trying next enemy tile: ${ordered[i + 1].name}`);
       }
@@ -3235,7 +3314,18 @@ export async function huntMore(
   if ((await huntMoreBtn.count()) === 0 || !(await huntMoreBtn.first().isVisible().catch(() => false))) {
     return 'no_action';
   }
-  await huntMoreBtn.first().click();
+  await dismissBlockingOverlays(page);
+  const clickHuntMore = async (): Promise<void> => {
+    await huntMoreBtn.first().click({ timeout: 5_000 });
+  };
+  try {
+    await clickHuntMore();
+  } catch {
+    await dismissBlockingOverlays(page);
+    await page.keyboard.press('Escape').catch(() => undefined);
+    await dismissBlockingOverlays(page);
+    await clickHuntMore();
+  }
   const postClickCaptcha = await waitAndSolvePostBattleCaptcha(page, FIGHT_CONFIRM_POLL_MS);
   if (postClickCaptcha === 'blocked') return 'blocked_verify';
 

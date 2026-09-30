@@ -2,6 +2,8 @@ import type { Page } from 'playwright';
 import type { AppConfig } from '../config.js';
 import type { HuntState } from '../types.js';
 import { navigateTo } from '../browser.js';
+import { waitForPageReady } from '../browser/page-ready.js';
+import { inventoryReadLooksCollapsed } from '../snapshot/snapshot-health.js';
 import {
   restartSkillGather,
   readGatherState,
@@ -63,6 +65,7 @@ import {
   getPlaybookFromSnapshot,
   recentBaitPurchase,
   shouldPreferBaitRestock,
+  shouldSkipQuestTalkTitle,
 } from './early-systems-playbook.js';
 import { enemyBacklogTotal, pollUntilHuntStop, shouldSkipHuntMore } from '../jev/hunt-cap.js';
 import {
@@ -342,7 +345,28 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
   let inventoryForCookGate = inventoryAfterCookedCodSpend(ctx.snapshot.inventory, cookedSpent);
   if (shouldRefreshCookGateAfterFight(worstCaseCooked, huntCookFloor)) {
     invalidateInventoryDomCache();
-    const freshInventory = await scrapeInventoryFromDom(page).catch(() => null);
+    const returnPath = new URL(page.url()).pathname;
+    let freshInventory: Record<string, number> | null = null;
+    try {
+      await navigateTo(page, ctx.config, '/inventory');
+      await waitForPageReady(page, 'inventory');
+      freshInventory = await scrapeInventoryFromDom(page, { forceRefresh: true }).catch(() => null);
+    } catch (err) {
+      console.log(`[combat] post-fight inventory read failed: ${(err as Error).message}`);
+    } finally {
+      if (!returnPath.includes('/inventory')) {
+        await navigateTo(
+          page,
+          ctx.config,
+          returnPath.includes('/combat') ? '/combat/battle' : returnPath,
+        ).catch(() => undefined);
+      }
+    }
+    // A partial/blank grid (slow render) must not drive the cook gate to 0.
+    if (freshInventory && inventoryReadLooksCollapsed(ctx.snapshot.inventory, freshInventory)) {
+      console.log('[combat] post-fight inventory read looks collapsed — using worst-case estimate');
+      freshInventory = null;
+    }
     if (freshInventory) {
       inventoryForCookGate = inventoryAfterCookedCodSpend(freshInventory, cookedSpent);
     } else {
@@ -483,6 +507,10 @@ async function questTalkAccept(
   pendingQuests: SnapshotQuest[],
   interruptGather = false,
 ): Promise<string> {
+  const eligible = pendingQuests.filter((q) => !shouldSkipQuestTalkTitle(q.title));
+  if (eligible.length === 0) {
+    return 'quest_talk_skipped_backoff';
+  }
   let nav: 'ok' | 'blocked' = 'ok';
   if (interruptGather) {
     nav = await navigateToQuestsInterrupting(page, config);
@@ -499,9 +527,16 @@ async function questTalkAccept(
     return 'pending_tab_missing';
   }
 
-  const { opened, title } = await openPendingQuestCard(page, config, pendingQuests);
+  let { opened, title } = await openPendingQuestCard(page, config, eligible);
   if (!opened) {
-    return 'card_not_opened';
+    console.log('[quest] card_not_opened — reloading quests page once');
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => undefined);
+    await waitForQuestTabsSettled(page);
+    await switchQuestTab(page, 'Pending Nearby');
+    ({ opened, title } = await openPendingQuestCard(page, config, eligible));
+    if (!opened) {
+      return 'card_not_opened';
+    }
   }
 
   if (!(await waitForQuestDetail(page))) {
@@ -510,7 +545,7 @@ async function questTalkAccept(
 
   const talkResult = await talkQuest(page, title ? getQuestDialogueLine(title) : undefined);
   if (talkResult === 'no_action') {
-    return 'talk:no_action';
+    return title ? `talk:no_action:${title}` : 'talk:no_action';
   }
 
   if (await isTurnInEnabled(page)) {

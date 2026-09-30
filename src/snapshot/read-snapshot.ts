@@ -3,6 +3,14 @@ import type { Page } from 'playwright';
 import type { AppConfig } from '../config.js';
 import type { CombatPhase, GameSnapshot, SnapshotQuest, SkillId } from '../types.js';
 import { navigateTo } from '../browser.js';
+import { waitForPageReady } from '../browser/page-ready.js';
+import {
+  applyCombatLevelSanity,
+  applyInventorySanity,
+  getSnapshotHealthState,
+  noteSnapshotHealthFromSnapshot,
+  setSnapshotHealthState,
+} from './snapshot-health.js';
 import {
   readSkillState,
   switchQuestTab,
@@ -52,32 +60,63 @@ function parseSkillLevels(text: string): Partial<Record<SkillId, number>> {
   return levels;
 }
 
+/** Normalize apostrophe/case variants ("A Ducks Whisper" vs "A Duck's Whisper"). */
+export function normalizeQuestTitleKey(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/['’`]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const QUEST_TITLE_SKIP = new Set(
+  [
+    'overview',
+    'talk',
+    'turn in',
+    'complete',
+    'quests',
+    'accepted',
+    'pending nearby',
+    'completed',
+    'search',
+    'character',
+    'map',
+  ].map((s) => normalizeQuestTitleKey(s)),
+);
+
 function parseQuestCards(text: string, tab: SnapshotQuest['tab']): SnapshotQuest[] {
   const quests: SnapshotQuest[] = [];
-  const knownTitles = [
-    'Wood for the Hearth',
-    'Goblin Menace',
-    'The Goblin Menace',
-    "A Duck's Whisper",
-    "A Duck's Whisper",
-    "A Rabbits Fortune",
-    "A Rabbit's Fortune",
-  ];
+  const seen = new Set<string>();
 
-  for (const title of knownTitles) {
-    if (!text.includes(title)) continue;
-    const progressMatch = text.match(
-      new RegExp(`${title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]{0,200}?(\\d+\\s*/\\s*\\d+)`, 'i'),
-    );
-    const progress = progressMatch?.[1]?.trim();
-    // List view often omits the Turn In control until the card is opened — treat met progress as ready.
+  const cardPattern =
+    /([A-Z][A-Za-z'’\s]{2,48})\s*(?:\(([\d,]+)\))?\s*[\n\r]+\s*((?:[A-Za-z][\w' -]{1,30}\s+)?\d+\s*\/\s*\d+)/g;
+  for (const match of text.matchAll(cardPattern)) {
+    const title = match[1].trim();
+    const key = normalizeQuestTitleKey(title);
+    if (QUEST_TITLE_SKIP.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    const progress = match[3]?.trim();
     const canTurnIn =
       (/Turn In/i.test(text) && text.includes(title)) ||
       (tab === 'accepted' && isQuestProgressMet(progress));
+    quests.push({ title, progress, canTurnIn, tab });
+  }
+
+  // Fallback: title immediately followed by progress on one line.
+  const inlinePattern = /([A-Z][A-Za-z'’\s]{2,48})\s+((?:[A-Za-z][\w' -]{1,30}\s+)?\d+\s*\/\s*\d+)/g;
+  for (const match of text.matchAll(inlinePattern)) {
+    const title = match[1].trim();
+    const key = normalizeQuestTitleKey(title);
+    if (QUEST_TITLE_SKIP.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    const progress = match[2]?.trim();
     quests.push({
       title,
       progress,
-      canTurnIn,
+      canTurnIn:
+        (/Turn In/i.test(text) && text.includes(title)) ||
+        (tab === 'accepted' && isQuestProgressMet(progress)),
       tab,
     });
   }
@@ -124,6 +163,7 @@ function logSnapshotStep(step: string, startedAt: number): void {
 /** Build a structured GameSnapshot from live Playwright page state. */
 export async function readGameSnapshot(page: Page, config: AppConfig): Promise<GameSnapshot> {
   const snapshotStarted = Date.now();
+  let snapshotDegraded = false;
   const path = new URL(page.url()).pathname;
   let text = await bodyText(page);
 
@@ -152,12 +192,17 @@ export async function readGameSnapshot(page: Page, config: AppConfig): Promise<G
 
   const inventoryStep = Date.now();
   await navigateTo(page, config, '/inventory');
-  // Icon grid + CDN skins need a beat before badge text/img src are stable.
-  await page.waitForTimeout(1_800);
+  await waitForPageReady(page, 'inventory');
   const inventoryText = await bodyText(page);
   const domInventory = await scrapeInventoryFromDom(page).catch(() => ({}));
-  const inventory = buildInventoryMap(inventoryText, domInventory);
+  let inventory = buildInventoryMap(inventoryText, domInventory);
+  const healthBefore = getSnapshotHealthState();
+  const invSanity = applyInventorySanity(healthBefore, inventory);
+  inventory = invSanity.inventory;
+  snapshotDegraded = invSanity.degraded;
+  setSnapshotHealthState(invSanity.state);
   const hasBait = detectHasBait(inventory, inventoryText);
+  const baitCountUntrusted = invSanity.degraded;
   logSnapshotStep('inventory', inventoryStep);
 
   const skillStep = Date.now();
@@ -178,10 +223,15 @@ export async function readGameSnapshot(page: Page, config: AppConfig): Promise<G
   const huntMetrics = parseHuntMetrics(combatText);
 
   await navigateTo(page, config, '/profile');
+  await waitForPageReady(page, 'profile');
   text = await bodyText(page);
 
   const totalLevel = parseNumber(text, /Total\s*Lv\.?\s*(\d+)/i);
-  const combatLevel = parseNumber(text, /Combat\s*(?:Lv\.?)?\s*(\d+)/i);
+  const combatParsed = parseNumber(text, /Combat\s*(?:Lv\.?)?\s*(\d+)/i);
+  const combatSanity = applyCombatLevelSanity(getSnapshotHealthState(), combatParsed);
+  const combatLevel = combatSanity.combatLevel;
+  if (combatSanity.degraded) snapshotDegraded = true;
+  setSnapshotHealthState(combatSanity.state);
   const gold = parseNumber(text, /Gold\s+([\d,]+)/i);
   const tokens = parseNumber(text, /Tokens?\s+(\d+)/i);
   const skillLevels = parseSkillLevels(text);
@@ -235,6 +285,8 @@ export async function readGameSnapshot(page: Page, config: AppConfig): Promise<G
       gatherBusy,
       inBattle,
       sessionValid,
+      snapshotDegraded: snapshotDegraded || undefined,
+      baitCountUntrusted: baitCountUntrusted || undefined,
     },
   };
 
@@ -251,6 +303,7 @@ export async function readGameSnapshot(page: Page, config: AppConfig): Promise<G
   }
 
   const merged = await applyPublicApiToSnapshot(snapshot);
+  noteSnapshotHealthFromSnapshot(merged);
   logSnapshotStep('total', snapshotStarted);
   return merged;
 }

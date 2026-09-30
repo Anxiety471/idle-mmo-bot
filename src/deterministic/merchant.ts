@@ -2,6 +2,7 @@ import type { Page } from 'playwright';
 import type { AppConfig } from '../config.js';
 import type { MerchantStepResult } from '../types.js';
 import { navigateTo } from '../browser.js';
+import { waitForPageReady } from '../browser/page-ready.js';
 
 /**
  * Buy Cheap Bait from Melriel (General Goods) at /merchants.
@@ -54,22 +55,25 @@ export async function buyCheapBait(
 ): Promise<MerchantStepResult> {
   try {
     await navigateTo(page, config, MERCHANTS_PATH);
-    await page.waitForTimeout(1000);
+    await waitForPageReady(page, 'merchant');
     await dismissMerchantDialogue(page);
 
     if (!(await openMelriel(page))) {
-      console.log('[merchant] Melriel / General Goods not found');
+      const title = await page.title().catch(() => '');
+      console.log(`[merchant] Melriel / General Goods not found url=${page.url()} title=${title}`);
       return 'failed';
     }
 
     const baitItem = page.getByRole('button', { name: /Cheap Bait/i })
       .or(page.getByText('Cheap Bait', { exact: true }));
-    if (await baitItem.count() === 0) {
+    try {
+      await baitItem.first().waitFor({ state: 'visible', timeout: 8_000 });
+    } catch {
       console.log('[merchant] Cheap Bait not listed');
       return 'failed';
     }
     await baitItem.first().click({ force: true, timeout: 8000 });
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(300);
 
     const qtyInput = page.locator('input[name="quantity"], input[type="number"]');
     if (await qtyInput.count() > 0) {
@@ -79,8 +83,10 @@ export async function buyCheapBait(
     const purchase = page.getByRole('button', { name: /Purchase for/i })
       .or(page.getByRole('button', { name: 'Buy', exact: true }))
       .or(page.getByRole('button', { name: 'Purchase', exact: true }));
-    if (await purchase.count() === 0) {
-      console.log('[merchant] Purchase button missing');
+    try {
+      await purchase.first().waitFor({ state: 'visible', timeout: 8_000 });
+    } catch {
+      console.log(`[merchant] Purchase button missing url=${page.url()}`);
       return 'failed';
     }
     await purchase.first().click({ force: true, timeout: 8000 });
