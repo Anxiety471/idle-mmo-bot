@@ -26,6 +26,14 @@ import { getLogDir } from '../logging/jsonl-writer.js';
 import { cookedCodCount, needsCookBeforeHunt } from '../deterministic/combat.js';
 import { shouldHardStopHunt } from '../deterministic/hunt-cap.js';
 import { hasEasyCompletePendingQuest } from '../deterministic/quest-accept.js';
+import {
+  baitCountLooksLikePresenceFallback,
+  getSnapshotHealthState,
+  rawCodZeroConfirmed,
+  recordRawCodBagRead,
+  setSnapshotHealthState,
+} from '../snapshot/snapshot-health.js';
+import { normalizeQuestTitleKey } from '../snapshot/read-snapshot.js';
 import type { AutopilotAction, AutopilotContext, GameSnapshot, GatherState } from '../types.js';
 import {
   evaluateQuestCurriculum,
@@ -141,6 +149,10 @@ interface PersistedPlaybook {
   staleCoalBusyCycles?: number;
   /** Remaining cycles to demote quest_talk_accept after talk:no_action. */
   questTalkNoActionCycles?: number;
+  /** Per-quest cycles to skip talk after repeated talk:no_action. */
+  questTalkSkipCycles?: Record<string, number>;
+  /** Consecutive talk:no_action per quest title (normalized key). */
+  questTalkNoActionByTitle?: Record<string, number>;
 }
 
 /** Sequential batch stages only — manage_pets is async and not in this order. */
@@ -305,6 +317,8 @@ function loadPersisted(): PersistedPlaybook {
       lastCoalProgressSeen: parsed.lastCoalProgressSeen,
       staleCoalBusyCycles: parsed.staleCoalBusyCycles ?? 0,
       questTalkNoActionCycles: parsed.questTalkNoActionCycles ?? 0,
+      questTalkSkipCycles: parsed.questTalkSkipCycles ?? {},
+      questTalkNoActionByTitle: parsed.questTalkNoActionByTitle ?? {},
     };
   } catch {
     return { version: 1, stage: 'mine_coal', counts: emptyCounts() };
@@ -568,11 +582,20 @@ export function bagHasRawCod(snapshot: GameSnapshot): boolean {
  * bag is empty and we are not actively fishing Cod, clamp soft rawCod down —
  * cooking consumes raw fish and a stale latch blocks fish_cod recovery.
  */
+const QUEST_TALK_NO_ACTION_PER_TITLE = 3;
+const QUEST_TALK_SKIP_CYCLES = 5;
+
 function syncRawCodCount(
   next: PlaybookCounts,
   snapshot: GameSnapshot,
   bagRawCod: number,
 ): void {
+  if (snapshot.flags.snapshotDegraded) {
+    return;
+  }
+  let health = getSnapshotHealthState();
+  health = recordRawCodBagRead(health, bagRawCod);
+  setSnapshotHealthState(health);
   const resource = snapshot.currentAction?.resource ?? snapshot.currentAction?.label ?? '';
   const fishingCod =
     /\bcod\b/i.test(resource) &&
@@ -598,6 +621,9 @@ function syncRawCodCount(
   // (icon scrape under-reports). Ignore a one-off empty scrape while cooking.
   if (!fishingCod && next.rawCod > bagRawCod) {
     if (bagRawCod === 0 && cookingBusy && next.rawCod > 16) {
+      return;
+    }
+    if (bagRawCod === 0 && !rawCodZeroConfirmed(health)) {
       return;
     }
     next.rawCod = bagRawCod;
@@ -1008,6 +1034,16 @@ export function evaluatePlaybook(
   }
 
   const persisted = loadPersisted();
+  const snapshotDegraded = Boolean(snapshot.flags.snapshotDegraded);
+  const questTalkSkipCycles = { ...(persisted.questTalkSkipCycles ?? {}) };
+  for (const key of Object.keys(questTalkSkipCycles)) {
+    if (questTalkSkipCycles[key] > 0) {
+      questTalkSkipCycles[key] -= 1;
+    }
+    if (questTalkSkipCycles[key] <= 0) {
+      delete questTalkSkipCycles[key];
+    }
+  }
   let counts = syncCountsFromSnapshot(persisted.counts, snapshot);
   // Recover pre-baitOwned runs that already advanced past buy_bait after purchases.
   let baitOwned = Boolean(persisted.baitOwned);
@@ -1027,7 +1063,9 @@ export function evaluatePlaybook(
     persistedStage = 'hunt_battle_batch';
   }
 
-  let stage = deriveStage(counts, snapshot, persistedStage, baitOwned);
+  let stage = snapshotDegraded
+    ? persistedStage
+    : deriveStage(counts, snapshot, persistedStage, baitOwned);
   const coalMet = coalTargetMet(counts);
   const fishMet = fishTargetMet(counts);
   const cookMetAdvance = cookTargetMet(counts, snapshot.inventory);
@@ -1044,7 +1082,7 @@ export function evaluatePlaybook(
   // Snap back to the first unmet hard-gate stage (real counts only).
   // Busy-cycle estimates must never keep a bot ahead of unfinished prior stages.
   let snapBackReason: string | undefined;
-  if (!coalMet) {
+  if (!snapshotDegraded && !coalMet) {
     if (persistedIdx > STAGE_ORDER.indexOf('mine_coal')) {
       snapBackReason =
         `coal gate: snapped back from ${persisted.stage} to mine_coal ` +
@@ -1052,6 +1090,7 @@ export function evaluatePlaybook(
     }
     stage = 'mine_coal';
   } else if (
+    !snapshotDegraded &&
     !fishMet &&
     persistedIdx > STAGE_ORDER.indexOf('fish_cod') &&
     !(huntMet && persistedStage === 'hunt_battle_batch')
@@ -1068,12 +1107,16 @@ export function evaluatePlaybook(
       stage = 'fish_cod';
       baitOwned = true;
     }
-  } else if (!cookMet && persistedIdx > STAGE_ORDER.indexOf('cook_cod')) {
+  } else if (!snapshotDegraded && !cookMet && persistedIdx > STAGE_ORDER.indexOf('cook_cod')) {
     snapBackReason =
       `cook gate: snapped back from ${persisted.stage} to cook_cod ` +
       `(cookedCod=${counts.cookedCod}/${COOK_MIN})`;
     stage = 'cook_cod';
-  } else if (!huntMet && persistedIdx > STAGE_ORDER.indexOf('hunt_battle_batch')) {
+  } else if (
+    !snapshotDegraded &&
+    !huntMet &&
+    persistedIdx > STAGE_ORDER.indexOf('hunt_battle_batch')
+  ) {
     snapBackReason =
       `hunt gate: snapped back from ${persisted.stage} to hunt_battle_batch ` +
       `(huntBattles=${huntBattleCount(counts)}/${HUNT_MIN})`;
@@ -1085,29 +1128,30 @@ export function evaluatePlaybook(
   }
 
   // Auto-advance within sequence when real targets are met (no busy-cycle shortcuts).
-  if (stage === 'mine_coal' && coalMet) {
+  if (!snapshotDegraded && stage === 'mine_coal' && coalMet) {
     stage = 'sell_half';
   }
   if (
+    !snapshotDegraded &&
     stage === 'sell_half' &&
     (counts.sells >= 1 || canSkipSellHalfForQuestFunding(snapshot))
   ) {
     stage = 'buy_bait';
   }
-  if (stage === 'buy_bait' && trustHasBait(snapshot, baitOwned, stage)) {
+  if (!snapshotDegraded && stage === 'buy_bait' && trustHasBait(snapshot, baitOwned, stage)) {
     stage = 'fish_cod';
     baitOwned = true;
   }
-  if (stage === 'fish_cod' && fishMet) {
+  if (!snapshotDegraded && stage === 'fish_cod' && fishMet) {
     stage = 'cook_cod';
   }
-  if (stage === 'cook_cod' && cookMetAdvance) stage = 'hunt_battle_batch';
+  if (!snapshotDegraded && stage === 'cook_cod' && cookMetAdvance) stage = 'hunt_battle_batch';
   // Legacy: persisted sell_extras (removed from STAGE_ORDER) → hunt when cook met.
-  if (stage === 'sell_extras' && cookMet && !huntMet) {
+  if (!snapshotDegraded && stage === 'sell_extras' && cookMet && !huntMet) {
     stage = 'hunt_battle_batch';
   }
   // Hunt target met → loop batch (pets are async; never block on manage_pets).
-  if (stage === 'hunt_battle_batch' && huntMet) {
+  if (!snapshotDegraded && stage === 'hunt_battle_batch' && huntMet) {
     if (counts.mapPeeks < 1 && counts.batchCycles === 0) {
       stage = 'explore_map';
     } else {
@@ -1167,11 +1211,14 @@ export function evaluatePlaybook(
   const baitStock =
     (snapshot.inventory['Cheap Bait'] ?? 0) + (snapshot.inventory['Bait'] ?? 0);
   // Trust recent purchase during cooldown — scrape often undercounts after buy_bait.
-  const needsBaitRestockNow = shouldPreferBaitRestock(
-    stage,
-    baitStock,
-    persisted.lastBaitPurchaseAt,
+  const baitUntrusted = baitCountLooksLikePresenceFallback(
+    snapshot.inventory,
+    Boolean(snapshot.flags.snapshotDegraded || snapshot.flags.baitCountUntrusted),
   );
+  const needsBaitRestockNow =
+    !snapshotDegraded &&
+    !baitUntrusted &&
+    shouldPreferBaitRestock(stage, baitStock, persisted.lastBaitPurchaseAt);
   if (needsBaitRestockNow) {
     preferredActions = [
       'buy_bait',
@@ -1303,7 +1350,7 @@ export function evaluatePlaybook(
 
   savePersisted({
     version: 1,
-    stage,
+    stage: snapshotDegraded ? persistedStage : stage,
     counts,
     baitOwned,
     lastBaitPurchaseAt: persisted.lastBaitPurchaseAt,
@@ -1316,6 +1363,8 @@ export function evaluatePlaybook(
     lastCoalProgressSeen: staleTrack.lastCoalProgressSeen,
     staleCoalBusyCycles: staleTrack.staleCoalBusyCycles,
     questTalkNoActionCycles: questTalkNoActionCyclesNext,
+    questTalkSkipCycles,
+    questTalkNoActionByTitle: persisted.questTalkNoActionByTitle ?? {},
   });
 
   return {
@@ -1447,10 +1496,22 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
   let lastCoalProgressSeen = persisted.lastCoalProgressSeen;
   let staleCoalBusyCycles = persisted.staleCoalBusyCycles ?? 0;
   let questTalkNoActionCycles = persisted.questTalkNoActionCycles ?? 0;
+  let questTalkSkipCycles = { ...(persisted.questTalkSkipCycles ?? {}) };
+  let questTalkNoActionByTitle = { ...(persisted.questTalkNoActionByTitle ?? {}) };
   if (action === 'quest_talk_accept') {
     // action is AutopilotContext.lastAction for this cycle.
     if (/talk:no_action|no_action/i.test(outcome)) {
       questTalkNoActionCycles = QUEST_TALK_NO_ACTION_COOLDOWN;
+      const titleMatch = outcome.match(/talk:no_action:([^:]+)$/i);
+      if (titleMatch?.[1]) {
+        const key = normalizeQuestTitleKey(titleMatch[1]);
+        const failures = (questTalkNoActionByTitle[key] ?? 0) + 1;
+        questTalkNoActionByTitle[key] = failures;
+        if (failures >= QUEST_TALK_NO_ACTION_PER_TITLE) {
+          questTalkSkipCycles[key] = QUEST_TALK_SKIP_CYCLES;
+          questTalkNoActionByTitle[key] = 0;
+        }
+      }
     } else {
       questTalkNoActionCycles = 0;
     }
@@ -1482,7 +1543,15 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
     lastCoalProgressSeen,
     staleCoalBusyCycles,
     questTalkNoActionCycles,
+    questTalkSkipCycles,
+    questTalkNoActionByTitle,
   });
+}
+
+export function shouldSkipQuestTalkTitle(title: string): boolean {
+  const persisted = loadPersisted();
+  const key = normalizeQuestTitleKey(title);
+  return (persisted.questTalkSkipCycles?.[key] ?? 0) > 0;
 }
 
 
@@ -1518,6 +1587,16 @@ export function filterAllowedByPlaybook(
   playbook: PlaybookProgress,
 ): AutopilotAction[] {
   if (!playbook.enabled || playbook.complete) return allowed;
+
+  if (snapshot.flags.snapshotDegraded) {
+    const spendBlocked = new Set<AutopilotAction>([
+      'buy_bait',
+      'market_sell_half',
+      'sell_junk_for_gold',
+      'sell_junk',
+    ]);
+    return allowed.filter((action) => !spendBlocked.has(action));
+  }
 
   const resource = snapshot.currentAction?.resource ?? snapshot.currentAction?.label ?? '';
   const busy = Boolean(snapshot.currentAction?.busy || snapshot.flags.gatherBusy);
@@ -1584,11 +1663,13 @@ export function filterAllowedByPlaybook(
     (snapshot.inventory['Cheap Bait'] ?? 0) + (snapshot.inventory['Bait'] ?? 0);
   const baitCooldown = recentBaitPurchase(playbook.lastBaitPurchaseAt);
   // Scrape <15 alone must not force restock while purchase cooldown is active.
-  const needsBaitRestock = shouldPreferBaitRestock(
-    playbook.stage,
-    baitCount,
-    playbook.lastBaitPurchaseAt,
-  );
+  const needsBaitRestock =
+    !snapshot.flags.snapshotDegraded &&
+    !baitCountLooksLikePresenceFallback(
+      snapshot.inventory,
+      Boolean(snapshot.flags.baitCountUntrusted),
+    ) &&
+    shouldPreferBaitRestock(playbook.stage, baitCount, playbook.lastBaitPurchaseAt);
   const pastBuyBait = STAGE_ORDER.indexOf(playbook.stage) > STAGE_ORDER.indexOf('buy_bait');
   if (!needsBaitRestock && (baitTrusted || pastBuyBait || baitCooldown || playbook.baitOwned)) {
     next = next.filter((a) => a !== 'buy_bait');

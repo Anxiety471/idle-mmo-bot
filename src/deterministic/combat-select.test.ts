@@ -1040,7 +1040,7 @@ const COUNT_BADGES_NO_ALT = `<!DOCTYPE html>
   <div id="wrap" style="position:relative;width:980px;height:720px">
     <div style="position:absolute;top:80px;left:180px;width:160px;height:18px">ENEMIES NEARBY</div>
     <div id="duck" style="position:absolute;top:120px;left:180px;width:72px;height:72px">
-      <img alt="" src="/enemies/duck.png" style="width:0;height:0" />
+      <img alt="Duck" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" width="48" height="48" />
       <span>2</span>
     </div>
     <div id="goblin" style="position:absolute;top:120px;left:280px;width:72px;height:72px"><span>140</span></div>

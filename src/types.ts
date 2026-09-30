@@ -223,6 +223,10 @@ export interface GameSnapshot {
     gatherBusy: boolean;
     inBattle: boolean;
     sessionValid: boolean;
+    /** Inventory/combat scrape looked partial — avoid stage moves and gold spend this cycle. */
+    snapshotDegraded?: boolean;
+    /** Cheap Bait count may be a presence fallback (qty 1) while degraded. */
+    baitCountUntrusted?: boolean;
   };
 }
 

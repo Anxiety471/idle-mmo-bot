@@ -1,4 +1,5 @@
 import type { Page } from 'playwright';
+import { inventoryGridLocator } from '../browser/page-ready.js';
 
 /** Items the early playbook and sell flows care about. Longer names first for substring matching. */
 export const KNOWN_INV_ITEMS = [
@@ -393,7 +394,9 @@ function looksLikeInventorySlot(label: string, aria: string, title: string): boo
 }
 
 async function scrapeFromTooltips(page: Page, counts: Record<string, number>): Promise<void> {
-  const slots = page.locator('button:has(img), [role="button"]:has(img)');
+  const slots = onInventoryPage(page)
+    ? inventoryGridLocator(page)
+    : page.locator('button:has(img), [role="button"]:has(img)');
   const total = Math.min(await slots.count(), 72);
   for (let i = 0; i < total; i++) {
     const slot = slots.nth(i);
@@ -435,7 +438,7 @@ async function readDetailPanelText(page: Page): Promise<string> {
   return page.locator('body').innerText();
 }
 
-const TRACKED_INVENTORY_KEYS = ['Cooked Cod', 'Raw Cod', 'Coal Ore', 'Cheap Bait', 'Cod'] as const;
+const TRACKED_INVENTORY_KEYS = ['Cooked Cod', 'Raw Cod', 'Coal Ore', 'Cheap Bait'] as const;
 
 function envPositiveInt(name: string, fallback: number): number {
   const raw = process.env[name]?.trim();
@@ -448,10 +451,24 @@ function missingTrackedKeys(counts: Record<string, number>): string[] {
   return TRACKED_INVENTORY_KEYS.filter((key) => (counts[key] ?? 0) <= 0);
 }
 
+/** Exposed for tests — keys that trigger slot-click fallback on /inventory. */
+export function trackedInventoryKeysMissing(counts: Record<string, number>): string[] {
+  return missingTrackedKeys(counts);
+}
+
+function onInventoryPage(page: Page): boolean {
+  try {
+    return new URL(page.url()).pathname.includes('/inventory');
+  } catch {
+    return false;
+  }
+}
+
 async function scrapeFromSlotClicks(page: Page, counts: Record<string, number>): Promise<void> {
+  if (!onInventoryPage(page)) return;
   const deadline = Date.now() + envPositiveInt('INVENTORY_SLOT_CLICK_BUDGET_MS', 5000);
   const maxClicks = envPositiveInt('INVENTORY_SLOT_CLICK_MAX', 12);
-  const buttons = page.getByRole('button');
+  const buttons = inventoryGridLocator(page);
   const total = await buttons.count();
   let inspected = 0;
   for (let i = 0; i < total && inspected < maxClicks; i++) {
@@ -525,7 +542,7 @@ export function shouldReuseInventoryDomCache(
 /** Icon-heavy inventory: scrape attrs, image slugs, tooltips, and optional click-through detail panels. */
 export async function scrapeInventoryFromDom(
   page: Page,
-  options: { forceRefresh?: boolean } = {},
+  options: { forceRefresh?: boolean; allowSlotClicks?: boolean } = {},
 ): Promise<Record<string, number>> {
   inventoryScrapeCycle += 1;
   const refreshEvery = envPositiveInt('INVENTORY_SCRAPE_REFRESH_CYCLES', 4);
@@ -544,9 +561,11 @@ export async function scrapeInventoryFromDom(
   mergeCounts(counts, await scrapeStaticDom(page));
   await scrapeFromTooltips(page, counts).catch(() => undefined);
 
-  const slotClicksEnabled = process.env.INVENTORY_SLOT_CLICKS === '1';
-  const needsClickScrape = missingTrackedKeys(counts).length > 0;
-  if (slotClicksEnabled || needsClickScrape) {
+  const slotClicksEnabled =
+    options.allowSlotClicks !== false &&
+    (process.env.INVENTORY_SLOT_CLICKS === '1' || onInventoryPage(page));
+  const needsClickScrape = onInventoryPage(page) && missingTrackedKeys(counts).length > 0;
+  if (slotClicksEnabled && needsClickScrape) {
     await scrapeFromSlotClicks(page, counts).catch(() => undefined);
   }
 

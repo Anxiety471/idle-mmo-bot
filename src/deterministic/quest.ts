@@ -315,7 +315,27 @@ export async function navigateToQuestsInterrupting(
 const KNOWN_ACCEPT_DIALOGUES = [
   "Right. I'll fetch the logs.",
   "I'll help with the hearth.",
+  "Fine. I'll find your rabbit feet.",
 ] as const;
+
+const GENERIC_ACCEPT_REPLY_PATTERN =
+  /^(Fine|Right|Sure|Okay|I'll|Alright|Yes)\b/i;
+
+/** Pick the best accept/turn-in dialogue line from visible reply buttons. */
+export async function pickGenericQuestReply(page: Page): Promise<string | undefined> {
+  const buttons = page.getByRole('button');
+  const count = await buttons.count();
+  const candidates: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const label = (await buttons.nth(i).innerText().catch(() => '')).trim();
+    if (!label || /^(Talk|Overview|Turn In|Accept|Close|Cancel)$/i.test(label)) continue;
+    if (/^(Dismiss|Leave|Back)$/i.test(label)) continue;
+    candidates.push(label);
+  }
+  if (candidates.length === 0) return undefined;
+  const matched = candidates.find((line) => GENERIC_ACCEPT_REPLY_PATTERN.test(line));
+  return matched ?? candidates[candidates.length - 1];
+}
 
 async function clickDialogueLine(page: Page, line: string): Promise<boolean> {
   const option = page
@@ -353,6 +373,11 @@ export async function talkQuest(
     if (await clickDialogueLine(page, line)) {
       return 'talked';
     }
+  }
+
+  const generic = await pickGenericQuestReply(page);
+  if (generic && await clickDialogueLine(page, generic)) {
+    return 'talked';
   }
 
   const talkStillVisible = await page.getByRole('button', { name: 'Talk', exact: true }).count();

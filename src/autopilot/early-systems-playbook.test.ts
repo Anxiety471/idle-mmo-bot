@@ -3,6 +3,12 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import { getLogDir } from '../logging/jsonl-writer.js';
+import {
+  emptySnapshotHealthState,
+  recordRawCodBagRead,
+  resetSnapshotHealthStateForTest,
+  setSnapshotHealthState,
+} from '../snapshot/snapshot-health.js';
 import type { AutopilotContext, GameSnapshot, GatherState } from '../types.js';
 import {
   coalTargetMet,
@@ -1840,6 +1846,11 @@ describe('stale rawCod cook_cod recovery', () => {
   });
 
   it('clamps soft rawCod to 0 when bag has no Cod/Raw Cod', () => {
+    resetSnapshotHealthStateForTest();
+    let health = emptySnapshotHealthState();
+    health = recordRawCodBagRead(health, 0);
+    health = recordRawCodBagRead(health, 0);
+    setSnapshotHealthState(health);
     statePath = join('/tmp', `playbook-stale-rawcod-clamp-${Date.now()}.json`);
     process.env.PLAYBOOK_STATE_PATH = statePath;
     process.env.EARLY_PLAYBOOK = 'true';

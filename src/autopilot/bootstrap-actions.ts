@@ -63,6 +63,7 @@ import {
   getPlaybookFromSnapshot,
   recentBaitPurchase,
   shouldPreferBaitRestock,
+  shouldSkipQuestTalkTitle,
 } from './early-systems-playbook.js';
 import { enemyBacklogTotal, pollUntilHuntStop, shouldSkipHuntMore } from '../jev/hunt-cap.js';
 import {
@@ -342,7 +343,12 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
   let inventoryForCookGate = inventoryAfterCookedCodSpend(ctx.snapshot.inventory, cookedSpent);
   if (shouldRefreshCookGateAfterFight(worstCaseCooked, huntCookFloor)) {
     invalidateInventoryDomCache();
-    const freshInventory = await scrapeInventoryFromDom(page).catch(() => null);
+    const returnPath = new URL(page.url()).pathname;
+    await navigateTo(page, ctx.config, '/inventory');
+    const freshInventory = await scrapeInventoryFromDom(page, { forceRefresh: true }).catch(() => null);
+    if (!returnPath.includes('/inventory')) {
+      await navigateTo(page, ctx.config, returnPath.includes('/combat') ? '/combat/battle' : returnPath);
+    }
     if (freshInventory) {
       inventoryForCookGate = inventoryAfterCookedCodSpend(freshInventory, cookedSpent);
     } else {
@@ -483,6 +489,10 @@ async function questTalkAccept(
   pendingQuests: SnapshotQuest[],
   interruptGather = false,
 ): Promise<string> {
+  const eligible = pendingQuests.filter((q) => !shouldSkipQuestTalkTitle(q.title));
+  if (eligible.length === 0) {
+    return 'quest_talk_skipped_backoff';
+  }
   let nav: 'ok' | 'blocked' = 'ok';
   if (interruptGather) {
     nav = await navigateToQuestsInterrupting(page, config);
@@ -499,9 +509,15 @@ async function questTalkAccept(
     return 'pending_tab_missing';
   }
 
-  const { opened, title } = await openPendingQuestCard(page, config, pendingQuests);
+  let { opened, title } = await openPendingQuestCard(page, config, eligible);
   if (!opened) {
-    return 'card_not_opened';
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await waitForQuestTabsSettled(page);
+    await switchQuestTab(page, 'Pending Nearby');
+    ({ opened, title } = await openPendingQuestCard(page, config, eligible));
+    if (!opened) {
+      return 'card_not_opened';
+    }
   }
 
   if (!(await waitForQuestDetail(page))) {
@@ -510,7 +526,7 @@ async function questTalkAccept(
 
   const talkResult = await talkQuest(page, title ? getQuestDialogueLine(title) : undefined);
   if (talkResult === 'no_action') {
-    return 'talk:no_action';
+    return title ? `talk:no_action:${title}` : 'talk:no_action';
   }
 
   if (await isTurnInEnabled(page)) {
