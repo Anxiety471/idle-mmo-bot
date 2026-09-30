@@ -1019,7 +1019,32 @@ export function pickBattleEnemy(
   return best;
 }
 
-/** Preferred target first, then remaining tiles by descending stack size. */
+/**
+ * Like pickBattleEnemy, but when every tile is restrictive (error-border — e.g. the
+ * CHARACTER_HEALTH_TOO_LOW gate marks all tiles) fall back to the largest real stack so
+ * the modal opens and healBeforeBattleIfNeeded can feed. Never returns a qty-0 tile.
+ */
+export function pickBattleEnemyWithFallback(
+  enemies: EnemyInfo[],
+  options: PickBattleEnemyOptions = {},
+): { enemy?: EnemyInfo; allRestrictive: boolean } {
+  const ready = pickBattleEnemy(enemies, options);
+  if (ready) return { enemy: ready, allRestrictive: false };
+  const stacks = enemies.filter((e) => enemyStackSize(e) >= 1);
+  if (stacks.length === 0) return { allRestrictive: false };
+  let best = stacks[0];
+  for (const e of stacks) if (enemyStackSize(e) > enemyStackSize(best)) best = e;
+  return { enemy: best, allRestrictive: true };
+}
+
+/** One-line enemy list for logs (name:qty, restrictive flag). */
+export function describeEnemyList(enemies: EnemyInfo[]): string {
+  if (enemies.length === 0) return '(none)';
+  return enemies
+    .map((e) => `${e.name}:${e.quantity ?? '?'}${e.restrictive ? '(restrictive)' : ''}`)
+    .join(', ');
+}
+
 /**
  * Enemies whose Battle click ended pending_verify recently. They go to the back of the
  * target order for a few rounds so one stuck stack (e.g. Max on Goblin King) cannot
@@ -1070,14 +1095,15 @@ export async function isQueuedBattleIndicatorVisible(page: Page): Promise<boolea
   return false;
 }
 
+/** Preferred target first, then remaining real stacks by descending size. */
 export function battleTargetsInOrder(
   enemies: EnemyInfo[],
   options: PickBattleEnemyOptions = {},
 ): EnemyInfo[] {
-  const preferred = pickBattleEnemy(enemies, options);
+  const preferred = pickBattleEnemyWithFallback(enemies, options).enemy;
   if (!preferred) return [];
   const rest = enemies
-    .filter((enemy) => enemy.index !== preferred.index)
+    .filter((enemy) => enemy.index !== preferred.index && enemyStackSize(enemy) >= 1)
     .sort((a, b) => enemyStackSize(b) - enemyStackSize(a));
   return [preferred, ...rest];
 }

@@ -32,6 +32,8 @@ import {
   battleMonitorWallClockMs,
   runAway,
   huntMore,
+  pickBattleEnemyWithFallback,
+  describeEnemyList,
   isFightInProgress,
   openQuest,
   talkQuest,
@@ -251,8 +253,22 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
     return combatRoundOutcome(`failed:unexpected_hunt_state:${huntResult}`, config);
   }
 
-  const enemy = pickBattleEnemy(huntState.enemies);
-  if (!enemy) return combatRoundOutcome('stop:no_enemies', config);
+  const picked = pickBattleEnemyWithFallback(huntState.enemies);
+  const enemy = picked.enemy;
+  if (!enemy) {
+    // Nothing fightable: log what was on screen, then go back to hunting instead of
+    // returning stop:no_enemies every cycle.
+    console.log(
+      `[combat] no battle target — enemy list: ${describeEnemyList(huntState.enemies)}; restarting hunt`,
+    );
+    const again = await huntMore(page, allowInterrupt).catch(() => 'failed' as const);
+    return combatRoundOutcome(`stop:no_enemies:huntMore:${again}`, config);
+  }
+  if (picked.allRestrictive) {
+    console.log(
+      `[combat] every enemy tile is restrictive (${describeEnemyList(huntState.enemies)}) — opening ${enemy.name} so the heal gate can run`,
+    );
+  }
   const maxEnemies = DETERMINISTIC_MAX_ENEMIES;
   const stance = deterministicStance(enemy.name);
   console.log(`[combat] deterministic battle config max=full-stack stance=${stance} (no Jev)`);
