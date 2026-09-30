@@ -24,6 +24,12 @@ import { getLogDir } from './logging/jsonl-writer.js';
 import { setLogContext } from './logging/log-context.js';
 import { readGameSnapshot } from './snapshot/read-snapshot.js';
 import {
+  CycleWatchdogTimeout,
+  executeWatchdogMs,
+  snapshotWatchdogMs,
+  withCycleWatchdog,
+} from './autopilot/cycle-watchdog.js';
+import {
   actionInvalidatesInventoryCache,
   invalidateInventoryDomCache,
 } from './snapshot/inventory-scrape.js';
@@ -162,8 +168,18 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
 
         let snapshot;
         try {
-          snapshot = await readGameSnapshot(session.page, config);
-          const discovered = await discoverFeatures(session.page);
+          const read = await withCycleWatchdog(
+            (async () => {
+              const snap = await readGameSnapshot(session.page, config);
+              const disc = await discoverFeatures(session.page);
+              return { snap, disc };
+            })(),
+            snapshotWatchdogMs(),
+            `snapshot cycle=${context.cycle}`,
+            () => closeBrowserSessionWithTimeout(session).then(() => undefined),
+          );
+          snapshot = read.snap;
+          const discovered = read.disc;
           snapshot = mergeDiscoveryIntoSnapshot(snapshot, discovered);
           logDiscoveries(discovered, context.cycle);
           const playbook = evaluatePlaybook(snapshot, context);
@@ -172,7 +188,7 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           console.error(`[autopilot] snapshot failed: ${message}`);
-          if (shouldRelaunchBrowserAfterError(message)) {
+          if (error instanceof CycleWatchdogTimeout || shouldRelaunchBrowserAfterError(message)) {
             relaunchReason = message;
           }
           await sleep(sessionRelaunchMs);
@@ -238,15 +254,30 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
 
         let result;
         try {
-          result = await executeAction(action, session.page, config, supervisor, {
-            snapshot,
-            forceInterrupt: options.forceInterrupt,
-            junkItems,
-            context,
-          });
+          result = await withCycleWatchdog(
+            executeAction(action, session.page, config, supervisor, {
+              snapshot,
+              forceInterrupt: options.forceInterrupt,
+              junkItems,
+              context,
+            }),
+            executeWatchdogMs(),
+            `execute ${action} cycle=${context.cycle}`,
+            () => closeBrowserSessionWithTimeout(session).then(() => undefined),
+          );
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           console.error(`[autopilot] execute ${action} error: ${message}`);
+          if (error instanceof CycleWatchdogTimeout) {
+            // Browser already closed by the watchdog; record the cycle, then relaunch.
+            notePlaybookOutcome(action, 'watchdog_timeout');
+            await logDecision(snapshot, context, allowed, action, {
+              action,
+              outcome: 'watchdog_timeout',
+            }).catch(() => undefined);
+            relaunchReason = message;
+            break;
+          }
           if (shouldRelaunchBrowserAfterError(message)) {
             relaunchReason = message;
             break;
