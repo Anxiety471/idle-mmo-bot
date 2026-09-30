@@ -26,9 +26,12 @@ export function snapshotWatchdogMs(): number {
   return envMs('CYCLE_SNAPSHOT_WATCHDOG_MS', 8 * 60_000);
 }
 
-/** One action budget: hunt poll (bounded at HUNT_POLL_MAX_MS, 60 min) + battle + slack. */
+/**
+ * One action budget. Worst legitimate hunt_battle_batch cycle: hunt poll (HUNT_POLL_MAX_MS,
+ * 60 min) + battle monitor (up to 4 × 15 min = 60 min) + snapshot/verify slack.
+ */
 export function executeWatchdogMs(): number {
-  return envMs('CYCLE_EXECUTE_WATCHDOG_MS', 90 * 60_000);
+  return envMs('CYCLE_EXECUTE_WATCHDOG_MS', 150 * 60_000);
 }
 
 export async function withCycleWatchdog<T>(
