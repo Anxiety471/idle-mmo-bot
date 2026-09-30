@@ -1056,12 +1056,13 @@ export function deprioritizeBackedOffTargets(ordered: EnemyInfo[], backedOff: Se
 }
 
 /**
- * A battle is already running/queued for this character: the sidebar battle widget
- * ("Next enemy in 0:03") or the queued-battle enemy modal copy. Tile clicks then open a
- * queue-variant modal that the normal detail-panel check does not recognise.
+ * A battle is already running for this character, so tile clicks open the queue-variant
+ * enemy modal ("Food cannot be added to queued battles…") that the normal detail-panel
+ * check does not recognise. Only that modal copy counts: the sidebar "Next enemy in"
+ * line also shows while merely Hunting, so it is not a battle signal.
  */
 export async function isQueuedBattleIndicatorVisible(page: Page): Promise<boolean> {
-  const markers = [/Next enemy in\s*\d/i, /Food cannot be added to queued battles/i];
+  const markers = [/Food cannot be added to queued battles/i];
   for (const marker of markers) {
     const loc = page.getByText(marker).filter({ visible: true }).first();
     if ((await loc.count().catch(() => 0)) > 0) return true;
@@ -2902,7 +2903,7 @@ export async function configureAndBattle(
   if ((await isFightInProgress(page)) || (await isQueuedBattleIndicatorVisible(page))) {
     // A fight is already running: tiles would open the queue-variant modal and look
     // "not opened". Wait for it instead of walking every tile into battle:failed.
-    console.log('[combat] battle already running (Run Away / queued-battle widget) — not opening enemy tiles');
+    console.log('[combat] battle already running (Run Away / queued-battle modal) — not opening enemy tiles');
     return 'battle_in_progress';
   }
   const tiles = await collectEnemyTiles(page);
@@ -2955,7 +2956,7 @@ export async function configureAndBattle(
         .screenshot({ path: join(getLogDir(), `enemy-tile-fail-${Date.now()}.png`), fullPage: true })
         .catch(() => undefined);
       if (await isQueuedBattleIndicatorVisible(page)) {
-        console.log('[combat] queued-battle modal/widget visible — a battle is already running; waiting');
+        console.log('[combat] queued-battle modal visible — a battle is already running; waiting');
         await closeBattleEntityModal(page);
         return 'battle_in_progress';
       }

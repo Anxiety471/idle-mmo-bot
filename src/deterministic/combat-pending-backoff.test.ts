@@ -55,8 +55,9 @@ function textPage(visibleTexts: string[]): Page {
 }
 
 describe('isQueuedBattleIndicatorVisible', () => {
-  it('detects the sidebar battle widget and the queued-battle modal copy', async () => {
-    assert.equal(await isQueuedBattleIndicatorVisible(textPage(['Next enemy in 0:03'])), true);
+  it('detects the queued-battle modal copy but not the hunting sidebar line', async () => {
+    // "Next enemy in" also shows while merely Hunting — must not block battles.
+    assert.equal(await isQueuedBattleIndicatorVisible(textPage(['Hunting', 'Next enemy in 0:14'])), false);
     assert.equal(
       await isQueuedBattleIndicatorVisible(
         textPage(['Food cannot be added to queued battles. You can only add food at the start of a battle.']),
