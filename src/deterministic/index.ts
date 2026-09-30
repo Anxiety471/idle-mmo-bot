@@ -46,6 +46,8 @@ export {
   hasEnemySelectionReady,
   hasPostHuntEnemySelectionReady,
   pickBattleEnemy,
+  pickBattleEnemyWithFallback,
+  describeEnemyList,
   enemyNameFromImageSrc,
   isIdleBattleScreen,
   isIdleBattleText,

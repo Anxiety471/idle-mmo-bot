@@ -30,6 +30,14 @@ import {
   withCycleWatchdog,
 } from './autopilot/cycle-watchdog.js';
 import {
+  installConsoleProgressHook,
+  markProgress,
+  msSinceProgress,
+  noProgressWatchdogMs,
+  startLivenessMonitor,
+  writeHeartbeat,
+} from './autopilot/liveness.js';
+import {
   actionInvalidatesInventoryCache,
   invalidateInventoryDomCache,
 } from './snapshot/inventory-scrape.js';
@@ -129,6 +137,12 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
   }
 
   const sessionRelaunchMs = Math.max(config.pollMs * 6, 30_000);
+  installConsoleProgressHook();
+  const stopLiveness = startLivenessMonitor(getLogDir());
+  const noProgress = { limitMs: noProgressWatchdogMs(), sinceProgress: () => msSinceProgress() };
+  console.log(
+    `[autopilot] watchdogs: execute cap=${Math.round(executeWatchdogMs() / 60_000)}m no-progress=${Math.round(noProgress.limitMs / 60_000)}m`,
+  );
 
   while (!shuttingDown) {
     const session = await launchBrowser(config);
@@ -160,6 +174,8 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
         }
 
         context.cycle++;
+        markProgress();
+        writeHeartbeat(getLogDir(), { cycle: context.cycle });
         setLogContext({
           cycle: context.cycle,
           accountSlug: context.accountSlug,
@@ -177,6 +193,7 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
             snapshotWatchdogMs(),
             `snapshot cycle=${context.cycle}`,
             () => closeBrowserSessionWithTimeout(session).then(() => undefined),
+            noProgress,
           );
           snapshot = read.snap;
           const discovered = read.disc;
@@ -264,6 +281,7 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
             executeWatchdogMs(),
             `execute ${action} cycle=${context.cycle}`,
             () => closeBrowserSessionWithTimeout(session).then(() => undefined),
+            noProgress,
           );
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -315,6 +333,7 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
       }
     }
   }
+  stopLiveness();
 }
 
 export type AutopilotOptions = RunAutopilotOptions;

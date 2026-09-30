@@ -10,6 +10,8 @@ import {
   inventoryHasBattleFood,
   needsCookBeforeHunt,
   battleTargetsInOrder,
+  pickBattleEnemyWithFallback,
+  describeEnemyList,
   describeBattleControlDisabled,
   findFoodAddButton,
   healFoodRank,
@@ -623,6 +625,47 @@ describe('isHuntInProgressFromSnapshot', () => {
         currentAction: { busy: false, type: 'HUNTING' },
       }),
       false,
+    );
+  });
+});
+
+describe('pickBattleEnemyWithFallback (round 6 stop:no_enemies)', () => {
+  it('uses a ready tile when one exists', () => {
+    const r = pickBattleEnemyWithFallback([
+      { name: 'Goblin King', index: 0, quantity: 120, restrictive: true },
+      { name: 'Goblin', index: 1, quantity: 40 },
+    ]);
+    assert.equal(r.enemy?.name, 'Goblin');
+    assert.equal(r.allRestrictive, false);
+  });
+
+  it('falls back to the largest stack when every tile is restrictive (low HP)', () => {
+    const r = pickBattleEnemyWithFallback([
+      { name: 'Duck', index: 0, quantity: 3, restrictive: true },
+      { name: 'Rabbit', index: 1, quantity: 9, restrictive: true },
+    ]);
+    assert.equal(r.enemy?.name, 'Rabbit');
+    assert.equal(r.allRestrictive, true);
+  });
+
+  it('never picks a qty-0 tile and returns undefined for an empty list', () => {
+    assert.equal(pickBattleEnemyWithFallback([{ name: 'Duck', index: 0, quantity: 0 }]).enemy, undefined);
+    assert.equal(pickBattleEnemyWithFallback([]).enemy, undefined);
+  });
+
+  it('battleTargetsInOrder is never empty when a restrictive stack exists', () => {
+    const order = battleTargetsInOrder([
+      { name: 'Duck', index: 0, quantity: 3, restrictive: true },
+      { name: 'Rabbit', index: 1, quantity: 0 },
+    ]);
+    assert.deepEqual(order.map((e) => e.name), ['Duck']);
+  });
+
+  it('describes the enemy list for logs', () => {
+    assert.equal(describeEnemyList([]), '(none)');
+    assert.equal(
+      describeEnemyList([{ name: 'Duck', index: 0, quantity: 3, restrictive: true }]),
+      'Duck:3(restrictive)',
     );
   });
 });
