@@ -1500,7 +1500,7 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
   let questTalkNoActionByTitle = { ...(persisted.questTalkNoActionByTitle ?? {}) };
   if (action === 'quest_talk_accept') {
     // action is AutopilotContext.lastAction for this cycle.
-    if (/talk:no_action|no_action/i.test(outcome)) {
+    if (/talk:no_action|no_action|skipped_backoff/i.test(outcome)) {
       questTalkNoActionCycles = QUEST_TALK_NO_ACTION_COOLDOWN;
       const titleMatch = outcome.match(/talk:no_action:([^:]+)$/i);
       if (titleMatch?.[1]) {
@@ -1514,6 +1514,11 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
       }
     } else {
       questTalkNoActionCycles = 0;
+      // Real progress (talk:talked / turned_in) clears per-quest backoff state.
+      if (/^talk:talked/i.test(outcome)) {
+        questTalkNoActionByTitle = {};
+        questTalkSkipCycles = {};
+      }
     }
   }
   if (action === 'mine_coal' && /restarted|already_busy/i.test(outcome)) {

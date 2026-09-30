@@ -2,6 +2,8 @@ import type { Page } from 'playwright';
 import type { AppConfig } from '../config.js';
 import type { HuntState } from '../types.js';
 import { navigateTo } from '../browser.js';
+import { waitForPageReady } from '../browser/page-ready.js';
+import { inventoryReadLooksCollapsed } from '../snapshot/snapshot-health.js';
 import {
   restartSkillGather,
   readGatherState,
@@ -344,10 +346,26 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
   if (shouldRefreshCookGateAfterFight(worstCaseCooked, huntCookFloor)) {
     invalidateInventoryDomCache();
     const returnPath = new URL(page.url()).pathname;
-    await navigateTo(page, ctx.config, '/inventory');
-    const freshInventory = await scrapeInventoryFromDom(page, { forceRefresh: true }).catch(() => null);
-    if (!returnPath.includes('/inventory')) {
-      await navigateTo(page, ctx.config, returnPath.includes('/combat') ? '/combat/battle' : returnPath);
+    let freshInventory: Record<string, number> | null = null;
+    try {
+      await navigateTo(page, ctx.config, '/inventory');
+      await waitForPageReady(page, 'inventory');
+      freshInventory = await scrapeInventoryFromDom(page, { forceRefresh: true }).catch(() => null);
+    } catch (err) {
+      console.log(`[combat] post-fight inventory read failed: ${(err as Error).message}`);
+    } finally {
+      if (!returnPath.includes('/inventory')) {
+        await navigateTo(
+          page,
+          ctx.config,
+          returnPath.includes('/combat') ? '/combat/battle' : returnPath,
+        ).catch(() => undefined);
+      }
+    }
+    // A partial/blank grid (slow render) must not drive the cook gate to 0.
+    if (freshInventory && inventoryReadLooksCollapsed(ctx.snapshot.inventory, freshInventory)) {
+      console.log('[combat] post-fight inventory read looks collapsed — using worst-case estimate');
+      freshInventory = null;
     }
     if (freshInventory) {
       inventoryForCookGate = inventoryAfterCookedCodSpend(freshInventory, cookedSpent);
@@ -511,7 +529,8 @@ async function questTalkAccept(
 
   let { opened, title } = await openPendingQuestCard(page, config, eligible);
   if (!opened) {
-    await page.reload({ waitUntil: 'domcontentloaded' });
+    console.log('[quest] card_not_opened — reloading quests page once');
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => undefined);
     await waitForQuestTabsSettled(page);
     await switchQuestTab(page, 'Pending Nearby');
     ({ opened, title } = await openPendingQuestCard(page, config, eligible));

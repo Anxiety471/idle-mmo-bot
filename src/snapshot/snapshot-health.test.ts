@@ -9,6 +9,7 @@ import {
   MAX_CONSECUTIVE_DEGRADED,
   rawCodZeroConfirmed,
   recordRawCodBagRead,
+  type SnapshotHealthState,
 } from './snapshot-health.js';
 
 describe('snapshot-health inventory sanity', () => {
@@ -84,7 +85,7 @@ describe('snapshot-health degraded is bounded', () => {
   };
 
   it('accepts a persistent collapsed read after MAX_CONSECUTIVE_DEGRADED cycles', () => {
-    let state = { ...emptySnapshotHealthState(), lastInventory: { ...full } };
+    let state: SnapshotHealthState = { ...emptySnapshotHealthState(), lastInventory: { ...full } };
     const flags: boolean[] = [];
     for (let i = 0; i < MAX_CONSECUTIVE_DEGRADED + 2; i++) {
       const r = applyInventorySanity(state, { 'Cheap Bait': 1 });
@@ -98,7 +99,7 @@ describe('snapshot-health degraded is bounded', () => {
   });
 
   it('good read resets the inventory streak', () => {
-    let state = { ...emptySnapshotHealthState(), lastInventory: { ...full } };
+    let state: SnapshotHealthState = { ...emptySnapshotHealthState(), lastInventory: { ...full } };
     state = applyInventorySanity(state, { 'Cheap Bait': 1 }).state;
     state = applyInventorySanity(state, full).state;
     assert.equal(state.inventoryDegradedStreak, 0);
