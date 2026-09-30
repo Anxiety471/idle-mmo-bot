@@ -2,6 +2,7 @@ import type { Page } from 'playwright';
 import type { AppConfig } from '../config.js';
 import type { HuntState } from '../types.js';
 import { navigateTo } from '../browser.js';
+import { normalizeQuestTitleKey } from '../snapshot/read-snapshot.js';
 import { waitForPageReady } from '../browser/page-ready.js';
 import { inventoryReadLooksCollapsed } from '../snapshot/snapshot-health.js';
 import {
@@ -288,6 +289,13 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
     return combatRoundOutcome('blocked:verify', config);
   }
 
+  if (battleResult === 'battle_in_progress') {
+    // Existing/queued fight (Run Away or sidebar "Next enemy in"): no tile walk, no
+    // Hunt More, no credit — the next cycle picks up once it ends.
+    takePackedBattleFood();
+    return combatRoundOutcome('battle:battle_in_progress:wait', config);
+  }
+
   if (battleResult === 'pending_verify') {
     // Stuck request / unverified accept: never credited. Reload resets is_processing;
     // the next cycle sees Run Away (monitored, not credited) or a clean screen.
@@ -299,9 +307,7 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
 
   const fightConfirmed =
     battleResult === 'battle_started' ||
-    (!fightActiveBeforeBattle &&
-      battleResult !== 'battle_in_progress' &&
-      (await isFightInProgress(page).catch(() => false)));
+    (!fightActiveBeforeBattle && (await isFightInProgress(page).catch(() => false)));
   if (fightConfirmed && battleResult !== 'battle_started') {
     console.log(
       `[combat] fight active after configureAndBattle=${battleResult} — treating as battle_started for outcome`,
@@ -501,16 +507,33 @@ async function openPendingQuestCard(
   return { opened: false };
 }
 
+function isTitleAccepted(title: string, acceptedQuests: SnapshotQuest[]): boolean {
+  const key = normalizeQuestTitleKey(title);
+  return acceptedQuests.some((q) => normalizeQuestTitleKey(q.title) === key);
+}
+
+/** Pending quests worth a talk: not already accepted and not in per-title backoff. */
+export function talkEligiblePendingQuests(
+  pendingQuests: SnapshotQuest[],
+  acceptedQuests: SnapshotQuest[] = [],
+): SnapshotQuest[] {
+  return pendingQuests.filter(
+    (q) => !isTitleAccepted(q.title, acceptedQuests) && !shouldSkipQuestTalkTitle(q.title),
+  );
+}
+
 async function questTalkAccept(
   page: Page,
   config: AppConfig,
   pendingQuests: SnapshotQuest[],
   interruptGather = false,
+  acceptedQuests: SnapshotQuest[] = [],
 ): Promise<string> {
-  const eligible = pendingQuests.filter((q) => !shouldSkipQuestTalkTitle(q.title));
+  const eligible = talkEligiblePendingQuests(pendingQuests, acceptedQuests);
   if (eligible.length === 0) {
     return 'quest_talk_skipped_backoff';
   }
+  const topTitle = rankPendingQuestForAccept(eligible)?.title ?? eligible[0]?.title;
   let nav: 'ok' | 'blocked' = 'ok';
   if (interruptGather) {
     nav = await navigateToQuestsInterrupting(page, config);
@@ -535,12 +558,17 @@ async function questTalkAccept(
     await switchQuestTab(page, 'Pending Nearby');
     ({ opened, title } = await openPendingQuestCard(page, config, eligible));
     if (!opened) {
-      return 'card_not_opened';
+      return topTitle ? `card_not_opened:${topTitle}` : 'card_not_opened';
     }
   }
 
+  if (title && isTitleAccepted(title, acceptedQuests)) {
+    // Opened card is a quest we already hold — talking again is a no-op, not progress.
+    return `already_accepted:${title}`;
+  }
+
   if (!(await waitForQuestDetail(page))) {
-    return 'detail_not_ready';
+    return title ? `detail_not_ready:${title}` : 'detail_not_ready';
   }
 
   const talkResult = await talkQuest(page, title ? getQuestDialogueLine(title) : undefined);
@@ -710,6 +738,12 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
       if (!ctx.snapshot.flags.sessionValid || ctx.snapshot.pendingQuests.length === 0) {
         return false;
       }
+      if (
+        talkEligiblePendingQuests(ctx.snapshot.pendingQuests, ctx.snapshot.acceptedQuests)
+          .length === 0
+      ) {
+        return false;
+      }
       const easyPending = hasEasyCompletePendingQuest(ctx.snapshot.pendingQuests);
       return gatherIdle(ctx) || easyPending;
     },
@@ -731,6 +765,7 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
           ctx.config,
           ctx.snapshot.pendingQuests,
           interruptGather || ctx.forceInterrupt,
+          ctx.snapshot.acceptedQuests,
         ),
       };
     },

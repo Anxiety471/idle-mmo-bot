@@ -589,7 +589,7 @@ export function bagHasRawCod(snapshot: GameSnapshot): boolean {
  * bag is empty and we are not actively fishing Cod, clamp soft rawCod down —
  * cooking consumes raw fish and a stale latch blocks fish_cod recovery.
  */
-const QUEST_TALK_NO_ACTION_PER_TITLE = 3;
+const QUEST_TALK_NO_ACTION_PER_TITLE = 2;
 const QUEST_TALK_SKIP_CYCLES = 5;
 
 function syncRawCodCount(
@@ -1515,9 +1515,11 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
   let questTalkNoActionByTitle = { ...(persisted.questTalkNoActionByTitle ?? {}) };
   if (action === 'quest_talk_accept') {
     // action is AutopilotContext.lastAction for this cycle.
-    if (/talk:no_action|no_action|skipped_backoff/i.test(outcome)) {
+    if (isQuestTalkFailureOutcome(outcome)) {
       questTalkNoActionCycles = QUEST_TALK_NO_ACTION_COOLDOWN;
-      const titleMatch = outcome.match(/talk:no_action:([^:]+)$/i);
+      const titleMatch = outcome.match(
+        /(?:talk:no_action|card_not_opened|detail_not_ready|already_accepted):([^:]+)$/i,
+      );
       if (titleMatch?.[1]) {
         const key = normalizeQuestTitleKey(titleMatch[1]);
         const failures = (questTalkNoActionByTitle[key] ?? 0) + 1;
@@ -1567,6 +1569,13 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
     questTalkSkipCycles,
     questTalkNoActionByTitle,
   });
+}
+
+/** quest_talk_accept outcomes that made no progress (arm cooldown / per-title backoff). */
+export function isQuestTalkFailureOutcome(outcome: string): boolean {
+  return /talk:no_action|no_action|skipped_backoff|card_not_opened|pending_tab_missing|detail_not_ready|already_accepted/i.test(
+    outcome,
+  );
 }
 
 export function shouldSkipQuestTalkTitle(title: string): boolean {

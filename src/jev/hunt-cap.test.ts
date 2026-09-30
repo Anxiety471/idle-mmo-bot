@@ -73,3 +73,19 @@ describe('isHuntHardStop', () => {
     }
   });
 });
+
+import { huntPollBoundReached } from './hunt-cap.js';
+
+describe('huntPollBoundReached', () => {
+  const base = { startedAt: 0, lastChangeAt: 0, maxMs: 60 * 60_000, staleMs: 15 * 60_000 };
+  it('stops after the wall-clock bound', () => {
+    assert.equal(huntPollBoundReached({ ...base, found: 50, lastChangeAt: 59 * 60_000, now: 61 * 60_000 }), 'wall_clock');
+  });
+  it('stops when Found is stuck (nonzero) past the stale bound', () => {
+    assert.equal(huntPollBoundReached({ ...base, found: 71, now: 16 * 60_000 }), 'stale');
+  });
+  it('keeps polling while Found moves inside the bounds', () => {
+    assert.equal(huntPollBoundReached({ ...base, found: 71, lastChangeAt: 10 * 60_000, now: 16 * 60_000 }), null);
+    assert.equal(huntPollBoundReached({ ...base, found: 0, now: 16 * 60_000 }), null);
+  });
+});

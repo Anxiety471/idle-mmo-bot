@@ -96,3 +96,51 @@ describe('parseQuestListLines', () => {
     ]);
   });
 });
+
+import { looksLikeQuestTitle, parseQuestCards } from './read-snapshot.js';
+
+describe('quest list timers / cooldown cards', () => {
+  it('never treats countdown strings as titles', () => {
+    for (const t of ['23:59:26', '21:00:18', '0:59', '3h 22m', '12m 5s', '750', '1,500']) {
+      assert.equal(looksLikeQuestTitle(t), false, t);
+    }
+    assert.equal(looksLikeQuestTitle('Scavengers of the Field'), true);
+  });
+
+  it('drops a pending card on cooldown (title, timer, objective) and keeps the rest', () => {
+    const text = `Pending Nearby 2
+Accepted
+Completed 3
+You are viewing quests in Bluebell Hollow. Travel to other places to find more quests!
+Scavengers of the Field
+
+23:57:18
+
+Goblin Scraps
+
+15 / 15
+ 750
+A Ducks Whisper
+
+Ducks Mouth
+
+25 / 25
+ 1,000
+Statistics`;
+    const quests = parseQuestListLines(text, 'pending');
+    assert.deepEqual(quests.map((q) => q.title), ['A Ducks Whisper']);
+  });
+
+  it('only-cooldown pending tab yields no quests (no timer title)', () => {
+    const text = `You are viewing quests in Bluebell Hollow.
+Scavengers of the Field
+23:57:18
+Goblin Scraps
+15 / 15
+ 750
+Statistics`;
+    assert.deepEqual(parseQuestListLines(text, 'pending'), []);
+    // No regex fallback may resurrect the objective ("Goblin Scraps") as a quest.
+    assert.deepEqual(parseQuestCards(text, 'pending'), []);
+  });
+});
