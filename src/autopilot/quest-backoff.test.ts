@@ -52,3 +52,42 @@ describe('quest_turnin failure cooldown', () => {
 
   });
 });
+
+import { isQuestTalkFailureOutcome } from './early-systems-playbook.js';
+import { talkEligiblePendingQuests } from './bootstrap-actions.js';
+
+describe('quest talk failure backoff (round 5)', () => {
+  it('card_not_opened twice skips that title; pending_tab_missing arms the global cooldown', () => {
+    const statePath = join('/tmp', `playbook-card-backoff-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    writeFileSync(statePath, JSON.stringify({ version: 1, stage: 'hunt_battle_batch', counts: {} }));
+    notePlaybookOutcome('quest_talk_accept', 'card_not_opened:Scavengers of the Field');
+    assert.equal(shouldSkipQuestTalkTitle('Scavengers of the Field'), false);
+    notePlaybookOutcome('quest_talk_accept', 'card_not_opened:Scavengers of the Field');
+    assert.equal(shouldSkipQuestTalkTitle('Scavengers of the Field'), true);
+    notePlaybookOutcome('quest_talk_accept', 'pending_tab_missing');
+    const state = JSON.parse(readFileSync(statePath, 'utf8'));
+    assert.ok(state.questTalkNoActionCycles > 0);
+    rmSync(statePath, { force: true });
+  });
+
+  it('classifies no-progress outcomes', () => {
+    for (const o of ['card_not_opened', 'card_not_opened:X', 'pending_tab_missing', 'already_accepted:X', 'detail_not_ready:X', 'talk:no_action:X']) {
+      assert.equal(isQuestTalkFailureOutcome(o), true, o);
+    }
+    assert.equal(isQuestTalkFailureOutcome('talk:talked'), false);
+  });
+
+  it('excludes already-accepted quests from talk eligibility', () => {
+    const statePath = join('/tmp', `playbook-eligible-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    writeFileSync(statePath, JSON.stringify({ version: 1, stage: 'hunt_battle_batch', counts: {} }));
+    const pending = [
+      { title: 'Scavengers of the Field', progress: '15 / 15', canTurnIn: false, tab: 'pending' as const },
+      { title: 'A Ducks Whisper', progress: '25 / 25', canTurnIn: false, tab: 'pending' as const },
+    ];
+    const accepted = [{ title: 'Scavengers of the Field', progress: '15 / 15', canTurnIn: true, tab: 'accepted' as const }];
+    assert.deepEqual(talkEligiblePendingQuests(pending, accepted).map((q) => q.title), ['A Ducks Whisper']);
+    rmSync(statePath, { force: true });
+  });
+});

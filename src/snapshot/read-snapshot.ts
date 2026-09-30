@@ -88,6 +88,17 @@ const QUEST_TITLE_SKIP = new Set(
 const QUEST_PROGRESS_LINE = /^(\d[\d,]*)\s*\/\s*(\d[\d,]*)$/;
 const QUEST_REWARD_LINE = /^[\d,]+(?:\.\d+)?[KkMm]?$/;
 const QUEST_SECTION_END = /^(Statistics|Pending Quests|Accepted Quests|Completed Quests)$/i;
+/** Countdown / cooldown strings ("23:59:26", "3h 22m", "12m 5s") — never quest titles. */
+const QUEST_TIMER_LINE = /^(?:\d{1,3}:\d{2}(?::\d{2})?|(?:\d+\s*[dhms]\s*){1,4})$/i;
+
+/** True when a line can be a quest title (has real words, not a timer/number). */
+export function looksLikeQuestTitle(line: string): boolean {
+  const t = line.trim();
+  if (t.length < 3 || t.length > 60) return false;
+  if (QUEST_TIMER_LINE.test(t)) return false;
+  if (!/[A-Za-z]{3,}/.test(t)) return false;
+  return !QUEST_TITLE_SKIP.has(normalizeQuestTitleKey(t));
+}
 
 interface ParsedQuestObjective {
   name?: string;
@@ -107,14 +118,26 @@ function toInt(value: string): number {
  * met objective never marks the quest ready to turn in.
  */
 export function parseQuestListLines(text: string, tab: SnapshotQuest['tab']): SnapshotQuest[] {
+  return parseQuestListSection(text, tab) ?? [];
+}
+
+/** null when the quest list section marker is absent (caller may fall back to regex). */
+function parseQuestListSection(text: string, tab: SnapshotQuest['tab']): SnapshotQuest[] | null {
   const lines = text.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
   let startIdx = lines.findIndex((l) => /^You are viewing quests/i.test(l));
   if (startIdx === -1) {
     startIdx = lines.findIndex((l) => /^Completed(\s+\d+)?$/i.test(l));
   }
-  if (startIdx === -1) return [];
+  if (startIdx === -1) return null;
 
-  type Draft = { title: string; objectives: ParsedQuestObjective[]; pendingName?: string; closed: boolean };
+  type Draft = {
+    title: string;
+    objectives: ParsedQuestObjective[];
+    pendingName?: string;
+    closed: boolean;
+    /** Card shows a countdown (repeatable quest on cooldown) — not acceptable now. */
+    cooldown?: boolean;
+  };
   const drafts: Draft[] = [];
   let current: Draft | undefined;
 
@@ -127,6 +150,10 @@ export function parseQuestListLines(text: string, tab: SnapshotQuest['tab']): Sn
         current.objectives.push({ name: current.pendingName, current: toInt(prog[1]), total: toInt(prog[2]) });
         current.pendingName = undefined;
       }
+      continue;
+    }
+    if (QUEST_TIMER_LINE.test(line)) {
+      if (current && !current.closed) current.cooldown = true;
       continue;
     }
     if (QUEST_REWARD_LINE.test(line)) {
@@ -156,6 +183,8 @@ export function parseQuestListLines(text: string, tab: SnapshotQuest['tab']): Sn
   const seen = new Set<string>();
   for (const d of drafts) {
     if (d.objectives.length === 0) continue;
+    if (tab === 'pending' && d.cooldown) continue;
+    if (!looksLikeQuestTitle(d.title)) continue;
     const title = d.title.trim();
     const key = normalizeQuestTitleKey(title);
     if (!title || QUEST_TITLE_SKIP.has(key) || seen.has(key)) continue;
@@ -170,9 +199,10 @@ export function parseQuestListLines(text: string, tab: SnapshotQuest['tab']): Sn
   return quests;
 }
 
-function parseQuestCards(text: string, tab: SnapshotQuest['tab']): SnapshotQuest[] {
-  const lineParsed = parseQuestListLines(text, tab);
-  if (lineParsed.length > 0) return lineParsed;
+export function parseQuestCards(text: string, tab: SnapshotQuest['tab']): SnapshotQuest[] {
+  const lineParsed = parseQuestListSection(text, tab);
+  // Section found: trust it even when empty (e.g. only cooldown cards) — no regex fallback.
+  if (lineParsed !== null) return lineParsed;
 
   const quests: SnapshotQuest[] = [];
   const seen = new Set<string>();
@@ -183,7 +213,7 @@ function parseQuestCards(text: string, tab: SnapshotQuest['tab']): SnapshotQuest
   for (const match of text.matchAll(cardPattern)) {
     const title = match[1].trim();
     const key = normalizeQuestTitleKey(title);
-    if (QUEST_TITLE_SKIP.has(key) || seen.has(key)) continue;
+    if (!looksLikeQuestTitle(title) || seen.has(key)) continue;
     seen.add(key);
     const progress = match[3]?.trim();
     const canTurnIn = tab === 'accepted' && isQuestProgressMet(progress);
