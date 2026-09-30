@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { Page } from 'playwright';
-import { talkQuest, questTitlePattern, pickGenericQuestReply } from './quest.js';
+import { talkQuest, questTitlePattern, pickGenericQuestReply, chooseGenericQuestReply } from './quest.js';
 import { GOBLIN_QUEST } from './quest-accept.js';
 
 type MockButton = {
@@ -119,5 +119,33 @@ describe('pickGenericQuestReply', () => {
     });
     const line = await pickGenericQuestReply(page);
     assert.equal(line, "Fine. I'll find your rabbit feet.");
+  });
+});
+
+describe('chooseGenericQuestReply safety', () => {
+  it('never picks decline/abandon/defer lines', () => {
+    assert.equal(chooseGenericQuestReply(['Abandon Quest', "I'll pass.", 'No thanks.']), undefined);
+    assert.equal(chooseGenericQuestReply(["Fine, I won't help.", "I'll think about it."]), undefined);
+    assert.equal(chooseGenericQuestReply(["Sure, maybe later."]), undefined);
+  });
+
+  it('has no positional fallback for unknown dialogue', () => {
+    assert.equal(
+      chooseGenericQuestReply(['Forty rabbit feet won\'t fix bad luck.', 'What happened to your last lucky charm?']),
+      undefined,
+    );
+  });
+
+  it('picks the affirmative line among rabbit replies', () => {
+    assert.equal(
+      chooseGenericQuestReply([
+        'Search',
+        "Forty rabbit feet won't fix bad luck.",
+        'What happened to your last lucky charm?',
+        "Fine. I'll find your rabbit feet.",
+        'Abandon',
+      ]),
+      "Fine. I'll find your rabbit feet.",
+    );
   });
 });
