@@ -217,6 +217,12 @@ export const SELL_RETRY_COOLDOWN_MS = envInt('SELL_RETRY_COOLDOWN_MS', 30 * 60_0
 /** A heal-reserve refusal forces cooking for at most this long. */
 export const HEAL_RESERVE_FLAG_MS = 3 * 60 * 60_000;
 
+/** SELL_SWEEP env (default on). */
+export function sellSweepEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.SELL_SWEEP?.trim().toLowerCase();
+  return !(raw === '0' || raw === 'false' || raw === 'off');
+}
+
 /** True while the last vendor-sell attempt is inside SELL_RETRY_COOLDOWN_MS. */
 export function recentSellAttempt(lastSellAttemptAt: string | undefined, now = Date.now()): boolean {
   if (!lastSellAttemptAt) return false;
@@ -1398,10 +1404,15 @@ export function evaluatePlaybook(
   )
     ? persisted.healReserveLowAt
     : undefined;
+  // Inventory sweep every SELL_RETRY_COOLDOWN_MS: battle loot never shows in the snapshot
+  // inventory (icon-only tiles), so the sweep itself maps the bag and decides what to sell.
+  // SELL_SWEEP=false turns it off; a large Oak pile is reported too.
   const sellSurplusDue =
+    sellSweepEnabled() &&
     !snapshot.flags.inBattle &&
-    hasLargeSurplus(snapshot.inventory ?? {}) &&
+    !snapshotDegraded &&
     !recentSellAttempt(persisted.lastSellAttemptAt);
+  void hasLargeSurplus;
   const questTalkNoActionCyclesNext =
     questTalkNoActionCycles > 0 ? questTalkNoActionCycles - 1 : 0;
   const questTurninFailCycles = persisted.questTurninFailCycles ?? 0;

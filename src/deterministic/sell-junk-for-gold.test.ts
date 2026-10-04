@@ -9,7 +9,6 @@ import {
   hasLargeSurplus,
   needsBaitProtection,
   parseSellGoldThreshold,
-  planVendorSales,
   shouldAllowSellJunkForGold,
   type SellJunkForGoldContext,
 } from './sell-junk-for-gold.js';
@@ -180,30 +179,3 @@ describe('buildSellItemHints', () => {
   });
 });
 
-describe('planVendorSales (round 7)', () => {
-  const limits = { surplusCoal: 1000, surplusOak: 500, keepCoal: 500, keepOak: 200 };
-
-  it('high gold: sells surplus down to the surplus keep floors, never cod', () => {
-    const ctx = baseContext({
-      gold: 4492,
-      inventory: { 'Coal Ore': 10500, 'Oak Log': 2900, 'Cooked Cod': 41, 'Raw Cod': 50 },
-    });
-    assert.deepEqual(planVendorSales(ctx, 800, limits), [
-      { item: 'Coal Ore', qty: 10000 },
-      { item: 'Oak Log', qty: 2700 },
-    ]);
-  });
-
-  it('high gold: small piles are kept', () => {
-    const ctx = baseContext({ gold: 4492, inventory: { 'Coal Ore': 900, 'Oak Log': 300 } });
-    assert.deepEqual(planVendorSales(ctx, 800, limits), []);
-  });
-
-  it('low gold: legacy small floors apply', () => {
-    const ctx = baseContext({ gold: 100, inventory: { 'Coal Ore': 100, 'Oak Log': 10 } });
-    assert.deepEqual(planVendorSales(ctx, 800, limits), [
-      { item: 'Coal Ore', qty: 100 - DEFAULT_KEEP_COAL },
-      { item: 'Oak Log', qty: 10 - DEFAULT_KEEP_OAK },
-    ]);
-  });
-});

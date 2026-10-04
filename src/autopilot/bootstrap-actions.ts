@@ -961,6 +961,10 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
     safety: 'inventory',
     isAllowed: (ctx) => {
       if (!ctx.snapshot.flags.sessionValid) return false;
+      // Periodic inventory sweep (loot is invisible to the snapshot scraper).
+      if (getPlaybookFromSnapshot(ctx.snapshot)?.sellSurplusDue && !ctx.snapshot.flags.inBattle) {
+        return true;
+      }
       const sellCtx = buildSellJunkForGoldContext(ctx);
       if (!hasSurplusVendorJunk(sellCtx)) return false;
       return shouldAllowSellJunkForGold(sellCtx, ctx.config.sellGoldThreshold);
@@ -968,6 +972,7 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
     execute: async (ctx) => ({
       action: 'sell_junk_for_gold',
       outcome: await sellJunkForGold(ctx.page, ctx.config, {
+        questTitles: [...ctx.snapshot.acceptedQuests, ...ctx.snapshot.pendingQuests].map((q) => q.title),
         context: buildSellJunkForGoldContext(ctx),
       }),
     }),
