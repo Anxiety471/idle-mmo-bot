@@ -2,7 +2,7 @@ import type { Page } from 'playwright';
 import type { AppConfig } from '../config.js';
 import type { InventoryStepResult } from '../types.js';
 import type { EarlyStageId } from '../autopilot/early-systems-playbook.js';
-import { sellItemToVendor } from './vendor-sell.js';
+import { sellUselessInventory } from './vendor-sell.js';
 
 const DEFAULT_JUNK = ['Burnt Cod', 'Burnt Fish', 'Burnt Salmon'];
 
@@ -96,9 +96,8 @@ export function hasLargeSurplus(
   inventory: Record<string, number>,
   limits: SurplusSellLimits = parseSurplusSellLimits(),
 ): boolean {
-  if ((inventory['Coal Ore'] ?? 0) > limits.surplusCoal) return true;
-  if ((inventory['Oak Log'] ?? 0) > limits.surplusOak) return true;
-  return false;
+  // Coal is never sold (cook/smelt fuel, user keep-list) — only Oak counts here.
+  return (inventory['Oak Log'] ?? 0) > limits.surplusOak;
 }
 
 /**
@@ -153,71 +152,30 @@ export function buildSellItemHints(
 
 export interface SellJunkForGoldOptions extends SellJunkProtectionOptions {
   context: SellJunkForGoldContext;
+  threshold?: number;
   maxStacks?: number;
-}
-
-/** One planned vendor sale. */
-export interface VendorSellPlanEntry {
-  item: string;
-  qty: number;
+  questTitles?: string[];
 }
 
 /**
- * Plan vendor sales: when gold is at/above the threshold only large-surplus mats are
- * sold, down to the surplus keep floors (500 Coal / 200 Oak by default). Below the
- * threshold the small legacy floors apply. Cod, Cooked Cod and protected bait never sell.
+ * Map the inventory and vendor-sell useless/surplus items (sell-policy.ts keep-list,
+ * per-item keeps, Crafting-type drops only, Oak above its surplus). Every sale is logged
+ * with item, quantity and gold.
  */
-export function planVendorSales(
-  ctx: SellJunkForGoldContext,
-  threshold: number,
-  limits: SurplusSellLimits = parseSurplusSellLimits(),
-  options: SellJunkProtectionOptions = {},
-): VendorSellPlanEntry[] {
-  const lowGold = ctx.gold < threshold || ctx.playbookStage === 'sell_half' || ctx.playbookStage === 'sell_extras';
-  const keepCoal = lowGold ? options.keepCoal ?? DEFAULT_KEEP_COAL : limits.keepCoal;
-  const keepOak = lowGold ? options.keepOak ?? DEFAULT_KEEP_OAK : limits.keepOak;
-  const plan: VendorSellPlanEntry[] = [];
-  for (const junk of ctx.junkItems ?? DEFAULT_JUNK) {
-    const qty = ctx.inventory[junk] ?? 0;
-    if (qty > 0) plan.push({ item: junk, qty });
-  }
-  const coal = ctx.inventory['Coal Ore'] ?? 0;
-  if (lowGold ? coal > keepCoal : coal > limits.surplusCoal) {
-    plan.push({ item: 'Coal Ore', qty: coal - keepCoal });
-  }
-  const oak = ctx.inventory['Oak Log'] ?? 0;
-  if (lowGold ? oak > keepOak : oak > limits.surplusOak) {
-    plan.push({ item: 'Oak Log', qty: oak - keepOak });
-  }
-  return plan.filter((entry) => entry.qty > 0);
-}
-
-export interface SellJunkForGoldOptions extends SellJunkProtectionOptions {
-  context: SellJunkForGoldContext;
-  threshold?: number;
-  maxStacks?: number;
-}
-
-/** Vendor-sell surplus gather junk for gold; keeps cook fuel and battle food floors. */
 export async function sellJunkForGold(
   page: Page,
   config: AppConfig,
   options: SellJunkForGoldOptions,
 ): Promise<InventoryStepResult | 'sold_partial'> {
-  const threshold = options.threshold ?? config.sellGoldThreshold ?? DEFAULT_SELL_GOLD_THRESHOLD;
-  const plan = planVendorSales(options.context, threshold, parseSurplusSellLimits(), options).slice(
-    0,
-    options.maxStacks ?? 2,
-  );
-  if (plan.length === 0) return 'no_action';
-  console.log(
-    `[sell] plan gold=${options.context.gold} threshold=${threshold}: ${plan.map((p) => `${p.item} x${p.qty}`).join(', ')}`,
-  );
-  let sold = 0;
-  for (const entry of plan) {
-    const result = await sellItemToVendor(page, config, entry.item, entry.qty);
-    if (result === 'sold') sold += 1;
+  try {
+    const summary = await sellUselessInventory(page, config, {
+      questTitles: options.questTitles,
+      maxSales: options.maxStacks ?? 6,
+    });
+    return summary.sold.length > 0 ? 'sold' : 'no_action';
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.log(`[sell] sellJunkForGold failed: ${message.slice(0, 200)}`);
+    return 'failed';
   }
-  if (sold === 0) return 'failed';
-  return sold < plan.length ? 'sold_partial' : 'sold';
 }
