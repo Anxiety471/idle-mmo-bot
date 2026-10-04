@@ -47,12 +47,65 @@ async function openMelriel(page: Page): Promise<boolean> {
   return false;
 }
 
-/** Buy a small quantity of Cheap Bait (default 1). */
+/** Cheap Bait costs 2 gold each at Melriel. */
+export const BAIT_UNIT_COST = 2;
+/** Never buy bait when gold is below this (round 7 gold drain). */
+export const DEFAULT_BAIT_GOLD_FLOOR = 2000;
+
+/** BAIT_GOLD_FLOOR env (gold), default 2000. 0 disables the floor. */
+export function parseBaitGoldFloor(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.BAIT_GOLD_FLOOR?.trim();
+  if (!raw) return DEFAULT_BAIT_GOLD_FLOOR;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_BAIT_GOLD_FLOOR;
+}
+
+/** True when a bait purchase is allowed at this gold (unknown gold = blocked). */
+export function baitPurchaseAllowedByGold(
+  gold: number | undefined | null,
+  floor = parseBaitGoldFloor(),
+): boolean {
+  if (gold === undefined || gold === null || !Number.isFinite(gold)) return floor === 0;
+  return gold >= floor && gold >= BAIT_UNIT_COST;
+}
+
+/**
+ * Bait to buy: `want`, capped so the purchase never takes gold below the floor.
+ * 0 means do not buy.
+ */
+export function baitPurchaseQuantity(
+  gold: number | undefined | null,
+  want: number,
+  floor = parseBaitGoldFloor(),
+): number {
+  if (!baitPurchaseAllowedByGold(gold, floor)) return 0;
+  if (gold === undefined || gold === null || !Number.isFinite(gold)) return Math.max(0, Math.floor(want));
+  const spendable = Math.floor(((gold as number) - floor) / BAIT_UNIT_COST);
+  return Math.max(0, Math.min(Math.floor(want), spendable));
+}
+
+/**
+ * Buy Cheap Bait. Pass `gold` (current gold): the purchase is refused below
+ * BAIT_GOLD_FLOOR and the quantity is capped so gold stays at/above the floor.
+ */
 export async function buyCheapBait(
   page: Page,
   config: AppConfig,
   quantity = 1,
+  options: { gold?: number | null } = {},
 ): Promise<MerchantStepResult> {
+  const floor = parseBaitGoldFloor();
+  const allowedQty = baitPurchaseQuantity(options.gold, quantity, floor);
+  if (allowedQty <= 0) {
+    console.log(
+      `[merchant] bait purchase blocked: gold=${options.gold ?? 'unknown'} < floor ${floor} (BAIT_GOLD_FLOOR)`,
+    );
+    return 'no_action';
+  }
+  if (allowedQty < quantity) {
+    console.log(`[merchant] bait quantity capped ${quantity} → ${allowedQty} to stay above gold floor ${floor}`);
+  }
+  quantity = allowedQty;
   try {
     await navigateTo(page, config, MERCHANTS_PATH);
     await waitForPageReady(page, 'merchant');

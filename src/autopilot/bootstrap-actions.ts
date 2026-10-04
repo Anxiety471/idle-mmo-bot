@@ -49,6 +49,7 @@ import {
   hasEasyCompletePendingQuest,
   getQuestDialogueLine,
   buyCheapBait,
+  baitPurchaseAllowedByGold,
   sellJunkToVendor,
   sellHalfCareful,
   sellJunkForGold,
@@ -319,6 +320,13 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
     takePackedBattleFood();
     await navigateTo(page, config, '/combat/battle').catch(() => undefined);
     return combatRoundOutcome('battle:pending_verify:reload', config);
+  }
+
+  if (battleResult === 'heal_reserve_low') {
+    // Heal refused to protect the Cooked Cod reserve: the playbook cooks before hunting.
+    takePackedBattleFood();
+    takeCookedCodSpentOnHeal();
+    return combatRoundOutcome('battle:heal_reserve_low:cook_first', config);
   }
 
   const fightConfirmed =
@@ -840,7 +848,8 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
         ctx.snapshot.flags.sessionValid &&
         !baitTrusted &&
         !baitCooldown &&
-        (ctx.snapshot.gold ?? 0) >= 2 &&
+        // Round 7: gold floor blocks every bait buy (BAIT_GOLD_FLOOR, default 2000).
+        baitPurchaseAllowedByGold(ctx.snapshot.gold) &&
         (ctx.config.buyBait ||
           hasKillQuest(ctx) ||
           combatLagging ||
@@ -851,7 +860,7 @@ const BOOTSTRAP_ACTIONS: ActionDefinition[] = [
     execute: async (ctx) => ({
       action: 'buy_bait',
       // Buy a stack so one purchase covers fish_cod (inventory scrape often misses bait).
-      outcome: await buyCheapBait(ctx.page, ctx.config, 50),
+      outcome: await buyCheapBait(ctx.page, ctx.config, 50, { gold: ctx.snapshot.gold }),
     }),
   },
   {

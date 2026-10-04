@@ -89,7 +89,13 @@ export {
   getQuestDialogueLine,
 } from './quest-accept.js';
 
-export { buyCheapBait } from './merchant.js';
+export {
+  buyCheapBait,
+  baitPurchaseAllowedByGold,
+  baitPurchaseQuantity,
+  parseBaitGoldFloor,
+  DEFAULT_BAIT_GOLD_FLOOR,
+} from './merchant.js';
 export { sellJunk, sellJunkToVendor, sellHalfCareful } from './inventory.js';
 export {
   parseSellGoldThreshold,

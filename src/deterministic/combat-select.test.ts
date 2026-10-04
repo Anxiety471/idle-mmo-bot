@@ -1517,7 +1517,8 @@ describe('heal before battle when health is too low', () => {
       const { result, logs } = await captureLogs(() => configureAndBattle(page, 0, 1, 'Offensive'));
       assert.equal(result, 'battle_started');
       assert.equal(await page.locator('body').getAttribute('data-battled'), 'Duck');
-      assert.equal(await page.locator('#quantity').inputValue(), '99');
+      // Round 7: Max Health (99) is read, then only 60% (HEAL_TARGET_PCT) is fed.
+      assert.equal(await page.locator('#quantity').inputValue(), '60');
       assert.equal(
         await page.locator('body').getAttribute('data-order'),
         'heal,cod,maxHealth,use,max,battle',
@@ -1527,7 +1528,25 @@ describe('heal before battle when health is too low', () => {
       assert.ok(logs.some((line) => line.includes('feeding 105 Cooked Cod +10 Health')));
       assert.equal(logs.some((line) => line.includes('Untradable')), false);
       assert.equal(logs.some((line) => line.includes('selected_battle_entity')), false);
-      assert.equal(takeCookedCodSpentOnHeal(), 99);
+      assert.ok(logs.some((line) => line.includes('heal plan:') && line.includes('feed 60')));
+      assert.equal(takeCookedCodSpentOnHeal(), 60);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('refuses to heal into the Cooked Cod reserve (round 7) → heal_reserve_low, no Use', async () => {
+    const page = await load(lowHealthBattleHtml({ enemies: ['Duck'], use: 'enable' }));
+    try {
+      const { result, logs } = await captureLogs(() =>
+        configureAndBattle(page, 0, 1, 'Offensive', false, { bagCooked: 30 }),
+      );
+      assert.equal(result, 'heal_reserve_low');
+      assert.equal(await page.locator('body').getAttribute('data-battled'), null);
+      const order = (await page.locator('body').getAttribute('data-order')) ?? '';
+      assert.equal(order.includes('use'), false);
+      assert.ok(logs.some((line) => line.includes('heal_reserve_low')));
+      assert.equal(takeCookedCodSpentOnHeal(), 0);
     } finally {
       await page.close();
     }
@@ -1594,7 +1613,8 @@ describe('heal before battle when health is too low', () => {
       assert.equal(order?.match(/use/g)?.length, 3);
       assert.ok(logs.some((line) => line.includes('health_too_low after heal retries')));
       assert.ok(logs.some((line) => line.includes('not walking other enemy tiles')));
-      assert.equal(takeCookedCodSpentOnHeal(), 99 * 3);
+      // Escalating targets 60% → 80% → 100% of the Max Health quantity (99).
+      assert.equal(takeCookedCodSpentOnHeal(), 60 + 80 + 99);
       assert.equal(logs.some((line) => line.includes('Goblin')), false);
     } finally {
       if (prev === undefined) delete process.env.COMBAT_BATTLE_ENABLE_MS;

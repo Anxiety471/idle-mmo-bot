@@ -111,6 +111,7 @@ export type CombatStepResult =
   | 'no_action'
   | 'health_too_low'
   | 'heal_failed'
+  | 'heal_reserve_low'
   | 'blocked_verify'
   | 'pending_verify'
   | 'hunt_active_wait'

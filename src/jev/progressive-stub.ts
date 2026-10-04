@@ -83,6 +83,11 @@ export class ProgressiveStubJev implements SupervisorAdvisor {
     }
 
     if (playbook && playbook.enabled && !playbook.complete) {
+      // Round 7: a large Coal/Oak pile is sold before anything else (gold drain fix).
+      if (playbook.sellSurplusDue && !snapshot.flags.inBattle) {
+        const sell = pickAllowed(allowed, ['sell_junk_for_gold']);
+        if (sell) return sell;
+      }
       if (playbook.stage === 'fish_cod' && playbook.gatherGraceActive) {
         const cont = pickAllowed(allowed, ['continue_current']);
         if (cont) return cont;
