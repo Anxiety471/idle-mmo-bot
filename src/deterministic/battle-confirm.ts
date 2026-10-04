@@ -314,8 +314,78 @@ export async function confirmBattleStarted(
     modalOpen &&
     ((await battleButtonProcessingDisabled(page)) || (await huntMoreProcessingDisabled(page)))
   ) {
+    // Round 7: the Battle request is still in flight. Before giving up (reload, no credit)
+    // wait a little longer — solving a late Quick check — then reload and re-read the
+    // battle state so a fight that did start is credited instead of thrown away.
+    const extraMs = pendingExtraWaitMs();
+    const extraDeadline = Date.now() + extraMs;
+    console.log(
+      `[combat] Battle still processing after ${Math.round(limitMs / 1000)}s — ` +
+        `waiting up to ${Math.round(extraMs / 1000)}s more (${await pendingDiagnostics(page)})`,
+    );
+    while (Date.now() < extraDeadline) {
+      if (await runAwayVisible(page)) return 'started';
+      if (await tileDropAfterClick(options)) return 'started';
+      if (captchaRounds < 5 && (await isPostBattleHumanCheckExtended(page))) {
+        captchaRounds += 1;
+        console.log('[combat] Quick check surfaced during pending wait — solving');
+        await clickCaptchaToastAction(page);
+        await solveHumanCaptchaIfPresent(page, { pollMs, maxAttempts: 5 });
+        continue;
+      }
+      const stillOpen = await isEnemyModalVisible(page);
+      const stillProcessing =
+        stillOpen &&
+        ((await battleButtonProcessingDisabled(page)) || (await huntMoreProcessingDisabled(page)));
+      if (!stillProcessing) break;
+      await page.waitForTimeout(pollMs);
+    }
+    if (await runAwayVisible(page)) return 'started';
+    if (options.config) {
+      await navigateTo(page, options.config, COMBAT_PATH);
+      await page
+        .getByText(CURRENT_ACTION_MARKER)
+        .first()
+        .waitFor({ state: 'visible', timeout: 10_000 })
+        .catch(() => undefined);
+      await page.waitForTimeout(1_500);
+      if (await runAwayVisible(page)) {
+        console.log('[combat] pending Battle was accepted — Run Away visible after reload');
+        return 'started';
+      }
+      if (await tileDropAfterClick(options)) {
+        console.log('[combat] pending Battle was accepted — enemy tile dropped after reload');
+        return 'started';
+      }
+    }
     return 'pending';
   }
 
   return 'rejected';
+}
+
+/** Extra wait after the confirm window while Battle is still is_processing (COMBAT_PENDING_EXTRA_MS). */
+export function pendingExtraWaitMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.COMBAT_PENDING_EXTRA_MS);
+  if (Number.isFinite(raw) && raw >= 0) return Math.min(120_000, Math.floor(raw));
+  return 20_000;
+}
+
+/** Short, non-sensitive UI hints for a stuck Battle: toast text and overlay flags. */
+async function pendingDiagnostics(page: Page): Promise<string> {
+  const bits: string[] = [];
+  try {
+    const toasts = page.locator('[data-sonner-toast]').filter({ visible: true });
+    const n = await toasts.count();
+    for (let i = 0; i < Math.min(n, 3); i++) {
+      const t = ((await toasts.nth(i).innerText().catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+      if (t) bits.push(`toast="${t.slice(0, 80)}"`);
+    }
+    if (await isPostBattleHumanCheckExtended(page)) bits.push('quick_check=visible');
+    const foodLayer = page.locator('[x-data*="food-for-battle"], [x-data*="select-battle-food-quantity"]').filter({ visible: true });
+    if ((await foodLayer.count()) > 0) bits.push('food_picker=open');
+  } catch {
+    /* diagnostics only */
+  }
+  return bits.length ? bits.join(' ') : 'no toast/captcha/overlay';
 }

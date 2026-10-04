@@ -757,7 +757,7 @@ describe('bait restock preference', () => {
 
     const snapshot = minimalSnapshot({
       inventory: { 'Cheap Bait': 1, 'Coal Ore': 100 },
-      gold: 50,
+      gold: 5000,
       flags: {
         hasBait: true,
         bankNearby: false,
@@ -777,6 +777,29 @@ describe('bait restock preference', () => {
     assert.equal(filtered[0], 'buy_bait');
     assert.ok(!filtered.includes('fish_cod'));
     assert.ok(!filtered.includes('craft_if_ready'));
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('never offers buy_bait below BAIT_GOLD_FLOOR even when Cheap Bait is low (round 7)', () => {
+    for (const key of ENV_KEYS) envSnapshot[key] = process.env[key];
+    const dir = join(getLogDir(), `pb-bait-floor-${Date.now()}`);
+    mkdirSync(dir, { recursive: true });
+    process.env.AUTOPILOT_LOG_DIR = dir;
+    process.env.PLAYBOOK_STATE_PATH = join(dir, 'playbook-state.json');
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(
+      process.env.PLAYBOOK_STATE_PATH,
+      JSON.stringify({ version: 1, stage: 'fish_cod', counts: coalMetCounts(), baitOwned: true }),
+    );
+    const snapshot = minimalSnapshot({
+      inventory: { 'Cheap Bait': 1, 'Coal Ore': 100 },
+      gold: 1999,
+      flags: { hasBait: true, bankNearby: false, gatherBusy: false, inBattle: false, sessionValid: true },
+    });
+    const playbook = evaluatePlaybook(snapshot);
+    assert.notEqual(playbook.preferredActions[0], 'buy_bait');
+    const filtered = filterAllowedByPlaybook(['fish_cod', 'buy_bait', 'idle'], snapshot, playbook);
+    assert.ok(!filtered.includes('buy_bait'));
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -859,7 +882,7 @@ describe('bait restock preference', () => {
 
     const snapshot = minimalSnapshot({
       inventory: { 'Cheap Bait': 1, 'Coal Ore': 100 },
-      gold: 50,
+      gold: 5000,
       flags: {
         hasBait: true,
         bankNearby: false,
@@ -2774,5 +2797,81 @@ describe('post-cook quest talk does not outrank hunt', () => {
       ),
       false,
     );
+  });
+});
+
+describe('round 7 economy: surplus sell + heal reserve flag', () => {
+  const keys = ['AUTOPILOT_LOG_DIR', 'PLAYBOOK_STATE_PATH', 'EARLY_PLAYBOOK'] as const;
+  const saved: Record<string, string | undefined> = {};
+  let dir = '';
+  afterEach(() => {
+    for (const k of keys) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function setup(state: Record<string, unknown>): void {
+    for (const k of keys) saved[k] = process.env[k];
+    dir = join(getLogDir(), `pb-r7-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(dir, { recursive: true });
+    process.env.AUTOPILOT_LOG_DIR = dir;
+    process.env.PLAYBOOK_STATE_PATH = join(dir, 'playbook-state.json');
+    process.env.EARLY_PLAYBOOK = 'true';
+    writeFileSync(process.env.PLAYBOOK_STATE_PATH, JSON.stringify({ version: 1, counts: coalMetCounts(), ...state }));
+  }
+
+  const bocchiInv = { 'Coal Ore': 10500, 'Oak Log': 2900, 'Cooked Cod': 41, 'Raw Cod': 50, 'Cheap Bait': 50 };
+
+  it('marks sellSurplusDue and the stub picks sell_junk_for_gold first', async () => {
+    setup({ stage: 'fish_cod', baitOwned: true });
+    const snapshot = minimalSnapshot({
+      inventory: bocchiInv,
+      gold: 4492,
+      flags: { hasBait: true, bankNearby: true, gatherBusy: true, inBattle: false, sessionValid: true },
+    });
+    const playbook = evaluatePlaybook(snapshot);
+    assert.equal(playbook.sellSurplusDue, true);
+    const allowed = filterAllowedByPlaybook(
+      ['continue_current', 'fish_cod', 'sell_junk_for_gold', 'idle'],
+      snapshot,
+      playbook,
+    );
+    assert.ok(allowed.includes('sell_junk_for_gold'));
+    const choice = await new ProgressiveStubJev().chooseNextAction(
+      { ...snapshot, extensions: { ...(snapshot.extensions ?? {}), earlySystemsPlaybook: playbook } } as GameSnapshot,
+      allowed,
+      { cycle: 1, gatherRotationIndex: 0 },
+    );
+    assert.equal(choice, 'sell_junk_for_gold');
+  });
+
+  it('a sell attempt arms the retry cooldown (no sell loop on failure)', () => {
+    setup({ stage: 'fish_cod', baitOwned: true });
+    notePlaybookOutcome('sell_junk_for_gold', 'failed');
+    const snapshot = minimalSnapshot({
+      inventory: bocchiInv,
+      gold: 4492,
+      flags: { hasBait: true, bankNearby: true, gatherBusy: true, inBattle: false, sessionValid: true },
+    });
+    assert.equal(evaluatePlaybook(snapshot).sellSurplusDue, false);
+  });
+
+  it('heal_reserve_low arms healReserveLow until the cook target is met', () => {
+    setup({ stage: 'hunt_battle_batch', baitOwned: true });
+    notePlaybookOutcome('hunt_battle_batch', 'battle:heal_reserve_low:cook_first');
+    const low = minimalSnapshot({
+      inventory: { 'Cooked Cod': 40, 'Raw Cod': 30, 'Coal Ore': 100 },
+      gold: 4000,
+      flags: { hasBait: true, bankNearby: true, gatherBusy: false, inBattle: false, sessionValid: true },
+    });
+    assert.equal(evaluatePlaybook(low).healReserveLow, true);
+    const full = minimalSnapshot({
+      inventory: { 'Cooked Cod': 120, 'Coal Ore': 100 },
+      gold: 4000,
+      flags: { hasBait: true, bankNearby: true, gatherBusy: false, inBattle: false, sessionValid: true },
+    });
+    assert.equal(evaluatePlaybook(full).healReserveLow, false);
   });
 });

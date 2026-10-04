@@ -25,6 +25,8 @@ import { dirname, join } from 'node:path';
 import { getLogDir } from '../logging/jsonl-writer.js';
 import { cookedCodCount, needsCookBeforeHunt } from '../deterministic/combat.js';
 import { shouldHardStopHunt } from '../deterministic/hunt-cap.js';
+import { hasLargeSurplus } from '../deterministic/sell-junk-for-gold.js';
+import { baitPurchaseAllowedByGold } from '../deterministic/merchant.js';
 import { hasEasyCompletePendingQuest } from '../deterministic/quest-accept.js';
 import {
   baitCountLooksLikePresenceFallback,
@@ -127,6 +129,10 @@ export interface PlaybookProgress {
   questTurninFailCycles?: number;
   /** Per-tick quest difficulty/importance scoring for HttpJev + filters. */
   questCurriculum?: QuestCurriculum;
+  /** Large Coal/Oak surplus and sell retry cooldown expired — sell before more gathering. */
+  sellSurplusDue?: boolean;
+  /** A heal was refused to keep the Cooked Cod reserve — cook up to the cook target first. */
+  healReserveLow?: boolean;
 }
 
 interface PersistedPlaybook {
@@ -157,6 +163,10 @@ interface PersistedPlaybook {
   questTalkSkipCycles?: Record<string, number>;
   /** Consecutive talk:no_action per quest title (normalized key). */
   questTalkNoActionByTitle?: Record<string, number>;
+  /** ISO time of the last vendor-sell attempt (surplus sell retry cooldown). */
+  lastSellAttemptAt?: string;
+  /** ISO time a heal was refused to protect the Cooked Cod reserve (cook before next hunt). */
+  healReserveLowAt?: string;
 }
 
 /** Sequential batch stages only — manage_pets is async and not in this order. */
@@ -202,6 +212,30 @@ const EARLY_GOLD_SELL_SET = new Set<AutopilotAction>(EARLY_GOLD_SELL_ACTIONS);
 export const GATHER_GRACE_MS = 30_000;
 /** After buy_bait success, refuse another purchase for this long (or until stage advances). */
 export const BAIT_PURCHASE_COOLDOWN_MS = 15 * 60_000;
+/** Retry a surplus vendor sell at most this often (a failing sell must not loop). */
+export const SELL_RETRY_COOLDOWN_MS = envInt('SELL_RETRY_COOLDOWN_MS', 30 * 60_000);
+/** A heal-reserve refusal forces cooking for at most this long. */
+export const HEAL_RESERVE_FLAG_MS = 3 * 60 * 60_000;
+
+/** True while the last vendor-sell attempt is inside SELL_RETRY_COOLDOWN_MS. */
+export function recentSellAttempt(lastSellAttemptAt: string | undefined, now = Date.now()): boolean {
+  if (!lastSellAttemptAt) return false;
+  const at = new Date(lastSellAttemptAt).getTime();
+  return Number.isFinite(at) && now - at < SELL_RETRY_COOLDOWN_MS;
+}
+
+/** Heal-reserve flag stays on until the bag is back at the cook target or it ages out. */
+export function healReserveFlagActive(
+  healReserveLowAt: string | undefined,
+  cookedCod: number,
+  cookTarget: number,
+  now = Date.now(),
+): boolean {
+  if (!healReserveLowAt) return false;
+  const at = new Date(healReserveLowAt).getTime();
+  if (!Number.isFinite(at) || now - at >= HEAL_RESERVE_FLAG_MS) return false;
+  return cookedCod < cookTarget;
+}
 /** Consecutive fish_cod start failures before temporary playbook fallback. */
 export const FISH_COD_FAILURE_THRESHOLD = 4;
 /** Cooldown before re-injecting fish_cod after backoff (stage stays fish_cod). */
@@ -326,6 +360,8 @@ function loadPersisted(): PersistedPlaybook {
       questTurninFailCycles: parsed.questTurninFailCycles ?? 0,
       questTalkSkipCycles: parsed.questTalkSkipCycles ?? {},
       questTalkNoActionByTitle: parsed.questTalkNoActionByTitle ?? {},
+      lastSellAttemptAt: parsed.lastSellAttemptAt,
+      healReserveLowAt: parsed.healReserveLowAt,
     };
   } catch {
     return { version: 1, stage: 'mine_coal', counts: emptyCounts() };
@@ -1225,7 +1261,8 @@ export function evaluatePlaybook(
   const needsBaitRestockNow =
     !snapshotDegraded &&
     !baitUntrusted &&
-    shouldPreferBaitRestock(stage, baitStock, persisted.lastBaitPurchaseAt);
+    shouldPreferBaitRestock(stage, baitStock, persisted.lastBaitPurchaseAt) &&
+    baitPurchaseAllowedByGold(snapshot.gold);
   if (needsBaitRestockNow) {
     preferredActions = [
       'buy_bait',
@@ -1352,6 +1389,19 @@ export function evaluatePlaybook(
   if (questTalkNoActionCycles > 0) {
     preferredActions = demotePreferred(preferredActions, 'quest_talk_accept');
   }
+  // Heal reserve: once a heal was refused, keep cooking until the bag reaches the cook
+  // target again (or the flag ages out after HEAL_RESERVE_FLAG_MS).
+  const healReserveLowNext = healReserveFlagActive(
+    persisted.healReserveLowAt,
+    cookedCodCount(snapshot.inventory),
+    COOK_MIN,
+  )
+    ? persisted.healReserveLowAt
+    : undefined;
+  const sellSurplusDue =
+    !snapshot.flags.inBattle &&
+    hasLargeSurplus(snapshot.inventory ?? {}) &&
+    !recentSellAttempt(persisted.lastSellAttemptAt);
   const questTalkNoActionCyclesNext =
     questTalkNoActionCycles > 0 ? questTalkNoActionCycles - 1 : 0;
   const questTurninFailCycles = persisted.questTurninFailCycles ?? 0;
@@ -1375,6 +1425,8 @@ export function evaluatePlaybook(
     questTurninFailCycles: questTurninFailCyclesNext,
     questTalkSkipCycles,
     questTalkNoActionByTitle: persisted.questTalkNoActionByTitle ?? {},
+    lastSellAttemptAt: persisted.lastSellAttemptAt,
+    healReserveLowAt: healReserveLowNext,
   });
 
   return {
@@ -1410,6 +1462,8 @@ export function evaluatePlaybook(
     questTalkNoActionCycles,
     questTurninFailCycles,
     questCurriculum,
+    sellSurplusDue,
+    healReserveLow: Boolean(healReserveLowNext),
   };
 }
 
@@ -1511,6 +1565,14 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
   if (action === 'quest_turnin') {
     questTurninFailCycles = /turnin_failed|no_action/i.test(outcome) ? QUEST_TURNIN_FAIL_COOLDOWN : 0;
   }
+  let lastSellAttemptAt = persisted.lastSellAttemptAt;
+  if (action === 'market_sell_half' || action === 'sell_junk' || action === 'sell_junk_for_gold') {
+    lastSellAttemptAt = new Date().toISOString();
+  }
+  let healReserveLowAt = persisted.healReserveLowAt;
+  if (/heal_reserve_low/i.test(outcome)) {
+    healReserveLowAt = new Date().toISOString();
+  }
   let questTalkSkipCycles = { ...(persisted.questTalkSkipCycles ?? {}) };
   let questTalkNoActionByTitle = { ...(persisted.questTalkNoActionByTitle ?? {}) };
   if (action === 'quest_talk_accept') {
@@ -1568,6 +1630,8 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
     questTurninFailCycles,
     questTalkSkipCycles,
     questTalkNoActionByTitle,
+    lastSellAttemptAt,
+    healReserveLowAt,
   });
 }
 
@@ -1658,10 +1722,14 @@ export function filterAllowedByPlaybook(
     snapshot.inventory,
     playbook.stage,
   );
-  const cookBeforeHunt = needsCookBeforeHunt(snapshot.inventory, playbook.targets.cookMin, {
-    huntBatchActive: playbook.stage === 'hunt_battle_batch' || playbook.stage === 'hunt_rabbits',
-    huntCookFloor: playbook.targets.huntCookFloor,
-  });
+  const cookBeforeHunt =
+    needsCookBeforeHunt(snapshot.inventory, playbook.targets.cookMin, {
+      huntBatchActive: playbook.stage === 'hunt_battle_batch' || playbook.stage === 'hunt_rabbits',
+      huntCookFloor: playbook.targets.huntCookFloor,
+    }) ||
+    // Heal refused to protect the reserve: cook back up to the full cook target first.
+    (Boolean(playbook.healReserveLow) &&
+      needsCookBeforeHunt(snapshot.inventory, playbook.targets.cookMin, { huntBatchActive: false }));
   const finishHunt = mustFinishActiveHunt(snapshot);
   if (finishHunt) {
     // Over-cap / active hunt wins over cook gates — stop+battle before cooking.
@@ -1710,9 +1778,11 @@ export function filterAllowedByPlaybook(
       snapshot.inventory,
       Boolean(snapshot.flags.baitCountUntrusted),
     ) &&
-    shouldPreferBaitRestock(playbook.stage, baitCount, playbook.lastBaitPurchaseAt);
+    shouldPreferBaitRestock(playbook.stage, baitCount, playbook.lastBaitPurchaseAt) &&
+    baitPurchaseAllowedByGold(snapshot.gold);
+  const baitGoldBlocked = !baitPurchaseAllowedByGold(snapshot.gold);
   const pastBuyBait = STAGE_ORDER.indexOf(playbook.stage) > STAGE_ORDER.indexOf('buy_bait');
-  if (!needsBaitRestock && (baitTrusted || pastBuyBait || baitCooldown || playbook.baitOwned)) {
+  if (baitGoldBlocked || (!needsBaitRestock && (baitTrusted || pastBuyBait || baitCooldown || playbook.baitOwned))) {
     next = next.filter((a) => a !== 'buy_bait');
   } else if (needsBaitRestock) {
     next = next.filter((a) => a !== 'fish_cod');
@@ -1786,8 +1856,8 @@ export function filterAllowedByPlaybook(
       }
       if (
         id === 'buy_bait' &&
-        !needsBaitRestock &&
-        (baitTrusted || pastBuyBait || baitCooldown || playbook.baitOwned)
+        (baitGoldBlocked ||
+          (!needsBaitRestock && (baitTrusted || pastBuyBait || baitCooldown || playbook.baitOwned)))
       ) {
         continue;
       }
@@ -1807,6 +1877,11 @@ export function filterAllowedByPlaybook(
         next.push(id);
       }
     }
+  }
+
+  // Large Coal/Oak surplus: keep the sell action available whatever the stage demotes.
+  if (playbook.sellSurplusDue && allowed.includes('sell_junk_for_gold') && !next.includes('sell_junk_for_gold')) {
+    next.push('sell_junk_for_gold');
   }
 
   const questsAvailable = questsAvailableForEarlyGold(snapshot);

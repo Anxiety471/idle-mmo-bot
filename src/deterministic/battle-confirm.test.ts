@@ -117,3 +117,12 @@ describe('isPreBattleClickFailure', () => {
     assert.equal(isPreBattleClickFailure('no_fight'), false);
   });
 });
+
+describe('pendingExtraWaitMs (round 7)', () => {
+  it('defaults to 20s, honours COMBAT_PENDING_EXTRA_MS and caps at 120s', async () => {
+    const { pendingExtraWaitMs } = await import('./battle-confirm.js');
+    assert.equal(pendingExtraWaitMs({}), 20_000);
+    assert.equal(pendingExtraWaitMs({ COMBAT_PENDING_EXTRA_MS: '5000' }), 5_000);
+    assert.equal(pendingExtraWaitMs({ COMBAT_PENDING_EXTRA_MS: '999999' }), 120_000);
+  });
+});

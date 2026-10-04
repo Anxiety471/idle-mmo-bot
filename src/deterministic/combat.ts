@@ -23,6 +23,7 @@ import {
   solveHumanCaptchaIfPresent,
 } from './human-check.js';
 import { effectivePollMs, type VerifyBudget } from './poll-interval.js';
+import { healTargetForAttempt, parseHealFoodReserve, planHealQuantity } from './heal-plan.js';
 import {
   battleFoodPackQuantity,
   battleFoodPerFightCap,
@@ -2393,7 +2394,12 @@ export async function selectBattleFood(
 /** Feed attempts when CHARACTER_HEALTH_TOO_LOW keeps Battle restrictive. */
 const HEAL_FEED_ATTEMPTS = 3;
 
-export type HealBeforeBattleResult = 'not_needed' | 'healed' | 'health_too_low' | 'heal_failed';
+export type HealBeforeBattleResult =
+  | 'not_needed'
+  | 'healed'
+  | 'health_too_low'
+  | 'heal_failed'
+  | 'heal_reserve_low';
 
 /**
  * Status code only. The Alpine component can hold account data — never return or log it.
@@ -2580,7 +2586,14 @@ async function dismissQuickFeedOverlay(page: Page): Promise<void> {
 
 type FeedCycleResult = 'fed' | 'no_heal' | 'no_food' | 'no_use';
 
-async function feedCharacterOnce(page: Page): Promise<FeedCycleResult> {
+/** Bag Cooked Cod at the start of this configureAndBattle (snapshot), for the heal reserve. */
+let healBagHint: number | undefined;
+
+export function setHealBagHint(bag: number | undefined): void {
+  healBagHint = bag !== undefined && Number.isFinite(bag) && bag > 0 ? Math.floor(bag) : undefined;
+}
+
+async function feedCharacterOnce(page: Page, attempt = 1): Promise<FeedCycleResult | 'reserve_low'> {
   if (!(await clickHeal(page))) return 'no_heal';
 
   const food = await waitForHealFoodRow(page);
@@ -2601,9 +2614,31 @@ async function feedCharacterOnce(page: Page): Promise<FeedCycleResult> {
 
   const quick = page.locator('[x-data*="quick_view_food"]');
   const quickScope = (await locatorOpen(quick)) ? quick.first() : page.locator('body');
-  if (await clickNamedControl(quickScope, /^Max Health$/i)) {
-    console.log('[combat] Max Health clicked');
-    await page.waitForTimeout(200);
+  // "Max Health" selects the food needed for full HP. Read it, then feed only enough to
+  // reach the HP target, never below the Cooked Cod reserve (round 7).
+  const maxClicked = await clickNamedControl(quickScope, /^Max Health$/i);
+  if (maxClicked) await page.waitForTimeout(200);
+  const fullQty = await readQuickFeedQuantity(quickScope);
+  const hpPct = await readPlayerHpFromUi(page).catch(() => undefined);
+  const inputMax = await readQuickFeedMax(quickScope);
+  const bag =
+    healBagHint !== undefined
+      ? Math.max(0, healBagHint - cookedCodSpentOnHeal)
+      : inputMax;
+  const reserve = parseHealFoodReserve();
+  const targetPct = healTargetForAttempt(attempt);
+  const plan = planHealQuantity({ maxHealthQty: fullQty, hpPct, targetPct, bag, reserve });
+  console.log(
+    `[combat] heal plan: hp=${hpPct ?? '?'}% maxHealthQty=${fullQty} target=${targetPct}% ` +
+      `bag=${bag ?? '?'} reserve=${reserve} → feed ${plan.qty} (${plan.reason})`,
+  );
+  if (plan.qty <= 0) {
+    console.log('[combat] heal_reserve_low — not eating the battle-food reserve; cook first');
+    await dismissQuickFeedOverlay(page);
+    return 'reserve_low';
+  }
+  if (plan.qty !== fullQty) {
+    await setQuickFeedQuantity(quickScope, plan.qty);
   }
   const feedQty = await readQuickFeedQuantity(quickScope);
   if (!(await clickNamedControl(quickScope, /^Use$/i))) {
@@ -2614,6 +2649,25 @@ async function feedCharacterOnce(page: Page): Promise<FeedCycleResult> {
   noteCookedCodSpent(feedQty);
   await dismissQuickFeedOverlay(page);
   return 'fed';
+}
+
+async function readQuickFeedMax(scope: Locator): Promise<number | undefined> {
+  const input = scope.locator('input#quantity, input[name="quantity"]');
+  const target = (await firstVisible(input)) ?? ((await input.count()) > 0 ? input.first() : null);
+  if (!target) return undefined;
+  const raw = await target.getAttribute('max').catch(() => null);
+  const parsed = Number.parseInt(raw ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+async function setQuickFeedQuantity(scope: Locator, qty: number): Promise<void> {
+  const input = scope.locator('input#quantity, input[name="quantity"]');
+  const target = (await firstVisible(input)) ?? ((await input.count()) > 0 ? input.first() : null);
+  if (!target) return;
+  await target.fill(String(qty)).catch(() => undefined);
+  await target.dispatchEvent('input').catch(() => undefined);
+  await target.dispatchEvent('change').catch(() => undefined);
+  await scope.page().waitForTimeout(200);
 }
 
 async function readQuickFeedQuantity(scope: Locator): Promise<number> {
@@ -2639,7 +2693,8 @@ export async function healBeforeBattleIfNeeded(page: Page): Promise<HealBeforeBa
 
   let fed = false;
   for (let attempt = 1; attempt <= HEAL_FEED_ATTEMPTS; attempt++) {
-    const cycle = await feedCharacterOnce(page);
+    const cycle = await feedCharacterOnce(page, attempt);
+    if (cycle === 'reserve_low') return 'heal_reserve_low';
     if (cycle === 'no_heal') {
       console.log('[combat] heal_failed — Heal control missing; staying on battle');
       return 'heal_failed';
@@ -2756,6 +2811,7 @@ type BattleClickResult =
   | 'modal_closed'
   | 'health_too_low'
   | 'heal_failed'
+  | 'heal_reserve_low'
   | 'verify_blocked'
   | 'pending_verify'
   | 'battle_in_progress';
@@ -2765,7 +2821,12 @@ function battleClickToStep(result: BattleClickResult): CombatStepResult {
   if (result === 'pending_verify') return 'pending_verify';
   if (result === 'battle_in_progress') return 'battle_in_progress';
   if (result === 'verify_blocked') return 'blocked_verify';
-  if (result === 'health_too_low' || result === 'heal_failed' || result === 'no_action') {
+  if (
+    result === 'health_too_low' ||
+    result === 'heal_failed' ||
+    result === 'heal_reserve_low' ||
+    result === 'no_action'
+  ) {
     return result;
   }
   return 'failed';
@@ -2867,6 +2928,18 @@ async function clickEnabledBattle(
   return 'no_fight';
 }
 
+async function settleAfterFoodPack(page: Page): Promise<void> {
+  await page.waitForTimeout(1_200);
+  const layer = page
+    .locator('[x-data*="food-for-battle"]')
+    .filter({ visible: true });
+  if ((await layer.count().catch(() => 0)) > 0) {
+    console.log('[combat] food picker still open after pack — closing before Battle');
+    await closeFoodPickerOnly(page);
+    await page.waitForTimeout(400);
+  }
+}
+
 async function prepareAndBattleOpenModal(
   page: Page,
   enemyLabel: string,
@@ -2883,7 +2956,7 @@ async function prepareAndBattleOpenModal(
 ): Promise<BattleClickResult> {
   // Low HP blocks every enemy tile. Feed from Heal before food/Max/stance.
   const heal = await healBeforeBattleIfNeeded(page);
-  if (heal === 'health_too_low' || heal === 'heal_failed') return heal;
+  if (heal === 'health_too_low' || heal === 'heal_failed' || heal === 'heal_reserve_low') return heal;
   if (!(await isEnemyDetailPanelOpen(page))) {
     console.log('[combat] battle modal closed during heal');
     return 'modal_closed';
@@ -2895,7 +2968,12 @@ async function prepareAndBattleOpenModal(
       console.log('[combat] fight already in progress — skipping food pack and Battle click');
       return 'battle_in_progress';
     }
-    await selectBattleFood(page, options?.bagCooked);
+    const food = await selectBattleFood(page, options?.bagCooked);
+    if (food === 'added') {
+      // Round 7: every pending_verify in the logs followed a food pack. Let the add-food
+      // request settle and make sure no food picker layer is left over the modal.
+      await settleAfterFoodPack(page);
+    }
   }
   await setMaxEnemies(page, maxEnemies);
   await setStance(page, stance);
@@ -2924,6 +3002,7 @@ export async function configureAndBattle(
   options?: { config?: AppConfig; apiActionType?: string | null; bagCooked?: number },
 ): Promise<CombatStepResult> {
   cookedCodSpentOnHeal = 0;
+  setHealBagHint(options?.bagCooked);
   packedBattleFoodQty = 0;
   const backedOff = tickPendingBattleBackoff();
   if ((await isFightInProgress(page)) || (await isQueuedBattleIndicatorVisible(page))) {
@@ -3020,7 +3099,12 @@ export async function configureAndBattle(
       await closeBattleEntityModal(page);
       return 'pending_verify';
     }
-    if (result === 'health_too_low' || result === 'heal_failed' || result === 'no_action') {
+    if (
+      result === 'health_too_low' ||
+      result === 'heal_failed' ||
+      result === 'heal_reserve_low' ||
+      result === 'no_action'
+    ) {
       if (result === 'no_action') {
         console.log('[combat] replace dialog closed — not walking other enemy tiles');
       } else {
@@ -3390,7 +3474,7 @@ export async function huntMore(
     !(await isFightInProgress(page))
   ) {
     const heal = await healBeforeBattleIfNeeded(page);
-    if (heal === 'health_too_low' || heal === 'heal_failed') return heal;
+    if (heal === 'health_too_low' || heal === 'heal_failed' || heal === 'heal_reserve_low') return heal;
     if ((await isEnemyDetailPanelOpen(page)) || (await isShowBattleEntityModal(page))) {
       await selectBattleFood(page);
       await setMaxEnemies(page, Number.MAX_SAFE_INTEGER);
