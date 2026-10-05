@@ -42,7 +42,7 @@ describe('round 9 request budget', () => {
     assert.equal(battleGapWaitMs({ at: 1_000 }, 5_000, 20_000), 16_000);
     assert.equal(battleGapWaitMs({ at: 1_000 }, 30_000, 20_000), 0);
     assert.equal(battleGapWaitMs(undefined, 0, 20_000), 0);
-    assert.equal(battleMinGapMs({}), 20_000);
+    assert.equal(battleMinGapMs({}), 120_000);
     assert.equal(battleMinGapMs({ BATTLE_MIN_GAP_MS: '5000' }), 5_000);
   });
 

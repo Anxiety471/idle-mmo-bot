@@ -203,8 +203,9 @@ async function setGatherQuantityBatch(page: Page, batch = 8): Promise<void> {
     await page.waitForTimeout(300);
     return;
   }
+  // Round 10: prefer long auto-running gathers — queue everything available, not 8.
   const capped = Number.isFinite(available) && available > 0 ? available : batch;
-  const value = String(Math.max(1, Math.min(batch, capped)));
+  const value = String(Math.max(1, m ? capped : Math.min(batch, capped)));
   await qty.first().fill(value).catch(() => undefined);
   await qty.first().dispatchEvent('input').catch(() => undefined);
   await qty.first().dispatchEvent('change').catch(() => undefined);

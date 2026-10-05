@@ -18,11 +18,11 @@ describe('round 8 battle throttle detection', () => {
     assert.equal(isThrottleResponse(429, 'not a url'), false);
   });
 
-  it('backoff defaults to 5 minutes, honours env, caps at 30 minutes', () => {
-    assert.equal(rateLimitBackoffMs({}), 300_000);
+  it('backoff defaults to 15 minutes, honours env, caps at 30 minutes', () => {
+    assert.equal(rateLimitBackoffMs({}), 900_000);
     assert.equal(rateLimitBackoffMs({ BATTLE_RATE_LIMIT_BACKOFF_MS: '60000' }), 60_000);
     assert.equal(rateLimitBackoffMs({ BATTLE_RATE_LIMIT_BACKOFF_MS: '99999999' }), 1_800_000);
-    assert.equal(rateLimitBackoffMs({ BATTLE_RATE_LIMIT_BACKOFF_MS: 'x' }), 300_000);
+    assert.equal(rateLimitBackoffMs({ BATTLE_RATE_LIMIT_BACKOFF_MS: 'x' }), 900_000);
   });
 
   it('watchHttp counts throttled responses and Livewire POST statuses, then detaches', () => {

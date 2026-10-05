@@ -1,3 +1,4 @@
+import { planSleep, readActionTimerMs, timedSleepEnabled } from './autopilot/action-timer.js';
 import { ensureActiveCharacter } from './character/character-select.js';
 import { resolveCharacterPaths } from './character/paths.js';
 import {
@@ -314,13 +315,39 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
           const message = logError instanceof Error ? logError.message : String(logError);
           console.error(`[autopilot] decision log write failed: ${message}`);
         }
-        if ((result.backoffMs ?? 0) >= 60_000) {
-          // Round 9: during a long backoff park the tab on about:blank so the game page
-          // (Livewire polling, client telemetry retries) sends nothing until the next cycle.
-          console.log(`[autopilot] backoff ${Math.round((result.backoffMs ?? 0) / 1000)}s — parking tab on about:blank`);
+        if (timedSleepEnabled()) {
+          // Round 10: AFK timing — sleep until the running action ends (+10–60 s), else
+          // FALLBACK_POLL_MS. The tab is parked on about:blank so nothing is sent meanwhile.
+          const timerMs = await readActionTimerMs(
+            session.page,
+            config,
+            action,
+            snapshot.currentAction?.skill,
+          );
+          const plan = planSleep({ backoffMs: result.backoffMs, timerMs });
+          const wakeAt = new Date(Date.now() + plan.sleepMs).toISOString();
+          console.log(
+            `[autopilot] sleep ${Math.round(plan.sleepMs / 1000)}s (${plan.source}` +
+              `${plan.timerMs !== undefined ? ` timer=${Math.round(plan.timerMs / 1000)}s` : ''}) until ${wakeAt} — parking tab on about:blank`,
+          );
+          writeHeartbeat(getLogDir(), {
+            cycle: context.cycle,
+            sleepUntil: wakeAt,
+            sleepSource: plan.source,
+            ...(plan.timerMs !== undefined ? { sleepTimerMs: plan.timerMs } : { sleepTimerMs: undefined }),
+          });
           await session.page.goto('about:blank').catch(() => undefined);
+          markProgress();
+          await sleep(plan.sleepMs);
+          markProgress();
+          writeHeartbeat(getLogDir(), { sleepUntil: undefined, sleepSource: undefined, sleepTimerMs: undefined });
+        } else {
+          if ((result.backoffMs ?? 0) >= 60_000) {
+            console.log(`[autopilot] backoff ${Math.round((result.backoffMs ?? 0) / 1000)}s — parking tab on about:blank`);
+            await session.page.goto('about:blank').catch(() => undefined);
+          }
+          await sleep(result.backoffMs ?? config.pollMs);
         }
-        await sleep(result.backoffMs ?? config.pollMs);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

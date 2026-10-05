@@ -30,11 +30,11 @@ export function isThrottleResponse(status: number, url: string, gameHost = 'idle
   }
 }
 
-/** Backoff after a throttled Battle (BATTLE_RATE_LIMIT_BACKOFF_MS, default 5 min, max 30 min). */
+/** Backoff after a throttled Battle (BATTLE_RATE_LIMIT_BACKOFF_MS, default 15 min, max 30 min). */
 export function rateLimitBackoffMs(env: NodeJS.ProcessEnv = process.env): number {
   const raw = Number(env.BATTLE_RATE_LIMIT_BACKOFF_MS);
   if (Number.isFinite(raw) && raw >= 0) return Math.min(30 * 60_000, Math.floor(raw));
-  return 5 * 60_000;
+  return 15 * 60_000;
 }
 
 export interface HttpWatch {

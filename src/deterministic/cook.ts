@@ -34,8 +34,8 @@ const COOK_PANEL_READY_MS = 4_000;
 /** Transient CDN / overlay misses — same budget as mining's Start retry. */
 const COOK_START_ATTEMPTS = 3;
 const COOK_QUANTITY_BATCH_LEGACY = 8;
-const COOK_MIN_BATCH = 16;
-const COOK_MAX_BATCH_DEFAULT = 60;
+const COOK_MIN_BATCH = 40; // round 10: longer cooks, fewer actions
+const COOK_MAX_BATCH_DEFAULT = 200;
 
 export interface CookBatchOptions {
   cooked?: number;

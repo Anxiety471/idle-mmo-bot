@@ -6,7 +6,7 @@
  * - Shared throttle flag (THROTTLE_FILE): any bot that sees 429s writes "until" so every
  *   bot backs off, not just the one that clicked Battle.
  * - Shared Battle gap (BATTLE_LOCK_FILE): bots never click Battle closer than
- *   BATTLE_MIN_GAP_MS (default 20 s) apart.
+ *   BATTLE_MIN_GAP_MS (default 120 s) apart.
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -83,7 +83,7 @@ export function sharedThrottleRemainingMs(now = Date.now(), path = THROTTLE_FILE
 export function battleMinGapMs(env: NodeJS.ProcessEnv = process.env): number {
   const raw = Number(env.BATTLE_MIN_GAP_MS);
   if (Number.isFinite(raw) && raw >= 0) return Math.min(10 * 60_000, Math.floor(raw));
-  return 20_000;
+  return 120_000;
 }
 
 /** Pure: wait needed before the next Battle click given the last shared click time. */
@@ -104,7 +104,7 @@ export async function claimBattleSlot(
   const gapMs = options.gapMs ?? battleMinGapMs();
   const path = options.path ?? BATTLE_LOCK_FILE;
   if (!options.path && !sharedLimiterEnabled()) return 0;
-  const maxWaitMs = options.maxWaitMs ?? 60_000;
+  const maxWaitMs = options.maxWaitMs ?? gapMs + 15_000;
   const start = Date.now();
   for (;;) {
     const wait = battleGapWaitMs(readJson(path), Date.now(), gapMs);

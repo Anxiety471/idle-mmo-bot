@@ -217,7 +217,16 @@ export const GATHER_GRACE_MS = 30_000;
 /** After buy_bait success, refuse another purchase for this long (or until stage advances). */
 export const BAIT_PURCHASE_COOLDOWN_MS = 15 * 60_000;
 /** Retry a surplus vendor sell at most this often (a failing sell must not loop). */
-export const SELL_RETRY_COOLDOWN_MS = envInt('SELL_RETRY_COOLDOWN_MS', 30 * 60_000);
+/**
+ * Round 10: SELL_SWEEP_INTERVAL_MS (default 30 min, never below 30 min). The older
+ * SELL_RETRY_COOLDOWN_MS is still honoured when the new variable is not set.
+ */
+export function sellSweepIntervalMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.SELL_SWEEP_INTERVAL_MS ?? env.SELL_RETRY_COOLDOWN_MS);
+  const v = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 30 * 60_000;
+  return Math.max(30 * 60_000, v);
+}
+export const SELL_RETRY_COOLDOWN_MS = sellSweepIntervalMs();
 /** A heal-reserve refusal forces cooking for at most this long. */
 export const HEAL_RESERVE_FLAG_MS = 3 * 60 * 60_000;
 
