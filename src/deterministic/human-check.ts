@@ -102,8 +102,13 @@ async function solveQuickCheckMatching(page: Page): Promise<boolean> {
   if (options.length === 0) return false;
 
   if (areEmojiChoicesBlank(options)) {
+    // Blank glyphs = emoji assets blocked (Cloudflare/CDN throttle); not solvable by the bot.
+    console.log(`[verify] Quick check emoji choices are BLANK (${options.length} buttons) — CDN/Cloudflare; needs a human`);
     return false;
   }
+  console.log(
+    `[verify] Quick check: ${options.filter((o) => o.emoji).length}/${options.length} emoji choices rendered — attempting`,
+  );
 
   const promptLines = lines.filter(
     (l) =>

@@ -314,6 +314,12 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
           const message = logError instanceof Error ? logError.message : String(logError);
           console.error(`[autopilot] decision log write failed: ${message}`);
         }
+        if ((result.backoffMs ?? 0) >= 60_000) {
+          // Round 9: during a long backoff park the tab on about:blank so the game page
+          // (Livewire polling, client telemetry retries) sends nothing until the next cycle.
+          console.log(`[autopilot] backoff ${Math.round((result.backoffMs ?? 0) / 1000)}s — parking tab on about:blank`);
+          await session.page.goto('about:blank').catch(() => undefined);
+        }
         await sleep(result.backoffMs ?? config.pollMs);
       }
     } catch (error) {

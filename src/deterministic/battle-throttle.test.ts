@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { describe, it } from 'node:test';
 import type { Page } from 'playwright';
-import { isThrottleResponse, rateLimitBackoffMs, watchHttp } from './battle-confirm.js';
+import { isThrottleResponse, rateLimitBackoffMs, throttledPathKey, watchHttp } from './battle-confirm.js';
 import { maxDefined, saleConfirmedByGold } from './vendor-sell.js';
 
 function fakeResp(status: number, url: string, method = 'GET') {
@@ -33,9 +33,17 @@ describe('round 8 battle throttle detection', () => {
     page.emit('response', fakeResp(429, 'https://web.idle-mmo.com/livewire/update', 'POST'));
     assert.equal(watch.throttled, 2);
     assert.deepEqual(watch.livewire, [200, 429]);
+    assert.deepEqual(watch.throttledPaths, ['GET /combat/battle', 'POST /livewire/update']);
     watch.stop();
     page.emit('response', fakeResp(429, 'https://web.idle-mmo.com/combat/battle'));
     assert.equal(watch.throttled, 2);
+  });
+});
+
+describe('throttledPathKey', () => {
+  it('keeps method + path, drops the query, collapses ids', () => {
+    assert.equal(throttledPathKey('post', 'https://web.idle-mmo.com/api/34523452/235453253245/x?token=abc'), 'POST /api/:id/:id/x');
+    assert.equal(throttledPathKey('GET', 'nope'), undefined);
   });
 });
 
