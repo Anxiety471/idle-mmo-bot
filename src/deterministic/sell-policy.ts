@@ -17,6 +17,7 @@ export const DEFAULT_SELL_KEEP_ITEMS = [
   'Coal Ore',
   'Coal',
   'Yew Log',
+  'Oak Log',
   'Blue Scroll',
   'Cooked Salmon',
   'Salmon',
@@ -25,7 +26,8 @@ export const DEFAULT_SELL_KEEP_ITEMS = [
 ];
 
 /** Item detail types that may be sold. Weapons, armour, tools, pets, food, collectibles never are. */
-export const SELLABLE_TYPES = ['crafting', 'resource', 'material'];
+/** Round 8: only Crafting-type drops (loot) are sold; logs, ores, resources are kept. */
+export const SELLABLE_TYPES = ['crafting'];
 
 /** Name patterns that are always protected (pets, eggs, gear, consumables, keys). */
 const PROTECTED_NAME =
@@ -51,15 +53,20 @@ export interface SellPolicy {
   keepQty: Map<string, number>;
   oakKeep: number;
   oakSurplus: number;
+  /** SELL_OAK_SURPLUS=true re-enables selling Oak Log above oakSurplus (off by default). */
+  sellOak: boolean;
 }
 
 /**
  * SELL_KEEP_ITEMS="A,B" adds to the protected list; SELL_KEEP_QTY="Goblin Pouch:300,Ducks Mouth:200"
  * overrides per-item keeps; SELL_LOOT_KEEP (150) is the default keep per crafting drop;
- * SELL_KEEP_OAK (200) / SELL_SURPLUS_OAK (500) govern Oak Log.
+ * Oak Log is kept by default (round 8); SELL_OAK_SURPLUS=true with SELL_KEEP_OAK (200) /
+ * SELL_SURPLUS_OAK (500) re-enables selling the surplus.
  */
 export function parseSellPolicy(env: NodeJS.ProcessEnv = process.env): SellPolicy {
+  const sellOak = /^(1|true|yes)$/i.test(env.SELL_OAK_SURPLUS?.trim() ?? '');
   const keep = new Set(DEFAULT_SELL_KEEP_ITEMS.map((s) => s.toLowerCase()));
+  if (sellOak) keep.delete('oak log');
   for (const name of (env.SELL_KEEP_ITEMS ?? '').split(',')) {
     const n = name.trim().toLowerCase();
     if (n) keep.add(n);
@@ -77,6 +84,7 @@ export function parseSellPolicy(env: NodeJS.ProcessEnv = process.env): SellPolic
     lootKeep: envInt(env, 'SELL_LOOT_KEEP', DEFAULT_SELL_LOOT_KEEP),
     oakKeep: envInt(env, 'SELL_KEEP_OAK', DEFAULT_SELL_KEEP_OAK),
     oakSurplus: envInt(env, 'SELL_SURPLUS_OAK', DEFAULT_SELL_SURPLUS_OAK),
+    sellOak,
   };
 }
 
@@ -104,7 +112,7 @@ export function decideSale(
   if (policy.keep.has(lower)) return { sell: 0, reason: 'keep-list' };
   if (PROTECTED_NAME.test(name)) return { sell: 0, reason: 'protected-name' };
 
-  if (lower === 'oak log') {
+  if (lower === 'oak log' && policy.sellOak) {
     if (item.qty <= policy.oakSurplus) return { sell: 0, reason: `oak<=${policy.oakSurplus}` };
     return { sell: item.qty - policy.oakKeep, reason: `oak surplus keep ${policy.oakKeep}` };
   }

@@ -40,9 +40,22 @@ describe('sell policy (round 7: sell useless inventory)', () => {
     assert.equal(d.reason, 'quest');
   });
 
-  it('Oak Log: only above 500, down to 200', () => {
+  it('Oak Log is protected by default (round 8)', () => {
     assert.equal(decideSale({ name: 'Oak Log', qty: 231 }, policy).sell, 0);
-    assert.equal(decideSale({ name: 'Oak Log', qty: 2900 }, policy).sell, 2700);
+    assert.equal(decideSale({ name: 'Oak Log', qty: 2900, type: 'Log' }, policy).sell, 0);
+    assert.equal(decideSale({ name: 'Oak Log', qty: 2900, type: 'Crafting' }, policy).reason, 'keep-list');
+  });
+
+  it('SELL_OAK_SURPLUS=true re-enables Oak surplus: only above 500, down to 200', () => {
+    const p = parseSellPolicy({ SELL_OAK_SURPLUS: 'true' });
+    assert.equal(decideSale({ name: 'Oak Log', qty: 231 }, p).sell, 0);
+    assert.equal(decideSale({ name: 'Oak Log', qty: 2900 }, p).sell, 2700);
+  });
+
+  it('only Crafting-type drops are sold (resources/materials/logs kept)', () => {
+    assert.equal(decideSale({ name: 'Iron Ore', qty: 5000, type: 'Resource' }, policy).sell, 0);
+    assert.equal(decideSale({ name: 'Thing', qty: 5000, type: 'Material' }, policy).sell, 0);
+    assert.equal(decideSale({ name: 'Birch Log', qty: 5000, type: 'Log' }, policy).sell, 0);
   });
 
   it('env keep-list and per-item keeps are configurable', () => {

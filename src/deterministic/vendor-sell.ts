@@ -1,3 +1,4 @@
+import { watchHttp } from './battle-confirm.js';
 import type { Locator, Page } from 'playwright';
 import { join } from 'node:path';
 import { appendFileSync, mkdirSync } from 'node:fs';
@@ -101,7 +102,19 @@ async function shot(page: Page, config: AppConfig, tag: string): Promise<void> {
   console.log(`[sell] screenshot ${path}`);
 }
 
-export type VendorSellResult = 'sold' | 'not_found' | 'no_sell_button' | 'no_confirm' | 'failed';
+export type VendorSellResult = 'sold' | 'not_found' | 'no_sell_button' | 'no_confirm' | 'failed' | 'throttled';
+
+/** Larger of two optional numbers (undefined when both are). */
+export function maxDefined(a: number | undefined, b: number | undefined): number | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return Math.max(a, b);
+}
+
+/** A vendor sale only counts when the gold read afterwards is strictly higher. */
+export function saleConfirmedByGold(before: number | undefined, after: number | undefined): boolean {
+  return before !== undefined && after !== undefined && after > before;
+}
 
 /** Quantity to sell: everything above `keep`, never negative. */
 export function vendorSellQuantity(have: number, keep: number): number {
@@ -208,12 +221,27 @@ async function tooltipText(page: Page): Promise<string> {
 export async function readInventoryGold(page: Page): Promise<number | undefined> {
   const coin = page.locator(`${TILE_SELECTOR}:has(img[src*="gold_coin"])`).first();
   if ((await coin.count().catch(() => 0)) === 0) return undefined;
-  await coin.hover({ timeout: 2000 }).catch(() => undefined);
-  await page.waitForTimeout(300);
-  const tip = await tooltipText(page);
-  const fromTip = Number.parseInt(tip.replace(/[^\d]/g, ''), 10);
+  // Round 8: tooltips lag (a back-to-back sale read the previous value). Park the mouse,
+  // hover, and accept a value only once two consecutive reads agree.
   await page.mouse.move(0, 0).catch(() => undefined);
-  if (Number.isFinite(fromTip) && fromTip >= 0 && /\d/.test(tip)) return fromTip;
+  await page.waitForTimeout(250);
+  await coin.hover({ timeout: 2000 }).catch(() => undefined);
+  let prev: number | undefined;
+  let agreed: number | undefined;
+  for (let i = 0; i < 5; i++) {
+    await page.waitForTimeout(350);
+    const tip = await tooltipText(page);
+    const n = /\d/.test(tip) ? Number.parseInt(tip.replace(/[^\d]/g, ''), 10) : Number.NaN;
+    const value = Number.isFinite(n) && n >= 0 ? n : undefined;
+    if (value !== undefined && value === prev) {
+      agreed = value;
+      break;
+    }
+    prev = value;
+  }
+  await page.mouse.move(0, 0).catch(() => undefined);
+  if (agreed !== undefined) return agreed;
+  if (prev !== undefined) return prev;
   const label = (await coin.innerText().catch(() => '')).trim();
   const fromLabel = parseTileQuantity(label);
   return fromLabel > 0 ? fromLabel : undefined;
@@ -327,8 +355,24 @@ async function sellOpenDetail(page: Page, item: string, qty: number): Promise<Ve
     await page.keyboard.press('Escape').catch(() => undefined);
     return 'no_confirm';
   }
-  await confirm.click({ timeout: 5000 });
-  await page.waitForTimeout(1500);
+  // Round 8: HitoriIdle/KitaSan "sold" with no gold change while the shared IP was being
+  // throttled (429). Watch the confirm's HTTP and report what the game showed.
+  const http = watchHttp(page);
+  try {
+    await confirm.click({ timeout: 5000 });
+    await page.waitForTimeout(2000);
+  } finally {
+    http.stop();
+  }
+  const toast = ((await page.locator('[data-sonner-toast]').filter({ visible: true }).first().innerText({ timeout: 500 }).catch(() => '')) || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 100);
+  if (http.throttled > 0) {
+    console.log(`[sell] ${item}: Sell confirm throttled by the server (429/503 x${http.throttled}) toast="${toast}"`);
+    return 'throttled';
+  }
+  if (toast) console.log(`[sell] ${item}: after Sell toast="${toast}" livewire=[${http.livewire.join(',')}]`);
   return 'sold';
 }
 
@@ -350,6 +394,7 @@ export async function sellUselessInventory(
   await page.waitForTimeout(1500);
 
   summary.goldBefore = await readInventoryGold(page);
+  let lastGold = summary.goldBefore;
   const tiles = await mapInventory(page);
   console.log(
     `[sell] inventory map (gold=${summary.goldBefore ?? '?'}): ` +
@@ -382,7 +427,8 @@ export async function sellUselessInventory(
       await page.keyboard.press('Escape').catch(() => undefined);
       continue;
     }
-    const before = await readInventoryGold(page);
+    // Gold never drops during a sweep: a lower read is a stale tooltip, use the last confirmed value.
+    const before = maxDefined(await readInventoryGold(page), lastGold);
     // Re-open and re-verify the detail right before selling (hovering the coin moved focus).
     const again = await readTileDetail(page, fresh).catch(() => ({ verified: false }) as { verified: boolean; qty?: number });
     if (!again.verified || again.qty !== item.qty) {
@@ -393,13 +439,43 @@ export async function sellUselessInventory(
     const result = await sellOpenDetail(page, item.name, decision.sell);
     if (result !== 'sold') {
       logSale({ item: item.name, qty: decision.sell, result, type: item.type });
+      if (result === 'throttled') break; // stop the sweep; retry after the cooldown
       continue;
     }
     await navigateTo(page, config, '/inventory');
     await waitForPageReady(page, 'inventory').catch(() => undefined);
     await page.waitForTimeout(1200);
-    const after = await readInventoryGold(page);
-    const gold = before !== undefined && after !== undefined ? after - before : undefined;
+    await page.waitForTimeout(1500);
+    let after = await readInventoryGold(page);
+    if (!saleConfirmedByGold(before, after)) {
+      // Round 8: the coin tooltip can lag, and a throttled/blocked request leaves gold as is.
+      // Re-read once after a fresh load before deciding.
+      await page.waitForTimeout(2500);
+      await navigateTo(page, config, '/inventory');
+      await waitForPageReady(page, 'inventory').catch(() => undefined);
+      await page.waitForTimeout(1500);
+      after = await readInventoryGold(page);
+    }
+    if (!saleConfirmedByGold(before, after)) {
+      const left = (await mapInventory(page).catch(() => [] as MappedTile[])).find((t) => t.name === item.name);
+      console.log(
+        `[sell] FAILED ${item.name} x${decision.sell}: gold did not change after re-read ` +
+          `(gold ${before ?? '?'} → ${after ?? '?'}, stack now ${left ? left.qty : 'gone'}) — not counted as sold`,
+      );
+      logSale({
+        item: item.name,
+        qty: decision.sell,
+        result: 'unconfirmed_no_gold_change',
+        goldBefore: before,
+        goldAfter: after,
+        qtyBefore: item.qty,
+        qtyAfter: left ? left.qty : 0,
+        type: item.type,
+      });
+      continue;
+    }
+    const gold = after! - before!;
+    lastGold = after;
     summary.sold.push({ item: item.name, qty: decision.sell, gold });
     console.log(
       `[sell] SOLD ${item.name} x${decision.sell} (type=${item.type ?? '?'}, ${decision.reason}) ` +

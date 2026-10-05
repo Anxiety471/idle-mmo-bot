@@ -76,7 +76,11 @@ import {
   attemptHumanVerify,
   isHumanCheckPresent,
 } from '../deterministic/human-check.js';
-import { shouldRefreshCookGateAfterFight } from '../deterministic/battle-confirm.js';
+import {
+  lastBattleConfirmThrottled,
+  rateLimitBackoffMs,
+  shouldRefreshCookGateAfterFight,
+} from '../deterministic/battle-confirm.js';
 import { battleGuard } from './battle-guard.js';
 import {
   invalidateInventoryDomCache,
@@ -311,6 +315,15 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
     // Hunt More, no credit — the next cycle picks up once it ends.
     takePackedBattleFood();
     return combatRoundOutcome('battle:battle_in_progress:wait', config);
+  }
+
+  if (battleResult === 'pending_verify' && lastBattleConfirmThrottled()) {
+    // Round 8: the Battle request hit 429/503 (Cloudflare/game throttling this IP). A
+    // reload or retry right away only extends the throttle — back off, no hunt credit.
+    const backoffMs = rateLimitBackoffMs();
+    console.log(`[combat] Battle throttled by the server (429) — backing off ${Math.round(backoffMs / 1000)}s, no hunt credit`);
+    takePackedBattleFood();
+    return { outcome: 'battle:pending_verify:throttled', backoffMs };
   }
 
   if (battleResult === 'pending_verify') {
