@@ -54,14 +54,18 @@ describe('round 9 hunt deferral (HUNT_ENABLED=false)', () => {
 
   it('deferredGatherStage picks the resource furthest below target, with hysteresis', () => {
     const t = { coal: 100, cod: 100, cook: 100 };
-    assert.equal(deferredGatherStage({ coal: 5500, rawCod: 149, cooked: 100 }, t), 'cook_cod');
+    // every target met → never cook more; fish (lower than coal)
+    assert.equal(deferredGatherStage({ coal: 5500, rawCod: 149, cooked: 103 }, t), 'fish_cod');
+    assert.equal(deferredGatherStage({ coal: 5500, rawCod: 149, cooked: 40 }, t), 'cook_cod');
     assert.equal(deferredGatherStage({ coal: 5500, rawCod: 10, cooked: 300 }, t), 'fish_cod');
     assert.equal(deferredGatherStage({ coal: 20, rawCod: 200, cooked: 300 }, t), 'mine_coal');
     // cooking needs raw cod and coal
     assert.equal(deferredGatherStage({ coal: 500, rawCod: 0, cooked: 0 }, t), 'fish_cod');
     // keep the previous pick unless another is clearly lower
-    assert.equal(deferredGatherStage({ coal: 5500, rawCod: 120, cooked: 100 }, t, 'fish_cod'), 'fish_cod');
-    assert.equal(deferredGatherStage({ coal: 5500, rawCod: 300, cooked: 100 }, t, 'fish_cod'), 'cook_cod');
+    assert.equal(deferredGatherStage({ coal: 5500, rawCod: 60, cooked: 50 }, t, 'fish_cod'), 'fish_cod');
+    assert.equal(deferredGatherStage({ coal: 5500, rawCod: 90, cooked: 20 }, t, 'fish_cod'), 'cook_cod');
+    // cooked met: a previous cook pick is dropped
+    assert.equal(deferredGatherStage({ coal: 5500, rawCod: 149, cooked: 103 }, t, 'cook_cod'), 'fish_cod');
   });
 
   it('evaluatePlaybook defers the hunt stage, keeps the hunt count, prefers gathering, drops kill-quest talk', () => {
@@ -105,5 +109,17 @@ describe('round 9 hunt deferral (HUNT_ENABLED=false)', () => {
     const p = evaluatePlaybook(snap({ 'Coal Ore': 5500, 'Raw Cod': 149, 'Cooked Cod': 100, 'Cheap Bait': 5 }));
     assert.equal(p.stage, 'hunt_battle_batch');
     assert.ok(!p.huntDeferred);
+  });
+
+  it('stays in the deferred loop after a cook snap-back and shows the hint', () => {
+    statePath = join('/tmp', `playbook-hunt-defer3-${process.pid}-${Date.now()}.json`);
+    process.env.PLAYBOOK_STATE_PATH = statePath;
+    process.env.EARLY_PLAYBOOK = 'true';
+    process.env.HUNT_ENABLED = 'false';
+    writeFileSync(statePath, `${JSON.stringify({ version: 1, stage: 'cook_cod', deferredGatherStage: 'cook_cod', counts: counts({ cookedCod: 20 }), baitOwned: true })}\n`);
+    const p = evaluatePlaybook(snap({ 'Coal Ore': 5500, 'Raw Cod': 149, 'Cooked Cod': 103, 'Cheap Bait': 5 }));
+    assert.equal(p.huntDeferred, true);
+    assert.equal(p.stage, 'fish_cod');
+    assert.match(p.curriculumHint, /hunt deferred/);
   });
 });

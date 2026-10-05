@@ -34,8 +34,8 @@ const COOK_PANEL_READY_MS = 4_000;
 /** Transient CDN / overlay misses — same budget as mining's Start retry. */
 const COOK_START_ATTEMPTS = 3;
 const COOK_QUANTITY_BATCH_LEGACY = 8;
-const COOK_MIN_BATCH = 16;
-const COOK_MAX_BATCH_DEFAULT = 60;
+const COOK_MIN_BATCH = 40; // round 10: longer cooks, fewer actions
+const COOK_MAX_BATCH_DEFAULT = 200;
 
 export interface CookBatchOptions {
   cooked?: number;
@@ -208,6 +208,17 @@ async function setCookQuantityBatch(
   const qty = page.locator('input[name="quantity"]');
   if ((await qty.count()) === 0) return;
   const pageText = await page.locator('body').innerText().catch(() => '');
+  // Round 10: always cook at Max (longest auto-run) when the button exists; the
+  // playbook decides whether to cook at all, not the batch size.
+  const maxBtn = page.getByRole('button', { name: 'Max', exact: true });
+  if (!/^(0|false|no)$/i.test(process.env.COOK_USE_MAX?.trim() ?? '') && (await maxBtn.count()) > 0) {
+    const m = pageText.match(/you can perform this action\s+(\d+)\s+times/i);
+    await maxBtn.first().click({ force: true }).catch(() => undefined);
+    await page.waitForTimeout(300);
+    const filled = await qty.first().inputValue().catch(() => '');
+    console.log(`[cook] batch quantity Max (${filled || '?'}${m ? ` of ${m[1]} available` : ''})`);
+    if (filled && Number(filled) > 0) return;
+  }
   const batch = cookBatchQuantity(pageText, opts);
   console.log(
     `[cook] batch quantity ${batch}` +

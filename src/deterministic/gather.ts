@@ -196,15 +196,16 @@ async function setGatherQuantityBatch(page: Page, batch = 8): Promise<void> {
   const maxBtn = page.getByRole('button', { name: 'Max', exact: true });
   const canPerformText = await page.locator('body').innerText();
   const m = canPerformText.match(/you can perform this action\s+(\d+)\s+times/i);
-  const available = m ? Number(m[1]) : batch;
-  // Max with tiny material stocks can leave Start disabled — only Max when stock is healthy.
-  if (available >= 20 && (await maxBtn.count()) > 0) {
+  const available = m ? Number(m[1]) : undefined;
+  // Round 10: always the longest auto-run — Max when the button exists (AFK game).
+  if ((await maxBtn.count()) > 0 && available !== 0) {
     await maxBtn.first().click({ force: true }).catch(() => undefined);
     await page.waitForTimeout(300);
+    console.log(`[gather] quantity Max${available !== undefined ? ` (${available} available)` : ''}`);
     return;
   }
-  const capped = Number.isFinite(available) && available > 0 ? available : batch;
-  const value = String(Math.max(1, Math.min(batch, capped)));
+  const capped = available !== undefined && Number.isFinite(available) && available > 0 ? available : batch;
+  const value = String(Math.max(1, capped));
   await qty.first().fill(value).catch(() => undefined);
   await qty.first().dispatchEvent('input').catch(() => undefined);
   await qty.first().dispatchEvent('change').catch(() => undefined);

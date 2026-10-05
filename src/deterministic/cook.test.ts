@@ -38,14 +38,14 @@ describe('cookBatchQuantity', () => {
     assert.equal(cookBatchQuantity('You can perform this action 0 times'), 1);
   });
 
-  it('uses target-aware sizing with min batch 16 and max 60', () => {
+  it('uses target-aware sizing with min batch 40 and max 200 (round 10: longer cooks)', () => {
     assert.equal(
       cookBatchQuantity('You can perform this action 80 times', {
         cooked: 22,
         target: 100,
         rawAvailable: 80,
       }),
-      60,
+      78,
     );
     assert.equal(
       cookBatchQuantity('You can perform this action 80 times', {
@@ -53,7 +53,7 @@ describe('cookBatchQuantity', () => {
         target: 100,
         rawAvailable: 80,
       }),
-      16,
+      40,
     );
     // Clamped to the raw available (snapshot) when it is a positive read.
     assert.equal(

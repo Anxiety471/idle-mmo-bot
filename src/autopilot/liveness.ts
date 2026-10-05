@@ -69,6 +69,10 @@ export interface HeartbeatState {
   lastTickAt: string;
   lastProgressAt: string;
   lastResume?: { at: string; suspendedMs: number };
+  /** Round 10: planned wake time while sleeping until the running action ends. */
+  sleepUntil?: string;
+  sleepSource?: string;
+  sleepTimerMs?: number;
 }
 
 let heartbeat: HeartbeatState = {
