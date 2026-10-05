@@ -209,7 +209,9 @@ async function tooltipText(page: Page): Promise<string> {
   return (
     (await page
       .locator('.tippy-content:visible, [role="tooltip"]:visible')
-      .first()
+      // Round 10: newest tooltip wins — a lingering gold-coin tooltip earlier in the DOM
+      // made every tile read the same stale tip, so the map came back empty.
+      .last()
       .innerText()
       .catch(() => '')) || ''
   )
@@ -265,7 +267,7 @@ export async function mapInventory(page: Page): Promise<MappedTile[]> {
     await page.waitForTimeout(150);
     await tile.hover({ timeout: 2000 }).catch(() => undefined);
     let tip = '';
-    const deadline = Date.now() + 1_500;
+    const deadline = Date.now() + (out.length === 0 ? 3_000 : 1_500);
     while (Date.now() < deadline) {
       await page.waitForTimeout(150);
       tip = await tooltipText(page);
@@ -395,6 +397,9 @@ export async function sellUselessInventory(
   await waitForPageReady(page, 'inventory').catch(() => undefined);
   await page.waitForTimeout(1500);
 
+  // Round 10: wait for the grid (tiles render a few seconds after domcontentloaded).
+  await page.locator(TILE_SELECTOR).nth(1).waitFor({ state: 'visible', timeout: 8_000 }).catch(() => undefined);
+  await page.waitForTimeout(1500);
   summary.goldBefore = await readInventoryGold(page);
   if (summary.goldBefore === undefined) {
     // Round 9: without a gold reading no sale can be verified — skip the sweep cleanly.
@@ -404,7 +409,24 @@ export async function sellUselessInventory(
     return summary;
   }
   let lastGold: number | undefined = summary.goldBefore;
-  const tiles = await mapInventory(page);
+  let tiles = await mapInventory(page);
+  if (tiles.length === 0) {
+    // Round 10: an empty map while tiles exist is a render/tooltip race (seen live on
+    // ed6ecf4). Reload once, wait for the grid, and map again before giving up.
+    const tileCount = await page.locator(TILE_SELECTOR).count().catch(() => 0);
+    console.log(`[sell] inventory map empty (tiles=${tileCount}) — reloading once and re-mapping`);
+    await navigateTo(page, config, '/inventory');
+    await waitForPageReady(page, 'inventory').catch(() => undefined);
+    await page.locator(TILE_SELECTOR).nth(1).waitFor({ state: 'visible', timeout: 8_000 }).catch(() => undefined);
+    await page.waitForTimeout(3000);
+    tiles = await mapInventory(page);
+    if (tiles.length === 0) {
+      console.log(`[sell] sweep skipped: inventory map still empty (tiles=${await page.locator(TILE_SELECTOR).count().catch(() => 0)})`);
+      logSale({ result: 'sweep_skipped_empty_map' });
+      summary.skipped = 'empty_map';
+      return summary;
+    }
+  }
   console.log(
     `[sell] inventory map (gold=${summary.goldBefore ?? '?'}): ` +
       tiles.map((t) => `${t.name} x${t.qty}`).join(', '),
