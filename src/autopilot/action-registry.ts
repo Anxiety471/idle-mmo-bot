@@ -58,7 +58,14 @@ export function deriveAllowedActions(
 
   const playbook = getPlaybookFromSnapshot(snapshot);
   const filtered = playbook ? filterAllowedByPlaybook(allowed, snapshot, playbook) : allowed;
-  const switched = applyHuntSwitch(filtered, allowed);
+  let switched = applyHuntSwitch(filtered, allowed);
+  if (playbook?.baitShort) {
+    // Round 11b: the hunt switch re-adds raw actions — bait missing still means no fish/buy.
+    switched = switched.filter((a) => a !== 'fish_cod' && a !== 'buy_bait');
+    for (const a of ['mine_coal', 'gather_oak'] as AutopilotActionId[]) {
+      if (playbook.stage === 'fish_cod' && allowed.includes(a) && !switched.includes(a)) switched.push(a);
+    }
+  }
   if (!huntEnabled() && !snapshot.pendingQuests.some((q) => !isKillQuestTitle(q.title))) {
     // Round 9: hunting off — talking to a quest giver about a kill quest only stalls.
     const noTalk = switched.filter((a) => a !== 'quest_talk_accept');
