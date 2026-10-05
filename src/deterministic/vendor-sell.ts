@@ -320,6 +320,8 @@ export interface InventorySellSummary {
   sold: { item: string; qty: number; gold?: number }[];
   goldBefore?: number;
   goldAfter?: number;
+  /** Set when the sweep did not run (e.g. 'no_gold_reading'). */
+  skipped?: string;
 }
 
 /** Click the already-open detail's Sell to Vendor, set quantity, confirm. */
@@ -394,7 +396,14 @@ export async function sellUselessInventory(
   await page.waitForTimeout(1500);
 
   summary.goldBefore = await readInventoryGold(page);
-  let lastGold = summary.goldBefore;
+  if (summary.goldBefore === undefined) {
+    // Round 9: without a gold reading no sale can be verified — skip the sweep cleanly.
+    console.log('[sell] sweep skipped: inventory gold could not be read (no sale can be verified)');
+    logSale({ result: 'sweep_skipped_no_gold' });
+    summary.skipped = 'no_gold_reading';
+    return summary;
+  }
+  let lastGold: number | undefined = summary.goldBefore;
   const tiles = await mapInventory(page);
   console.log(
     `[sell] inventory map (gold=${summary.goldBefore ?? '?'}): ` +

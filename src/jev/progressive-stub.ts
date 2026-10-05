@@ -78,7 +78,13 @@ export class ProgressiveStubJev implements SupervisorAdvisor {
     if (questCurriculum.hasEasyFinishableQuest) {
       const turnIn = pickAllowed(allowed, ['quest_turnin']);
       if (turnIn) return turnIn;
-      const questPreferred = pickAllowed(allowed, questCurriculum.preferredActions);
+      // Round 9: with hunting deferred, gathering leads — quest talk waits for the playbook.
+      const questPreferred = pickAllowed(
+        allowed,
+        playbook?.huntDeferred
+          ? questCurriculum.preferredActions.filter((a) => a !== 'quest_talk_accept')
+          : questCurriculum.preferredActions,
+      );
       if (questPreferred) return questPreferred;
     }
 

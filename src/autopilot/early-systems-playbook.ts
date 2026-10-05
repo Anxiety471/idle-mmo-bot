@@ -81,6 +81,8 @@ export interface PlaybookCounts {
 export interface PlaybookProgress {
   enabled: boolean;
   stage: EarlyStageId;
+  /** Round 9: true when HUNT_ENABLED=false replaced the hunt stage with coal/fish/cook. */
+  huntDeferred?: boolean;
   stageIndex: number;
   stageGoal: string;
   preferredActions: AutopilotAction[];
@@ -167,6 +169,8 @@ interface PersistedPlaybook {
   lastSellAttemptAt?: string;
   /** ISO time a heal was refused to protect the Cooked Cod reserve (cook before next hunt). */
   healReserveLowAt?: string;
+  /** Round 9: last coal/fish/cook pick while hunting is deferred (HUNT_ENABLED=false). */
+  deferredGatherStage?: string;
 }
 
 /** Sequential batch stages only — manage_pets is async and not in this order. */
@@ -878,6 +882,46 @@ function buildPreferredActions(
   ];
 }
 
+/** HUNT_ENABLED=false: hunting is deferred (not completed) for this character. */
+export function huntingDeferred(env: NodeJS.ProcessEnv = process.env): boolean {
+  return /^(0|false|no|off)$/i.test(env.HUNT_ENABLED?.trim() ?? '');
+}
+
+/** Quest titles whose objective is killing (Goblin/Duck/Rabbit hunts, Defeat/Kill/Slay …). */
+export const KILL_QUEST_TITLE = /\b(kill|defeat|slay|hunt|goblin|duck|rabbit|menace|fortune|whisper)\b/i;
+
+export function isKillQuestTitle(title: string): boolean {
+  return KILL_QUEST_TITLE.test(title);
+}
+
+export type DeferredGatherStage = 'mine_coal' | 'fish_cod' | 'cook_cod';
+
+/**
+ * Round 9: with hunting deferred, loop coal → fish → cook by need: pick the resource
+ * furthest below its target (bag count / target). Cooking needs Raw Cod and Coal. The
+ * previous pick is kept unless another is clearly lower (×1.5) so gathers aren't
+ * interrupted every cycle.
+ */
+export function deferredGatherStage(
+  bag: { coal: number; rawCod: number; cooked: number },
+  targets: { coal: number; cod: number; cook: number },
+  previous?: string,
+): DeferredGatherStage {
+  const ratio: Record<DeferredGatherStage, number> = {
+    mine_coal: bag.coal / Math.max(1, targets.coal),
+    fish_cod: bag.rawCod / Math.max(1, targets.cod),
+    cook_cod: bag.rawCod > 0 && bag.coal > 0 ? bag.cooked / Math.max(1, targets.cook) : Number.POSITIVE_INFINITY,
+  };
+  const order: DeferredGatherStage[] = ['mine_coal', 'fish_cod', 'cook_cod'];
+  let best: DeferredGatherStage = order[0];
+  for (const s of order) if (ratio[s] < ratio[best]) best = s;
+  if (previous && (order as string[]).includes(previous)) {
+    const prev = previous as DeferredGatherStage;
+    if (Number.isFinite(ratio[prev]) && ratio[prev] <= ratio[best] * 1.5 + 0.05) return prev;
+  }
+  return best;
+}
+
 function deriveStage(
   counts: PlaybookCounts,
   snapshot: GameSnapshot,
@@ -1224,6 +1268,22 @@ export function evaluatePlaybook(
     stage = 'mine_coal';
   }
 
+  // Round 9: HUNT_ENABLED=false defers the hunt stage (not completed: huntBattles is kept)
+  // and loops coal → fish → cook instead. The real stage is what gets persisted.
+  const realStage = stage;
+  const huntDeferred = !snapshotDegraded && huntingDeferred() && stage === 'hunt_battle_batch';
+  if (huntDeferred) {
+    stage = deferredGatherStage(
+      {
+        coal: invCount(snapshot, ['Coal Ore', 'Coal']),
+        rawCod: rawCodBagCount(snapshot),
+        cooked: cookedCodCount(snapshot.inventory),
+      },
+      { coal: COAL_MIN, cod: COD_MIN, cook: COOK_MIN },
+      persisted.deferredGatherStage,
+    );
+  }
+
   const busyMiningCoal = isBusyMiningCoal(snapshot);
   const staleTrack = updateStaleCoalBusyTracking(persisted, counts.coal, busyMiningCoal);
   const staleCoalGather = staleTrack.stale;
@@ -1356,6 +1416,22 @@ export function evaluatePlaybook(
     }
   }
 
+  if (huntDeferred) {
+    // Gathering leads; quest talk only for a non-kill pending quest, and only last.
+    const nonKillPending = snapshot.pendingQuests.some((q) => !isKillQuestTitle(q.title));
+    const huntish = new Set<AutopilotAction>(['hunt_battle_batch', 'hunt_battle', 'hunt_rabbits', 'quest_talk_accept']);
+    preferredActions = preferredActions.filter((a) => !huntish.has(a));
+    const work: AutopilotAction[] = [
+      stage as AutopilotAction,
+      ...(['gather_oak', 'mine_coal', 'fish_cod', 'cook_cod'] as AutopilotAction[]).filter((a) => a !== stage),
+    ];
+    preferredActions = [...work, ...preferredActions.filter((a) => !work.includes(a))];
+    if (nonKillPending) preferredActions.push('quest_talk_accept');
+    interruptActions = interruptActions.filter((a) => !huntish.has(a));
+    if (!interruptActions.includes(stage as AutopilotAction)) interruptActions.unshift(stage as AutopilotAction);
+    deprioritizedActions = deprioritizedActions.filter((a) => !work.includes(a));
+  }
+
   const baitPurchaseRecent = recentBaitPurchase(persisted.lastBaitPurchaseAt);
   let curriculumHint = snapBackReason
     ? `EARLY PLAYBOOK ${snapBackReason}. Strict real-count batch gates.`
@@ -1367,6 +1443,11 @@ export function evaluatePlaybook(
       ? `EARLY PLAYBOOK fish_cod backoff (${fishBackoff.failures} failures) until ${fishBackoff.until ?? 'cooldown'} — ` +
         `prefer ${FISH_COD_BACKOFF_FALLBACKS.join('/')} instead of hammering fish_cod. baitOwned stays true.`
       : meta.hint;
+  if (huntDeferred) {
+    curriculumHint =
+      `EARLY PLAYBOOK hunt deferred (HUNT_ENABLED=false; huntBattles=${huntBattleCount(counts)}/${HUNT_MIN} kept) — ` +
+      `looping coal → fish → cook, now ${stage}. Kill quests wait.`;
+  }
   if (questCurriculum.hint) {
     curriculumHint = `${curriculumHint} ${questCurriculum.hint}`.trim();
   }
@@ -1420,7 +1501,8 @@ export function evaluatePlaybook(
 
   savePersisted({
     version: 1,
-    stage: snapshotDegraded ? persistedStage : stage,
+    stage: snapshotDegraded ? persistedStage : realStage,
+    deferredGatherStage: huntDeferred ? stage : undefined,
     counts,
     baitOwned,
     lastBaitPurchaseAt: persisted.lastBaitPurchaseAt,
@@ -1443,6 +1525,7 @@ export function evaluatePlaybook(
   return {
     enabled: true,
     stage,
+    huntDeferred,
     stageIndex: STAGE_ORDER.indexOf(stage),
     stageGoal: meta.goal,
     preferredActions,
