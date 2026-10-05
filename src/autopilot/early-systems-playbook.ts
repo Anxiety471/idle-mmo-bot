@@ -1525,7 +1525,7 @@ export function evaluatePlaybook(
 
   // Round 11: real bait count too low for a Max batch and food is fine → mine coal / chop oak
   // instead of failing fish_cod or buying bait.
-  if (baitShort && !needsBaitRestockNow) {
+  if (baitShort && !needsBaitRestockNow && stage === 'fish_cod') {
     const alt: AutopilotAction[] = ['mine_coal', 'gather_oak'];
     const off = new Set<AutopilotAction>(['fish_cod', 'buy_bait', ...alt]);
     preferredActions = [...alt, ...preferredActions.filter((a) => !off.has(a))];
@@ -1555,7 +1555,7 @@ export function evaluatePlaybook(
       `EARLY PLAYBOOK hunt deferred (HUNT_ENABLED=false; huntBattles=${huntBattleCount(counts)}/${HUNT_MIN} kept) — ` +
       `looping coal → fish → cook, now ${stage}. Kill quests wait.`;
   }
-  if (baitShort) {
+  if (baitShort && stage === 'fish_cod') {
     curriculumHint =
       `${curriculumHint} EARLY PLAYBOOK bait low (Cheap Bait=${baitCheck.stock} < ${baitMinForFish()}, ` +
       `Cooked Cod=${cookedForBait} >= reserve ${healReserve}) — no fish_cod/buy_bait; mine_coal or gather_oak instead.`.trim();
@@ -2024,8 +2024,10 @@ export function filterAllowedByPlaybook(
   // Round 11: bait too low and food fine → no fish_cod / buy_bait; keep mine_coal / gather_oak.
   if (playbook.baitShort && !needsBaitRestock) {
     next = next.filter((a) => a !== 'fish_cod' && a !== 'buy_bait');
-    for (const a of ['mine_coal', 'gather_oak'] as AutopilotAction[]) {
-      if (allowed.includes(a) && !next.includes(a)) next.push(a);
+    if (playbook.stage === 'fish_cod') {
+      for (const a of ['mine_coal', 'gather_oak'] as AutopilotAction[]) {
+        if (allowed.includes(a) && !next.includes(a)) next.push(a);
+      }
     }
   }
 
