@@ -1,4 +1,4 @@
-import { planSleep, readActionTimerMs, timedSleepEnabled } from './autopilot/action-timer.js';
+import { planSleep, readActionTimerMs, timedSleepEnabled, trustTimerRead } from './autopilot/action-timer.js';
 import { ensureActiveCharacter } from './character/character-select.js';
 import { resolveCharacterPaths } from './character/paths.js';
 import {
@@ -324,7 +324,11 @@ export async function runAutopilot(options: RunAutopilotOptions = {}): Promise<v
             action,
             snapshot.currentAction?.skill,
           );
-          const plan = planSleep({ backoffMs: result.backoffMs, timerMs });
+          const trusted = trustTimerRead(action, timerMs);
+          if (timerMs !== undefined && !trusted) {
+            console.log(`[autopilot] action timer ${Math.round(timerMs / 1000)}s grew while continuing — not trusted, using fallback`);
+          }
+          const plan = planSleep({ backoffMs: result.backoffMs, timerMs: trusted ? timerMs : undefined });
           const wakeAt = new Date(Date.now() + plan.sleepMs).toISOString();
           console.log(
             `[autopilot] sleep ${Math.round(plan.sleepMs / 1000)}s (${plan.source}` +

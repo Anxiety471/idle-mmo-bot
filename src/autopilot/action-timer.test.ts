@@ -6,6 +6,8 @@ import {
   parseCurrentActionRemainingMs,
   planSleep,
   randomBufferMs,
+  resetTimerReadForTest,
+  trustTimerRead,
   timedSleepEnabled,
 } from './action-timer.js';
 import { sellSweepIntervalMs } from './early-systems-playbook.js';
@@ -47,5 +49,14 @@ describe('round 10 timed sleep', () => {
     assert.equal(sellSweepIntervalMs({ SELL_SWEEP_INTERVAL_MS: '3600000' }), 3_600_000);
     assert.equal(sellSweepIntervalMs({ SELL_SWEEP_INTERVAL_MS: '60000' }), 1_800_000);
     assert.equal(sellSweepIntervalMs({ SELL_RETRY_COOLDOWN_MS: '7200000' }), 7_200_000);
+  });
+
+  it('distrusts a timer that grows while the same action continues', () => {
+    resetTimerReadForTest();
+    assert.equal(trustTimerRead('fish_cod', 600_000, 0), true);
+    assert.equal(trustTimerRead('continue_current', 300_000, 300_000), true);
+    assert.equal(trustTimerRead('continue_current', 900_000, 600_000), false);
+    assert.equal(trustTimerRead('cook_cod', 900_000, 700_000), true);
+    assert.equal(trustTimerRead('continue_current', undefined, 800_000), false);
   });
 });

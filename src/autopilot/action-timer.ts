@@ -115,3 +115,23 @@ export async function readActionTimerMs(
     return undefined;
   }
 }
+
+let lastRead: { ms: number; at: number } | undefined;
+
+/**
+ * Guard against reading an elapsed clock as "remaining": while the same action keeps
+ * running (continue_current), a remaining timer must go down roughly with wall time.
+ * If it grew instead, the value is not trusted (fallback poll is used) and logged.
+ */
+export function trustTimerRead(action: string, ms: number | undefined, now = Date.now()): boolean {
+  if (ms === undefined) return false;
+  const prev = lastRead;
+  lastRead = { ms, at: now };
+  if (action !== 'continue_current' || !prev) return true;
+  const expected = prev.ms - (now - prev.at);
+  return ms <= expected + 120_000;
+}
+
+export function resetTimerReadForTest(): void {
+  lastRead = undefined;
+}
