@@ -39,18 +39,26 @@ export function rateLimitBackoffMs(env: NodeJS.ProcessEnv = process.env): number
 
 export interface HttpWatch {
   throttled: number;
+  /** Up to 5 distinct "METHOD /path" (no query) that came back throttled. */
+  throttledPaths: string[];
   livewire: number[];
   stop: () => void;
 }
 
 /** Count throttled responses and Livewire POST statuses while a Battle confirm runs. */
 export function watchHttp(page: Page): HttpWatch {
-  const watch: HttpWatch = { throttled: 0, livewire: [], stop: () => undefined };
+  const watch: HttpWatch = { throttled: 0, throttledPaths: [], livewire: [], stop: () => undefined };
   const onResponse = (resp: { status(): number; url(): string; request(): { method(): string } }) => {
     try {
       const status = resp.status();
       const url = resp.url();
-      if (isThrottleResponse(status, url)) watch.throttled += 1;
+      if (isThrottleResponse(status, url)) {
+        watch.throttled += 1;
+        const key = throttledPathKey(resp.request().method(), url);
+        if (key && watch.throttledPaths.length < 5 && !watch.throttledPaths.includes(key)) {
+          watch.throttledPaths.push(key);
+        }
+      }
       if (resp.request().method() === 'POST' && /\/livewire[^/]*\/update/.test(url)) {
         if (watch.livewire.length < 10) watch.livewire.push(status);
       }
@@ -66,6 +74,19 @@ export function watchHttp(page: Page): HttpWatch {
   target.on('response', onResponse);
   watch.stop = () => target.off?.('response', onResponse);
   return watch;
+}
+
+/** "POST /combat/battle" — path only, long numeric/hex segments collapsed, never the query. */
+export function throttledPathKey(method: string, url: string): string | undefined {
+  try {
+    const path = new URL(url).pathname
+      .split('/')
+      .map((seg) => (/^[0-9a-f]{6,}$/i.test(seg) || /^\d{4,}$/.test(seg) ? ':id' : seg))
+      .join('/');
+    return `${method.toUpperCase()} ${path.slice(0, 60)}`;
+  } catch {
+    return undefined;
+  }
 }
 
 let lastConfirmThrottled = false;
@@ -464,7 +485,7 @@ export function pendingExtraWaitMs(env: NodeJS.ProcessEnv = process.env): number
 async function pendingDiagnostics(page: Page, http?: HttpWatch): Promise<string> {
   const bits: string[] = [];
   if (http) {
-    if (http.throttled > 0) bits.push(`http_throttled=${http.throttled}`);
+    if (http.throttled > 0) bits.push(`http_throttled=${http.throttled} paths=[${http.throttledPaths.join('; ')}]`);
     bits.push(`livewire=[${http.livewire.join(',')}]`);
   }
   try {

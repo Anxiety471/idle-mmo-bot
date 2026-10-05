@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import type { AppConfig } from './config.js';
+import { blockHeavyResources } from './request-budget.js';
 
 export interface BrowserSession {
   browser: Browser;
@@ -18,6 +19,7 @@ export async function launchBrowser(config: AppConfig): Promise<BrowserSession> 
   }
 
   const context = await browser.newContext(contextOptions);
+  await blockHeavyResources(context);
   const page = await context.newPage();
 
   return {

@@ -1,4 +1,5 @@
 import type { Locator, Page } from 'playwright';
+import { claimBattleSlot } from '../request-budget.js';
 import type { AppConfig } from '../config.js';
 import type {
   BattleState,
@@ -2858,6 +2859,9 @@ async function clickEnabledBattle(
     console.log(`[combat] Battle stayed disabled for ${enemyLabel} — ${waited.hint}`);
     return 'disabled';
   }
+  // Round 9: the three bots share one IP — keep Battle clicks BATTLE_MIN_GAP_MS apart.
+  const gapWaited = await claimBattleSlot(process.env.STORAGE_STATE ?? 'bot').catch(() => 0);
+  if (gapWaited > 1000) console.log(`[combat] shared Battle gap: waited ${Math.round(gapWaited / 1000)}s`);
   try {
     await waited.button.scrollIntoViewIfNeeded().catch(() => undefined);
     await waited.button.click({ timeout: 5000 });

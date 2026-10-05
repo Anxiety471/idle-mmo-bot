@@ -1,4 +1,5 @@
 import type { Page } from 'playwright';
+import { noteSharedThrottle, sharedThrottleRemainingMs } from '../request-budget.js';
 import type { AppConfig } from '../config.js';
 import type { HuntState } from '../types.js';
 import { navigateTo } from '../browser.js';
@@ -148,6 +149,12 @@ function combatRoundOutcome(outcome: string, config: AppConfig): CombatRoundResu
 
 async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundResult> {
   const { page, config, jev, forceInterrupt } = ctx;
+  const sharedWait = sharedThrottleRemainingMs();
+  if (sharedWait > 0) {
+    // Round 9: a bot on this box (shared IP) was throttled — no Battle until it clears.
+    console.log(`[combat] shared throttle active — skipping Battle for ${Math.round(sharedWait / 1000)}s`);
+    return { outcome: 'battle:shared_throttle_wait', backoffMs: Math.min(sharedWait, rateLimitBackoffMs()) };
+  }
   const pollMs = effectivePollMs(config.pollMs);
   const huntBackoffMs = verifyBackoffMs(config.pollMs);
   const verifyBudget = createVerifyBudget();
@@ -323,6 +330,8 @@ async function runCombatRound(ctx: ActionExecuteContext): Promise<CombatRoundRes
     const backoffMs = rateLimitBackoffMs();
     console.log(`[combat] Battle throttled by the server (429) — backing off ${Math.round(backoffMs / 1000)}s, no hunt credit`);
     takePackedBattleFood();
+    // Round 9: tell the sibling bots on this box (same IP) to back off as well.
+    noteSharedThrottle(backoffMs, process.env.STORAGE_STATE ?? 'bot');
     return { outcome: 'battle:pending_verify:throttled', backoffMs };
   }
 
