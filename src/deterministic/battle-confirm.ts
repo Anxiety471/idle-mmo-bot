@@ -16,6 +16,65 @@ export type BattleConfirmOutcome =
   | 'pending'
   | 'rejected';
 
+/**
+ * Round 8: HTTP statuses that mean the game/Cloudflare is throttling this IP. A Battle
+ * click whose Livewire request (or its redirect) gets one of these never resolves, so the
+ * button sits on is_processing until the bot gives up with pending_verify.
+ */
+export function isThrottleResponse(status: number, url: string, gameHost = 'idle-mmo.com'): boolean {
+  if (status !== 429 && status !== 503) return false;
+  try {
+    return new URL(url).hostname.endsWith(gameHost);
+  } catch {
+    return false;
+  }
+}
+
+/** Backoff after a throttled Battle (BATTLE_RATE_LIMIT_BACKOFF_MS, default 5 min, max 30 min). */
+export function rateLimitBackoffMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.BATTLE_RATE_LIMIT_BACKOFF_MS);
+  if (Number.isFinite(raw) && raw >= 0) return Math.min(30 * 60_000, Math.floor(raw));
+  return 5 * 60_000;
+}
+
+export interface HttpWatch {
+  throttled: number;
+  livewire: number[];
+  stop: () => void;
+}
+
+/** Count throttled responses and Livewire POST statuses while a Battle confirm runs. */
+export function watchHttp(page: Page): HttpWatch {
+  const watch: HttpWatch = { throttled: 0, livewire: [], stop: () => undefined };
+  const onResponse = (resp: { status(): number; url(): string; request(): { method(): string } }) => {
+    try {
+      const status = resp.status();
+      const url = resp.url();
+      if (isThrottleResponse(status, url)) watch.throttled += 1;
+      if (resp.request().method() === 'POST' && /\/livewire[^/]*\/update/.test(url)) {
+        if (watch.livewire.length < 10) watch.livewire.push(status);
+      }
+    } catch {
+      /* diagnostics only */
+    }
+  };
+  const target = page as unknown as {
+    on?: (event: 'response', fn: typeof onResponse) => void;
+    off?: (event: 'response', fn: typeof onResponse) => void;
+  };
+  if (typeof target.on !== 'function') return watch;
+  target.on('response', onResponse);
+  watch.stop = () => target.off?.('response', onResponse);
+  return watch;
+}
+
+let lastConfirmThrottled = false;
+
+/** True when the most recent confirmBattleStarted saw the game throttling (429/503). */
+export function lastBattleConfirmThrottled(): boolean {
+  return lastConfirmThrottled;
+}
+
 export function battleFoodPerFightCap(): number {
   const env = Number(process.env.BATTLE_FOOD_PER_FIGHT);
   if (Number.isFinite(env) && env > 0) return Math.floor(env);
@@ -228,6 +287,23 @@ export async function confirmBattleStarted(
   page: Page,
   options: ConfirmBattleStartedOptions,
 ): Promise<BattleConfirmOutcome> {
+  lastConfirmThrottled = false;
+  const http = watchHttp(page);
+  try {
+    const outcome = await confirmBattleStartedInner(page, options, http);
+    lastConfirmThrottled =
+      (outcome === 'pending' || outcome === 'accepted_unrendered') && http.throttled > 0;
+    return outcome;
+  } finally {
+    http.stop();
+  }
+}
+
+async function confirmBattleStartedInner(
+  page: Page,
+  options: ConfirmBattleStartedOptions,
+  http: HttpWatch,
+): Promise<BattleConfirmOutcome> {
   const envMs = Number(process.env.COMBAT_FIGHT_CONFIRM_MS);
   const limitMs =
     options.timeoutMs ??
@@ -297,7 +373,7 @@ export async function confirmBattleStarted(
   if (await runAwayVisible(page)) return 'started';
 
   const modalOpen = await isEnemyModalVisible(page);
-  if (options.allowReloadVerify !== false && options.config && !modalOpen) {
+  if (options.allowReloadVerify !== false && options.config && !modalOpen && http.throttled === 0) {
     await navigateTo(page, options.config, COMBAT_PATH);
     await page
       .getByText(CURRENT_ACTION_MARKER)
@@ -317,11 +393,20 @@ export async function confirmBattleStarted(
     // Round 7: the Battle request is still in flight. Before giving up (reload, no credit)
     // wait a little longer — solving a late Quick check — then reload and re-read the
     // battle state so a fight that did start is credited instead of thrown away.
+    if (http.throttled > 0) {
+      // Throttled: the request will not complete and a reload would hit the same 429 /
+      // challenge. Stop here; the caller backs off instead of hammering the server.
+      console.log(
+        `[combat] Battle still processing after ${Math.round(limitMs / 1000)}s — server throttling ` +
+          `(${await pendingDiagnostics(page, http)}); backing off, no reload`,
+      );
+      return 'pending';
+    }
     const extraMs = pendingExtraWaitMs();
     const extraDeadline = Date.now() + extraMs;
     console.log(
       `[combat] Battle still processing after ${Math.round(limitMs / 1000)}s — ` +
-        `waiting up to ${Math.round(extraMs / 1000)}s more (${await pendingDiagnostics(page)})`,
+        `waiting up to ${Math.round(extraMs / 1000)}s more (${await pendingDiagnostics(page, http)})`,
     );
     while (Date.now() < extraDeadline) {
       if (await runAwayVisible(page)) return 'started';
@@ -341,6 +426,10 @@ export async function confirmBattleStarted(
       await page.waitForTimeout(pollMs);
     }
     if (await runAwayVisible(page)) return 'started';
+    if (http.throttled > 0) {
+      console.log(`[combat] Battle pending — server throttling (${await pendingDiagnostics(page, http)}); no reload`);
+      return 'pending';
+    }
     if (options.config) {
       await navigateTo(page, options.config, COMBAT_PATH);
       await page
@@ -372,8 +461,12 @@ export function pendingExtraWaitMs(env: NodeJS.ProcessEnv = process.env): number
 }
 
 /** Short, non-sensitive UI hints for a stuck Battle: toast text and overlay flags. */
-async function pendingDiagnostics(page: Page): Promise<string> {
+async function pendingDiagnostics(page: Page, http?: HttpWatch): Promise<string> {
   const bits: string[] = [];
+  if (http) {
+    if (http.throttled > 0) bits.push(`http_throttled=${http.throttled}`);
+    bits.push(`livewire=[${http.livewire.join(',')}]`);
+  }
   try {
     const toasts = page.locator('[data-sonner-toast]').filter({ visible: true });
     const n = await toasts.count();
@@ -387,5 +480,6 @@ async function pendingDiagnostics(page: Page): Promise<string> {
   } catch {
     /* diagnostics only */
   }
-  return bits.length ? bits.join(' ') : 'no toast/captcha/overlay';
+  const ui = bits.filter((b) => !b.startsWith('livewire=') && !b.startsWith('http_throttled='));
+  return ui.length ? bits.join(' ') : `${bits.join(' ')} no toast/captcha/overlay`.trim();
 }
