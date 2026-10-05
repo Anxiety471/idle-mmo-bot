@@ -56,11 +56,36 @@ export function deriveAllowedActions(
   }
 
   const playbook = getPlaybookFromSnapshot(snapshot);
-  if (playbook) {
-    return filterAllowedByPlaybook(allowed, snapshot, playbook);
-  }
+  const filtered = playbook ? filterAllowedByPlaybook(allowed, snapshot, playbook) : allowed;
+  return applyHuntSwitch(filtered, allowed);
+}
 
-  return allowed;
+/** Actions that start a hunt or Battle. HUNT_ENABLED=false removes them. */
+export const HUNT_ACTIONS: readonly AutopilotActionId[] = ['hunt_battle', 'hunt_battle_batch', 'hunt_rabbits'];
+const SPEND_ACTIONS: readonly AutopilotActionId[] = ['buy_bait', 'market_sell_half', 'sell_junk_for_gold', 'sell_junk'];
+
+export function huntEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return !/^(0|false|no|off)$/i.test(env.HUNT_ENABLED?.trim() ?? '');
+}
+
+/**
+ * Round 9: per-character hunting switch. With HUNT_ENABLED=false hunt/Battle actions are
+ * dropped; while the playbook sits in a hunt stage its filter would leave little else, so
+ * the non-hunt, non-spend actions the registry allowed (gather, fish, cook, continue) are
+ * added back so the bot keeps gathering. Kill quests simply wait.
+ */
+export function applyHuntSwitch(
+  filtered: AutopilotActionId[],
+  raw: AutopilotActionId[],
+  env: NodeJS.ProcessEnv = process.env,
+): AutopilotActionId[] {
+  if (huntEnabled(env)) return filtered;
+  const out = filtered.filter((a) => !HUNT_ACTIONS.includes(a));
+  for (const a of raw) {
+    if (HUNT_ACTIONS.includes(a) || SPEND_ACTIONS.includes(a) || out.includes(a)) continue;
+    out.push(a);
+  }
+  return out.length ? out : ['idle'];
 }
 
 export async function executeRegisteredAction(
