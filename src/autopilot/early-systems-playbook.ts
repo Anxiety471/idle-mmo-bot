@@ -956,6 +956,17 @@ export function huntingDeferred(env: NodeJS.ProcessEnv = process.env): boolean {
   return /^(0|false|no|off)$/i.test(env.HUNT_ENABLED?.trim() ?? '');
 }
 
+/**
+ * Round 11c: hunting is ON, the persisted stage is already hunt_battle_batch, and cook
+ * food is met. A dipped rawCod soft latch (cooking consumes the bag) must not demote
+ * that stage to fish_cod — Round 11b bait-short then rewrote the false fish stage into
+ * mine_coal/gather_oak. Legitimate cook→fish snaps stay (this is hunt-only).
+ * HUNT_ENABLED=false does not take this path.
+ */
+function keepHuntBatchDespiteRawDip(stage: string, cookMet: boolean): boolean {
+  return !huntingDeferred() && stage === 'hunt_battle_batch' && cookMet;
+}
+
 /** Quest titles whose objective is killing (Goblin/Duck/Rabbit hunts, Defeat/Kill/Slay …). */
 export const KILL_QUEST_TITLE = /\b(kill|defeat|slay|hunt|goblin|duck|rabbit|menace|fortune|whisper)\b/i;
 
@@ -1263,7 +1274,10 @@ export function evaluatePlaybook(
     !snapshotDegraded &&
     !fishMet &&
     persistedIdx > STAGE_ORDER.indexOf('fish_cod') &&
-    !(huntMet && persistedStage === 'hunt_battle_batch')
+    !(huntMet && persistedStage === 'hunt_battle_batch') &&
+    // Round 11c: do not demote an active hunt back to fish just because rawCod dipped
+    // after cooking while cook food is already met.
+    !keepHuntBatchDespiteRawDip(persistedStage, cookMet)
   ) {
     if (!trustHasBait(snapshot, baitOwned, persisted.stage)) {
       stage = counts.sells < 1 && !canSkipSellHalfForQuestFunding(snapshot) ? 'sell_half' : 'buy_bait';
@@ -1554,7 +1568,14 @@ export function evaluatePlaybook(
 
   // Round 11: real bait count too low for a Max batch and food is fine → mine coal / chop oak
   // instead of failing fish_cod or buying bait.
-  if (baitShort && !needsBaitRestockNow && stage === 'fish_cod') {
+  // Round 11c: never apply that divert after a false fish snap from hunt_battle_batch while
+  // hunting is ON and cook food is fine — bait-missing must only gate fishing then.
+  const baitShortDivertGather =
+    baitShort &&
+    !needsBaitRestockNow &&
+    stage === 'fish_cod' &&
+    !keepHuntBatchDespiteRawDip(persistedStage, cookMet);
+  if (baitShortDivertGather) {
     const alt: AutopilotAction[] = ['mine_coal', 'gather_oak'];
     const off = new Set<AutopilotAction>(['fish_cod', 'buy_bait', ...alt]);
     preferredActions = [...alt, ...preferredActions.filter((a) => !off.has(a))];
@@ -1582,7 +1603,7 @@ export function evaluatePlaybook(
       `EARLY PLAYBOOK hunt deferred (HUNT_ENABLED=false; huntBattles=${huntBattleCount(counts)}/${HUNT_MIN} kept) — ` +
       `looping coal → fish → cook, now ${stage}. Kill quests wait.`;
   }
-  if (baitShort && stage === 'fish_cod') {
+  if (baitShortDivertGather) {
     curriculumHint =
       `${curriculumHint} EARLY PLAYBOOK bait low (Cheap Bait=${baitCheck.stock} < ${baitMinForFish()}, ` +
       `Cooked Cod=${cookedForBait} >= reserve ${healReserve}) — no fish_cod/buy_bait; mine_coal or gather_oak instead.`.trim();
@@ -1977,6 +1998,14 @@ export function filterAllowedByPlaybook(
   // Strict sequential gates: drop later-stage actions while earlier real targets unmet.
   const coalIncomplete = !coalTargetMet(playbook.counts);
   const fishIncomplete = !fishTargetMet(playbook.counts);
+  // Round 11c: a dipped rawCod latch must not strip hunt while hunting is ON, the stage
+  // is still hunt_battle_batch, and cook food is met. Bait-short only gates fishing.
+  const keepHuntDespiteRawDip =
+    playbook.huntDeferred !== true &&
+    keepHuntBatchDespiteRawDip(
+      playbook.stage,
+      cookTargetMet(playbook.counts, snapshot.inventory, playbook.stage),
+    );
   const cookIncomplete = !cookTargetMet(
     playbook.counts,
     snapshot.inventory,
@@ -2004,7 +2033,7 @@ export function filterAllowedByPlaybook(
     if (allowed.includes('mine_coal') && !next.includes('mine_coal')) {
       next.push('mine_coal');
     }
-  } else if (fishIncomplete || playbook.stage === 'fish_cod') {
+  } else if ((fishIncomplete || playbook.stage === 'fish_cod') && !keepHuntDespiteRawDip) {
     next = next.filter((a) => a !== 'cook_cod' && !isHuntCombatAction(a));
   } else if (cookIncomplete || playbook.stage === 'cook_cod') {
     next = next.filter((a) => !isHuntCombatAction(a));
