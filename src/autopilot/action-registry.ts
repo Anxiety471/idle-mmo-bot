@@ -1,3 +1,4 @@
+import { isKillQuestTitle } from './early-systems-playbook.js';
 import type { AppConfig } from '../config.js';
 import type { ActionAllowContext, ActionDefinition, ActionExecuteContext, AutopilotActionId } from './action-types.js';
 import type { AutopilotContext, GameSnapshot, ActionResult } from '../types.js';
@@ -57,7 +58,13 @@ export function deriveAllowedActions(
 
   const playbook = getPlaybookFromSnapshot(snapshot);
   const filtered = playbook ? filterAllowedByPlaybook(allowed, snapshot, playbook) : allowed;
-  return applyHuntSwitch(filtered, allowed);
+  const switched = applyHuntSwitch(filtered, allowed);
+  if (!huntEnabled() && !snapshot.pendingQuests.some((q) => !isKillQuestTitle(q.title))) {
+    // Round 9: hunting off — talking to a quest giver about a kill quest only stalls.
+    const noTalk = switched.filter((a) => a !== 'quest_talk_accept');
+    return noTalk.length ? noTalk : ['idle'];
+  }
+  return switched;
 }
 
 /** Actions that start a hunt or Battle. HUNT_ENABLED=false removes them. */
