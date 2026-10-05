@@ -922,9 +922,13 @@ export function deferredGatherStage(
     cook_cod: bag.rawCod > 0 && bag.coal > 0 ? bag.cooked / Math.max(1, targets.cook) : Number.POSITIVE_INFINITY,
   };
   const order: DeferredGatherStage[] = ['mine_coal', 'fish_cod', 'cook_cod'];
-  let best: DeferredGatherStage = order[0];
-  for (const s of order) if (ratio[s] < ratio[best]) best = s;
-  if (previous && (order as string[]).includes(previous)) {
+  // Round 10: only a stage below its target qualifies; once every target is met, never
+  // cook more — keep fishing or mining (whichever is lower) as a long auto-run.
+  const below = order.filter((s) => ratio[s] < 1);
+  const pool = below.length > 0 ? below : (['mine_coal', 'fish_cod'] as DeferredGatherStage[]);
+  let best: DeferredGatherStage = pool[0];
+  for (const s of pool) if (ratio[s] < ratio[best]) best = s;
+  if (previous && (pool as string[]).includes(previous)) {
     const prev = previous as DeferredGatherStage;
     if (Number.isFinite(ratio[prev]) && ratio[prev] <= ratio[best] * 1.5 + 0.05) return prev;
   }
@@ -1280,7 +1284,15 @@ export function evaluatePlaybook(
   // Round 9: HUNT_ENABLED=false defers the hunt stage (not completed: huntBattles is kept)
   // and loops coal → fish → cook instead. The real stage is what gets persisted.
   const realStage = stage;
-  const huntDeferred = !snapshotDegraded && huntingDeferred() && stage === 'hunt_battle_batch';
+  // Sticky: once in the deferred loop, a snap-back to coal/fish/cook stays in the loop
+  // (otherwise cook_cod would restart every cycle on a tiny tail batch).
+  const huntDeferred =
+    !snapshotDegraded &&
+    huntingDeferred() &&
+    (stage === 'hunt_battle_batch' ||
+      persistedStage === 'hunt_battle_batch' ||
+      (Boolean(persisted.deferredGatherStage) &&
+        (stage === 'mine_coal' || stage === 'fish_cod' || stage === 'cook_cod')));
   if (huntDeferred) {
     stage = deferredGatherStage(
       {
@@ -1510,7 +1522,7 @@ export function evaluatePlaybook(
 
   savePersisted({
     version: 1,
-    stage: snapshotDegraded ? persistedStage : realStage,
+    stage: snapshotDegraded ? persistedStage : huntDeferred && coalTargetMet(counts) ? 'hunt_battle_batch' : realStage,
     deferredGatherStage: huntDeferred ? stage : undefined,
     counts,
     baitOwned,
