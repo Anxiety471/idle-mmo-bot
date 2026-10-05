@@ -75,6 +75,31 @@ export class ProgressiveStubJev implements SupervisorAdvisor {
     const questCurriculum =
       playbook?.questCurriculum ?? evaluateQuestCurriculum(snapshot);
 
+    // Round 11b: bait missing and food below the reserve → restock first (gold floor checked upstream).
+    if (playbook?.enabled && !playbook.complete && playbook.baitRestockForHeal && playbook.stage === 'fish_cod') {
+      const buy = pickAllowed(allowed, ['buy_bait']);
+      if (buy) return buy;
+    }
+    // Round 11b: bait missing on the fish stage (food fine) → mine coal / chop oak at Max.
+    // Not sell, not idle, not fish. Already on coal/oak → keep going.
+    if (
+      playbook?.enabled &&
+      !playbook.complete &&
+      playbook.baitShort &&
+      playbook.stage === 'fish_cod' &&
+      !snapshot.flags.inBattle
+    ) {
+      const turnIn = pickAllowed(allowed, ['quest_turnin']);
+      if (turnIn) return turnIn;
+      const res = snapshot.currentAction?.resource ?? snapshot.currentAction?.label ?? '';
+      if (snapshot.currentAction?.busy && /coal|oak/i.test(res)) {
+        const cont = pickAllowed(allowed, ['continue_current']);
+        if (cont) return cont;
+      }
+      const gather = pickAllowed(allowed, ['mine_coal', 'gather_oak']);
+      if (gather) return gather;
+    }
+
     if (questCurriculum.hasEasyFinishableQuest) {
       const turnIn = pickAllowed(allowed, ['quest_turnin']);
       if (turnIn) return turnIn;
