@@ -74,7 +74,7 @@ describe('round 9 hunt deferral (HUNT_ENABLED=false)', () => {
     process.env.EARLY_PLAYBOOK = 'true';
     process.env.HUNT_ENABLED = 'false';
     writeFileSync(statePath, `${JSON.stringify({ version: 1, stage: 'hunt_battle_batch', counts: counts(), baitOwned: true })}\n`);
-    const inv = { 'Coal Ore': 5500, 'Raw Cod': 149, 'Cooked Cod': 100, 'Cheap Bait': 5 };
+    const inv = { 'Coal Ore': 5500, 'Raw Cod': 149, 'Cooked Cod': 100, 'Cheap Bait': 50 };
     const p = evaluatePlaybook(snap(inv, ['Goblin Menace']));
     assert.equal(p.huntDeferred, true);
     assert.ok(['mine_coal', 'fish_cod', 'cook_cod'].includes(p.stage), p.stage);
@@ -95,7 +95,7 @@ describe('round 9 hunt deferral (HUNT_ENABLED=false)', () => {
     process.env.EARLY_PLAYBOOK = 'true';
     process.env.HUNT_ENABLED = 'false';
     writeFileSync(statePath, `${JSON.stringify({ version: 1, stage: 'hunt_battle_batch', counts: counts(), baitOwned: true })}\n`);
-    const p = evaluatePlaybook(snap({ 'Coal Ore': 5500, 'Raw Cod': 149, 'Cooked Cod': 100, 'Cheap Bait': 5 }, ['Gather Oak for the Mill']));
+    const p = evaluatePlaybook(snap({ 'Coal Ore': 5500, 'Raw Cod': 149, 'Cooked Cod': 100, 'Cheap Bait': 50 }, ['Gather Oak for the Mill']));
     assert.equal(p.huntDeferred, true);
     assert.equal(p.preferredActions.at(-1) === 'quest_talk_accept' || p.preferredActions.indexOf('quest_talk_accept') > 3, true);
   });
@@ -106,7 +106,7 @@ describe('round 9 hunt deferral (HUNT_ENABLED=false)', () => {
     process.env.EARLY_PLAYBOOK = 'true';
     delete process.env.HUNT_ENABLED;
     writeFileSync(statePath, `${JSON.stringify({ version: 1, stage: 'hunt_battle_batch', counts: counts(), baitOwned: true })}\n`);
-    const p = evaluatePlaybook(snap({ 'Coal Ore': 5500, 'Raw Cod': 149, 'Cooked Cod': 100, 'Cheap Bait': 5 }));
+    const p = evaluatePlaybook(snap({ 'Coal Ore': 5500, 'Raw Cod': 149, 'Cooked Cod': 100, 'Cheap Bait': 50 }));
     assert.equal(p.stage, 'hunt_battle_batch');
     assert.ok(!p.huntDeferred);
   });
@@ -117,7 +117,7 @@ describe('round 9 hunt deferral (HUNT_ENABLED=false)', () => {
     process.env.EARLY_PLAYBOOK = 'true';
     process.env.HUNT_ENABLED = 'false';
     writeFileSync(statePath, `${JSON.stringify({ version: 1, stage: 'cook_cod', deferredGatherStage: 'cook_cod', counts: counts({ cookedCod: 20 }), baitOwned: true })}\n`);
-    const p = evaluatePlaybook(snap({ 'Coal Ore': 5500, 'Raw Cod': 149, 'Cooked Cod': 103, 'Cheap Bait': 5 }));
+    const p = evaluatePlaybook(snap({ 'Coal Ore': 5500, 'Raw Cod': 149, 'Cooked Cod': 103, 'Cheap Bait': 50 }));
     assert.equal(p.huntDeferred, true);
     assert.equal(p.stage, 'fish_cod');
     assert.match(p.curriculumHint, /hunt deferred/);

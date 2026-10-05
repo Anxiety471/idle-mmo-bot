@@ -27,6 +27,7 @@ import { cookedCodCount, needsCookBeforeHunt } from '../deterministic/combat.js'
 import { shouldHardStopHunt } from '../deterministic/hunt-cap.js';
 import { hasLargeSurplus } from '../deterministic/sell-junk-for-gold.js';
 import { baitPurchaseAllowedByGold } from '../deterministic/merchant.js';
+import { parseHealFoodReserve } from '../deterministic/heal-plan.js';
 import { hasEasyCompletePendingQuest } from '../deterministic/quest-accept.js';
 import {
   baitCountLooksLikePresenceFallback,
@@ -135,6 +136,10 @@ export interface PlaybookProgress {
   sellSurplusDue?: boolean;
   /** A heal was refused to keep the Cooked Cod reserve — cook up to the cook target first. */
   healReserveLow?: boolean;
+  /** Round 11: real bait count is below a Max fish batch — fish_cod/buy_bait are off unless food is low. */
+  baitShort?: boolean;
+  /** Round 11: bait short and Cooked Cod below HEAL_FOOD_RESERVE — restock bait (gold floor) to fish for heals. */
+  baitRestockForHeal?: boolean;
 }
 
 interface PersistedPlaybook {
@@ -171,6 +176,8 @@ interface PersistedPlaybook {
   healReserveLowAt?: string;
   /** Round 9: last coal/fish/cook pick while hunting is deferred (HUNT_ENABLED=false). */
   deferredGatherStage?: string;
+  /** Round 11: bait count seen by the last evaluate (re-checked after repeated fish failures). */
+  lastBaitStock?: number;
 }
 
 /** Sequential batch stages only — manage_pets is async and not in this order. */
@@ -373,6 +380,7 @@ function loadPersisted(): PersistedPlaybook {
       lastGatherResource: parsed.lastGatherResource,
       consecutiveFishCodFailures: parsed.consecutiveFishCodFailures ?? 0,
       fishCodBackoffUntil: parsed.fishCodBackoffUntil,
+      lastBaitStock: typeof parsed.lastBaitStock === 'number' ? parsed.lastBaitStock : undefined,
       lastCoalProgressSeen: parsed.lastCoalProgressSeen,
       staleCoalBusyCycles: parsed.staleCoalBusyCycles ?? 0,
       questTalkNoActionCycles: parsed.questTalkNoActionCycles ?? 0,
@@ -448,10 +456,53 @@ export function shouldPreferBaitRestock(
   stage: EarlyStageId | string | undefined,
   baitStock: number,
   lastBaitPurchaseAt: string | undefined,
+  cookedCod?: number,
+  env: NodeJS.ProcessEnv = process.env,
 ): boolean {
   if (stage !== 'fish_cod') return false;
   if (recentBaitPurchase(lastBaitPurchaseAt)) return false;
-  return baitStock < 15;
+  // Round 11: only restock when food is below the heal reserve (fishing is needed to heal).
+  if (cookedCod !== undefined && cookedCod >= parseHealFoodReserve(env)) return false;
+  return baitStock < baitMinForFish(env);
+}
+
+/** Round 11: bait below this can't run a Max fish batch (BAIT_MIN_FOR_FISH, default 15). */
+export function baitMinForFish(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.BAIT_MIN_FOR_FISH);
+  return Number.isFinite(raw) && raw >= 1 ? Math.min(1000, Math.floor(raw)) : 15;
+}
+
+/** Fishing failures in a row after which the bait count is re-checked before blaming the UI. */
+export const FISH_FAIL_BAIT_RECHECK = 2;
+
+export interface BaitStockCheck {
+  stock: number;
+  /** Count is a real read (not a degraded snapshot / presence fallback of 1). */
+  trusted: boolean;
+  /** Below a Max batch: fishing would fail or barely run. */
+  short: boolean;
+}
+
+/**
+ * Round 11: read the real bait count. A count is short when it is below baitMinForFish().
+ * A presence-fallback "1" is only believed after more than FISH_FAIL_BAIT_RECHECK fishing
+ * failures in a row (re-check before blaming the UI). A fresh purchase still in its cooldown
+ * is trusted over a low scrape.
+ */
+export function checkBaitStock(
+  snapshot: GameSnapshot,
+  lastBaitPurchaseAt: string | undefined,
+  consecutiveFishFailures = 0,
+  env: NodeJS.ProcessEnv = process.env,
+): BaitStockCheck {
+  const stock = (snapshot.inventory['Cheap Bait'] ?? 0) + (snapshot.inventory['Bait'] ?? 0);
+  const degraded = Boolean(snapshot.flags.snapshotDegraded);
+  const trusted =
+    !degraded &&
+    !baitCountLooksLikePresenceFallback(snapshot.inventory, Boolean(snapshot.flags.baitCountUntrusted));
+  const believe = trusted || (!degraded && consecutiveFishFailures > FISH_FAIL_BAIT_RECHECK);
+  const short = believe && stock < baitMinForFish(env) && !recentBaitPurchase(lastBaitPurchaseAt);
+  return { stock, trusted, short };
 }
 
 
@@ -915,6 +966,7 @@ export function deferredGatherStage(
   bag: { coal: number; rawCod: number; cooked: number },
   targets: { coal: number; cod: number; cook: number },
   previous?: string,
+  opts: { noFish?: boolean } = {},
 ): DeferredGatherStage {
   const ratio: Record<DeferredGatherStage, number> = {
     mine_coal: bag.coal / Math.max(1, targets.coal),
@@ -924,8 +976,11 @@ export function deferredGatherStage(
   const order: DeferredGatherStage[] = ['mine_coal', 'fish_cod', 'cook_cod'];
   // Round 10: only a stage below its target qualifies; once every target is met, never
   // cook more — keep fishing or mining (whichever is lower) as a long auto-run.
+  // Round 11: no bait → never pick fish_cod (mine instead).
+  if (opts.noFish) ratio.fish_cod = Number.POSITIVE_INFINITY;
   const below = order.filter((s) => ratio[s] < 1);
-  const pool = below.length > 0 ? below : (['mine_coal', 'fish_cod'] as DeferredGatherStage[]);
+  const fallback: DeferredGatherStage[] = opts.noFish ? ['mine_coal'] : ['mine_coal', 'fish_cod'];
+  const pool = below.length > 0 ? below : fallback;
   let best: DeferredGatherStage = pool[0];
   for (const s of pool) if (ratio[s] < ratio[best]) best = s;
   if (previous && (pool as string[]).includes(previous)) {
@@ -1293,6 +1348,20 @@ export function evaluatePlaybook(
       persistedStage === 'hunt_battle_batch' ||
       (Boolean(persisted.deferredGatherStage) &&
         (stage === 'mine_coal' || stage === 'fish_cod' || stage === 'cook_cod')));
+  const baitCheck = checkBaitStock(
+    snapshot,
+    persisted.lastBaitPurchaseAt,
+    persisted.consecutiveFishCodFailures ?? 0,
+  );
+  const cookedForBait = cookedCodCount(snapshot.inventory);
+  const healReserve = parseHealFoodReserve();
+  const baitRestockForHeal =
+    !snapshotDegraded &&
+    baitCheck.short &&
+    cookedForBait < healReserve &&
+    baitPurchaseAllowedByGold(snapshot.gold);
+  // Bait short and no heal-driven restock → don't fish or buy bait; mine/chop instead.
+  const baitShort = !snapshotDegraded && baitCheck.short && !baitRestockForHeal;
   if (huntDeferred) {
     stage = deferredGatherStage(
       {
@@ -1302,6 +1371,7 @@ export function evaluatePlaybook(
       },
       { coal: COAL_MIN, cod: COD_MIN, cook: COOK_MIN },
       persisted.deferredGatherStage,
+      { noFish: baitShort },
     );
   }
 
@@ -1348,7 +1418,7 @@ export function evaluatePlaybook(
   const needsBaitRestockNow =
     !snapshotDegraded &&
     !baitUntrusted &&
-    shouldPreferBaitRestock(stage, baitStock, persisted.lastBaitPurchaseAt) &&
+    shouldPreferBaitRestock(stage, baitStock, persisted.lastBaitPurchaseAt, cookedForBait) &&
     baitPurchaseAllowedByGold(snapshot.gold);
   if (needsBaitRestockNow) {
     preferredActions = [
@@ -1453,6 +1523,22 @@ export function evaluatePlaybook(
     deprioritizedActions = deprioritizedActions.filter((a) => !work.includes(a));
   }
 
+  // Round 11: real bait count too low for a Max batch and food is fine → mine coal / chop oak
+  // instead of failing fish_cod or buying bait.
+  if (baitShort && !needsBaitRestockNow) {
+    const alt: AutopilotAction[] = ['mine_coal', 'gather_oak'];
+    const off = new Set<AutopilotAction>(['fish_cod', 'buy_bait', ...alt]);
+    preferredActions = [...alt, ...preferredActions.filter((a) => !off.has(a))];
+    const hadFish = interruptActions.includes('fish_cod');
+    interruptActions = interruptActions.filter((a) => a !== 'fish_cod' && a !== 'buy_bait');
+    if ((hadFish || stage === 'fish_cod') && !interruptActions.includes('mine_coal')) interruptActions.unshift('mine_coal');
+    deprioritizedActions = [
+      ...deprioritizedActions.filter((a) => !alt.includes(a) && a !== 'fish_cod' && a !== 'buy_bait'),
+      'fish_cod',
+      'buy_bait',
+    ];
+  }
+
   const baitPurchaseRecent = recentBaitPurchase(persisted.lastBaitPurchaseAt);
   let curriculumHint = snapBackReason
     ? `EARLY PLAYBOOK ${snapBackReason}. Strict real-count batch gates.`
@@ -1468,6 +1554,15 @@ export function evaluatePlaybook(
     curriculumHint =
       `EARLY PLAYBOOK hunt deferred (HUNT_ENABLED=false; huntBattles=${huntBattleCount(counts)}/${HUNT_MIN} kept) — ` +
       `looping coal → fish → cook, now ${stage}. Kill quests wait.`;
+  }
+  if (baitShort) {
+    curriculumHint =
+      `${curriculumHint} EARLY PLAYBOOK bait low (Cheap Bait=${baitCheck.stock} < ${baitMinForFish()}, ` +
+      `Cooked Cod=${cookedForBait} >= reserve ${healReserve}) — no fish_cod/buy_bait; mine_coal or gather_oak instead.`.trim();
+  } else if (baitRestockForHeal) {
+    curriculumHint =
+      `${curriculumHint} EARLY PLAYBOOK bait low and Cooked Cod=${cookedForBait} < reserve ${healReserve} — ` +
+      `restock bait (gold floor applies) and fish to heal.`.trim();
   }
   if (questCurriculum.hint) {
     curriculumHint = `${curriculumHint} ${questCurriculum.hint}`.trim();
@@ -1524,6 +1619,7 @@ export function evaluatePlaybook(
     version: 1,
     stage: snapshotDegraded ? persistedStage : huntDeferred && coalTargetMet(counts) ? 'hunt_battle_batch' : realStage,
     deferredGatherStage: huntDeferred ? stage : undefined,
+    lastBaitStock: snapshotDegraded ? persisted.lastBaitStock : baitCheck.stock,
     counts,
     baitOwned,
     lastBaitPurchaseAt: persisted.lastBaitPurchaseAt,
@@ -1578,6 +1674,8 @@ export function evaluatePlaybook(
     questTurninFailCycles,
     questCurriculum,
     sellSurplusDue,
+    baitShort,
+    baitRestockForHeal,
     healReserveLow: Boolean(healReserveLowNext),
   };
 }
@@ -1626,9 +1724,19 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
     }
   }
   if (action === 'fish_cod' && /failed|fishing_start_failed|missing_requirement/i.test(outcome)) {
+    const lastBait = persisted.lastBaitStock;
+    const baitLowOnRecheck =
+      lastBait !== undefined && lastBait < baitMinForFish() && !recentBaitPurchase(lastBaitPurchaseAt);
     if (/failed|fishing_start_failed/i.test(outcome)) {
       consecutiveFishCodFailures += 1;
-      if (consecutiveFishCodFailures >= FISH_COD_FAILURE_THRESHOLD) {
+      if (consecutiveFishCodFailures > FISH_FAIL_BAIT_RECHECK && baitLowOnRecheck) {
+        // Round 11: re-check bait before blaming the UI — the next evaluate treats it as missing bait.
+        console.warn(
+          `[playbook] fish_cod failed ${consecutiveFishCodFailures}x — bait re-check: Cheap Bait=${lastBait} < ` +
+            `${baitMinForFish()} → bait missing (not a UI failure); switching to mine_coal/gather_oak ` +
+            'unless Cooked Cod is below HEAL_FOOD_RESERVE.',
+        );
+      } else if (consecutiveFishCodFailures >= FISH_COD_FAILURE_THRESHOLD) {
         fishCodBackoffUntil = new Date(Date.now() + FISH_COD_BACKOFF_MS).toISOString();
         console.warn(
           `[playbook] fish_cod start failed ${consecutiveFishCodFailures}x — backoff until ${fishCodBackoffUntil} ` +
@@ -1638,7 +1746,9 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
     }
     // Do NOT clear baitOwned or retreat to buy_bait. Inventory scrape / Start UI / captcha
     // often false-flags missing bait while Cheap Bait is already owned.
-    if (baitOwned || STAGE_ORDER.indexOf(stage) > STAGE_ORDER.indexOf('buy_bait')) {
+    if (baitLowOnRecheck) {
+      // Logged above / handled by the bait check in evaluatePlaybook.
+    } else if (baitOwned || STAGE_ORDER.indexOf(stage) > STAGE_ORDER.indexOf('buy_bait')) {
       console.warn(
         '[playbook] fish_cod missing_requirement with bait trusted — treating as fishing-start failure ' +
           '(UI/captcha/Start/quantity), NOT missing bait. baitOwned stays true.',
@@ -1739,6 +1849,7 @@ export function notePlaybookOutcome(action: AutopilotAction, outcome: string): v
     lastGatherResource,
     consecutiveFishCodFailures,
     fishCodBackoffUntil,
+    lastBaitStock: persisted.lastBaitStock,
     lastCoalProgressSeen,
     staleCoalBusyCycles,
     questTalkNoActionCycles,
@@ -1893,7 +2004,12 @@ export function filterAllowedByPlaybook(
       snapshot.inventory,
       Boolean(snapshot.flags.baitCountUntrusted),
     ) &&
-    shouldPreferBaitRestock(playbook.stage, baitCount, playbook.lastBaitPurchaseAt) &&
+    shouldPreferBaitRestock(
+      playbook.stage,
+      baitCount,
+      playbook.lastBaitPurchaseAt,
+      cookedCodCount(snapshot.inventory),
+    ) &&
     baitPurchaseAllowedByGold(snapshot.gold);
   const baitGoldBlocked = !baitPurchaseAllowedByGold(snapshot.gold);
   const pastBuyBait = STAGE_ORDER.indexOf(playbook.stage) > STAGE_ORDER.indexOf('buy_bait');
@@ -1904,6 +2020,13 @@ export function filterAllowedByPlaybook(
     if (allowed.includes('buy_bait') && !next.includes('buy_bait')) next.push('buy_bait');
     // Hard-prefer: drop craft spam while bait is the missing requirement.
     next = next.filter((a) => a !== 'craft_if_ready');
+  }
+  // Round 11: bait too low and food fine → no fish_cod / buy_bait; keep mine_coal / gather_oak.
+  if (playbook.baitShort && !needsBaitRestock) {
+    next = next.filter((a) => a !== 'fish_cod' && a !== 'buy_bait');
+    for (const a of ['mine_coal', 'gather_oak'] as AutopilotAction[]) {
+      if (allowed.includes(a) && !next.includes(a)) next.push(a);
+    }
   }
 
   // Easy-complete pending quests (e.g. Hearth 150/150) should win over continue_current.
